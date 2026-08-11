@@ -50,8 +50,87 @@ def criar_usuarios():
     if senha_correspondente(senha, confirmar_senha) == False:
         return jsonify({"error": "Senhas não correspondem"}), 400
 
+    from consulta_oab import consultar_oab
+
+    if tipo == 0:
+
+        if not num_oab:
+            return jsonify({
+                "error": "Número da OAB é obrigatório"
+            }), 400
+
+        if not uf_oab:
+            return jsonify({
+                "error": "UF da OAB é obrigatória"
+            }), 400
+
+        try:
+
+            print(
+                f"Consultando OAB: {uf_oab}-{num_oab} | Nome: {nome}"
+            )
+
+            resultado_oab = consultar_oab(
+                uf_oab=uf_oab,
+                num_oab=num_oab,
+                nome=nome,
+                apenas_regular=True
+            )
+
+            print("Resultado da OAB:")
+            print(resultado_oab)
+
+        except Exception as e:
+
+            print(
+                f"Erro ao consultar OAB: {e}"
+            )
+
+            return jsonify({
+                "error": "Erro ao consultar a OAB."
+            }), 500
+
+        if not resultado_oab:
+            return jsonify({
+                "error": "Não foi possível obter uma resposta da OAB."
+            }), 400
+
+        items = resultado_oab.get(
+            "items",
+            []
+        )
+
+        if not items:
+            return jsonify({
+                "error": resultado_oab.get(
+                    "mensagem",
+                    "OAB não encontrada ou não está regular."
+                )
+            }), 400
+
+        advogado = items[0]
+
+        nome_oab = advogado.get(
+            "nome",
+            ""
+        )
+
+        if nome.strip().upper() != nome_oab.strip().upper():
+            return jsonify({
+                "error": "O nome informado não corresponde ao nome cadastrado na OAB.",
+                "nome_informado": nome,
+                "nome_oab": nome_oab
+            }), 400
+
+        print(
+            f"OAB validada com sucesso: "
+            f"{uf_oab}-{num_oab} - {nome_oab}"
+        )
+
 
     senha_cripto = generate_password_hash(senha).decode('utf-8')
+
+
 
     con = conexao()
     cur = con.cursor()
