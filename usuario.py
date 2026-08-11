@@ -5,12 +5,11 @@ from main import app
 from db import conexao
 import os
 import datetime
-
+import concurrent.futures
 
 
 @app.route('/criar_usuarios', methods=['POST'])
 def criar_usuarios():
-
     nome = request.form.get('nome')
     email = request.form.get('email')
     cpf = request.form.get('cpf_cnpj')
@@ -19,7 +18,6 @@ def criar_usuarios():
     confirmar_senha = request.form.get('confirmar_senha')
     tipo = request.form.get('tipo')
 
-
     rg = request.form.get('rg')
     orgao_expedidor = request.form.get('orgao_expedidor')
     num_oab = request.form.get('num_oab')
@@ -27,65 +25,85 @@ def criar_usuarios():
     nacionalidade = request.form.get('nacionalidade')
     estado_civil = request.form.get('estado_civil')
 
+    if not nome:
+        return jsonify({"error": "Nome é obrigatório"}), 400
 
-    if not nome: return jsonify({"error": "Nome é obrigatório"}), 400
-    if not cpf: return jsonify({"error": "CPF é obrigatório"}), 400
-    if not email: return jsonify({"error": "E-mail é obrigatório"}), 400
-    if not senha: return jsonify({"error": "Senha é obrigatória"}), 400
-    if not confirmar_senha: return jsonify({"error": "Confirmar senha é obrigatório"}), 400
-    if not telefone: return jsonify({"error": "Telefone é obrigatório"}), 400
-    if tipo is None: return jsonify({"error": "Tipo de usuário é obrigatório"}), 400
+    if not cpf:
+        return jsonify({"error": "CPF é obrigatório"}), 400
 
-    tipo = int(tipo)
+    if not email:
+        return jsonify({"error": "E-mail é obrigatório"}), 400
+
+    if not senha:
+        return jsonify({"error": "Senha é obrigatória"}), 400
+
+    if not confirmar_senha:
+        return jsonify({"error": "Confirmar senha é obrigatório"}), 400
+
+    if not telefone:
+        return jsonify({"error": "Telefone é obrigatório"}), 400
+
+    if tipo is None:
+        return jsonify({"error": "Tipo de usuário é obrigatório"}), 400
+
+    try:
+        tipo = int(tipo)
+    except ValueError:
+        return jsonify({"error": "Tipo de usuário inválido"}), 400
+
     if tipo not in [0, 1, 2]:
         return jsonify({"error": "Tipo de usuário inválido"}), 400
 
-
-    if verificar_existente(cpf, 1) == False:
+    if verificar_existente(cpf, "CPF"):
         return jsonify({"error": "CPF já cadastrado"}), 400
-    if verificar_existente(email, 2) == False:
+
+    if verificar_existente(email, "EMAIL"):
         return jsonify({"error": "E-mail já cadastrado"}), 400
+
+    if tipo == 0:
+        if not num_oab:
+            return jsonify({"error": "Número da OAB é obrigatório"}), 400
+
+        if not uf_oab:
+            return jsonify({"error": "UF da OAB é obrigatória"}), 400
+
+        if verificar_existente(num_oab, "NUM_OAB"):
+            return jsonify({"error": "Número da OAB já cadastrado"}), 400
+
     if senha_forte(senha) == False:
-        return jsonify({"error": "Senha fraca. Use 8+ caracteres, maiúsculas, minúsculas, números e especiais"}), 400
+        return jsonify({
+            "error": "Senha fraca. Use 8+ caracteres, maiúsculas, minúsculas, números e especiais"
+        }), 400
+
     if senha_correspondente(senha, confirmar_senha) == False:
         return jsonify({"error": "Senhas não correspondem"}), 400
 
-    from consulta_oab import consultar_oab
-
     if tipo == 0:
-
-        if not num_oab:
-            return jsonify({
-                "error": "Número da OAB é obrigatório"
-            }), 400
-
-        if not uf_oab:
-            return jsonify({
-                "error": "UF da OAB é obrigatória"
-            }), 400
+        from consulta_oab import consultar_oab
 
         try:
+            print(f"Consultando OAB: {uf_oab}-{num_oab} | Nome: {nome}")
 
-            print(
-                f"Consultando OAB: {uf_oab}-{num_oab} | Nome: {nome}"
-            )
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    consultar_oab,
+                    uf_oab=uf_oab,
+                    num_oab=num_oab,
+                    nome=nome,
+                    apenas_regular=True
+                )
 
-            resultado_oab = consultar_oab(
-                uf_oab=uf_oab,
-                num_oab=num_oab,
-                nome=nome,
-                apenas_regular=True
-            )
+                try:
+                    resultado_oab = future.result(timeout=30)
+                except concurrent.futures.TimeoutError:
+                    return jsonify({
+                        "error": "A consulta à OAB está demorando muito. Tente novamente mais tarde."
+                    }), 408
 
-            print("Resultado da OAB:")
-            print(resultado_oab)
+            print("Resultado da OAB:", resultado_oab)
 
         except Exception as e:
-
-            print(
-                f"Erro ao consultar OAB: {e}"
-            )
-
+            print(f"Erro ao consultar a OAB: {e}")
             return jsonify({
                 "error": "Erro ao consultar a OAB."
             }), 500
@@ -95,10 +113,7 @@ def criar_usuarios():
                 "error": "Não foi possível obter uma resposta da OAB."
             }), 400
 
-        items = resultado_oab.get(
-            "items",
-            []
-        )
+        items = resultado_oab.get("items", [])
 
         if not items:
             return jsonify({
@@ -110,10 +125,7 @@ def criar_usuarios():
 
         advogado = items[0]
 
-        nome_oab = advogado.get(
-            "nome",
-            ""
-        )
+        nome_oab = advogado.get("nome", "")
 
         if nome.strip().upper() != nome_oab.strip().upper():
             return jsonify({
@@ -127,49 +139,86 @@ def criar_usuarios():
             f"{uf_oab}-{num_oab} - {nome_oab}"
         )
 
-
     senha_cripto = generate_password_hash(senha).decode('utf-8')
-
-
 
     con = conexao()
     cur = con.cursor()
-    try:
 
+    try:
         cur.execute("""
             INSERT INTO USUARIOS (
-                NOME, EMAIL, SENHA, CPF, TELEFONE, TIPO,
-                RG, ORGAO_EXPEDIDOR, NUM_OAB, UF_OAB, NACIONALIDADE, ESTADO_CIVIL,
-                DATA_CADASTRO, ATIVO
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                NOME,
+                EMAIL,
+                SENHA,
+                CPF,
+                TELEFONE,
+                TIPO,
+                RG,
+                ORGAO_EXPEDIDOR,
+                NUM_OAB,
+                UF_OAB,
+                NACIONALIDADE,
+                ESTADO_CIVIL,
+                DATA_CADASTRO,
+                ATIVO
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING ID_USUARIOS
-        """, (nome, email, senha_cripto, cpf, telefone, tipo,
-              rg, orgao_expedidor, num_oab, uf_oab, nacionalidade, estado_civil,
-              datetime.datetime.now(), 1))
+        """, (
+            nome,
+            email,
+            senha_cripto,
+            cpf,
+            telefone,
+            tipo,
+            rg,
+            orgao_expedidor,
+            num_oab,
+            uf_oab,
+            nacionalidade,
+            estado_civil,
+            datetime.datetime.now(),
+            1
+        ))
 
         id_usuario = cur.fetchone()[0]
+
         con.commit()
 
-
         foto_perfil = request.files.get('foto_perfil')
+
         if foto_perfil:
             try:
                 nome_imagem = f'{id_usuario}.jpeg'
-                caminho = os.path.join(app.config['UPLOAD_FOLDER'], 'Usuarios')
+
+                caminho = os.path.join(
+                    app.config['UPLOAD_FOLDER'],
+                    'Usuarios'
+                )
+
                 os.makedirs(caminho, exist_ok=True)
-                foto_perfil.save(os.path.join(caminho, nome_imagem))
+
+                foto_perfil.save(
+                    os.path.join(caminho, nome_imagem)
+                )
+
             except Exception as e:
                 print(f"Erro ao salvar imagem: {e}")
 
-        return jsonify({'message': 'Cadastro realizado com sucesso!'}), 201
+        return jsonify({
+            'message': 'Cadastro realizado com sucesso!'
+        }), 201
 
     except Exception as e:
         con.rollback()
-        return jsonify({'error': f'Erro interno: {e}'}), 500
+
+        return jsonify({
+            'error': f'Erro interno: {e}'
+        }), 500
+
     finally:
         cur.close()
         con.close()
-
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -179,7 +228,6 @@ def login():
     if not cpf_cnpj: return jsonify({'error': 'CPF/CNPJ é obrigatório'}), 400
     if not senha: return jsonify({'error': 'Senha é obrigatória'}), 400
 
-    # OBS: O decodificar_token aqui verifica se o usuário já está logado
     if decodificar_token() != False:
         return jsonify({'error': 'Você já está logado'}), 400
 
@@ -189,7 +237,7 @@ def login():
         cur.execute("""
             SELECT ID_USUARIOS, TIPO, NOME, SENHA, ATIVO
             FROM USUARIOS WHERE CPF = ?
-        """, (cpf_cnpj,))  # Atenção: O CPF aqui deve ser exatamente o que está no banco (apenas números)
+        """, (cpf_cnpj,))
 
         usuario = cur.fetchone()
 
@@ -224,7 +272,6 @@ def login():
 
 @app.route('/meus_dados', methods=['GET'])
 def meus_dados():
-    # O decodificar_token() agora vai ler o Authorization: Bearer
     token_data = decodificar_token()
     if token_data == False:
         return jsonify({'error': 'Token necessário'}), 401

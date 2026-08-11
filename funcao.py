@@ -7,26 +7,48 @@ import datetime
 
 
 
-def verificar_existente(valor, tipo, id_usuarios=None):
+def verificar_existente(valor, campo, id_usuarios=None):
     con = conexao()
     cur = con.cursor()
-    try:
-        if tipo == 1:
-            if id_usuarios:
-                cur.execute("SELECT 1 FROM USUARIOS WHERE CPF = ? AND ID_USUARIOS != ?", (valor, id_usuarios))
-            else:
-                cur.execute("SELECT 1 FROM USUARIOS WHERE CPF = ?", (valor,))
-        elif tipo == 2:
-            if id_usuarios:
-                cur.execute("SELECT 1 FROM USUARIOS WHERE EMAIL = ? AND ID_USUARIOS != ?", (valor, id_usuarios))
-            else:
-                cur.execute("SELECT 1 FROM USUARIOS WHERE EMAIL = ?", (valor,))
 
-        if not cur.fetchone():
-            return True
-        return False
+    try:
+        campos_permitidos = {
+            "CPF": "CPF",
+            "EMAIL": "EMAIL",
+            "NUM_OAB": "NUM_OAB"
+        }
+
+        if campo not in campos_permitidos:
+            return False
+
+        coluna = campos_permitidos[campo]
+
+        if id_usuarios:
+            cur.execute(
+                f"""
+                SELECT 1
+                FROM USUARIOS
+                WHERE {coluna} = ?
+                AND ID_USUARIOS != ?
+                """,
+                (valor, id_usuarios)
+            )
+        else:
+            cur.execute(
+                f"""
+                SELECT 1
+                FROM USUARIOS
+                WHERE {coluna} = ?
+                """,
+                (valor,)
+            )
+
+        return cur.fetchone() is not None
+
     except Exception as e:
+        print(f"Erro ao verificar existência: {e}")
         return False
+
     finally:
         cur.close()
         con.close()
