@@ -3,3 +3,4 @@ flask-cors==6.0.2
 Flask-Bcrypt==1.0.1
 fdb==2.0.4
 PyJWT==2.12.1
+selenium
