@@ -724,7 +724,7 @@ def meus_escritorios():
         }), 200
 
     except Exception as e:
-        print(f"❌ Erro ao buscar escritórios: {e}")
+        print(f"Erro ao buscar escritórios: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -805,17 +805,17 @@ def criar_escritorio():
     cur = con.cursor()
 
     try:
-        # Verifica se CNPJ já existe
+
         cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE CNPJ = ?", (cnpj_numeros,))
         if cur.fetchone():
             return jsonify({"error": "CNPJ já cadastrado"}), 400
 
-        # Verifica se Email já existe
+
         cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE EMAIL = ?", (email,))
         if cur.fetchone():
             return jsonify({"error": "E-mail já cadastrado"}), 400
 
-        # INSERE SEM O ID_USUARIOS
+
         cur.execute("""
             INSERT INTO ESCRITORIOS (
                 RAZAO_SOCIAL,
@@ -858,7 +858,7 @@ def criar_escritorio():
 
         id_escritorio = cur.fetchone()[0]
 
-        # Vincula o advogado ao escritório como PROPRIETARIO
+
         cur.execute("""
             INSERT INTO ADVOGADO_ESCRITORIO (
                 ID_USUARIOS,
@@ -874,8 +874,8 @@ def criar_escritorio():
 
         con.commit()
 
-        print(f"✅ Escritório cadastrado. ID: {id_escritorio}")
-        print(f"✅ Advogado {id_usuario} vinculado como PROPRIETARIO")
+        print(f"Escritório cadastrado. ID: {id_escritorio}")
+        print(f"Advogado {id_usuario} vinculado como PROPRIETARIO")
 
         # Salva a foto se existir
         foto_perfil = request.files.get('foto_perfil')
@@ -885,9 +885,9 @@ def criar_escritorio():
                 caminho = os.path.join(app.config['UPLOAD_FOLDER'], 'Escritorios')
                 os.makedirs(caminho, exist_ok=True)
                 foto_perfil.save(os.path.join(caminho, nome_imagem))
-                print(f"✅ Imagem salva: {nome_imagem}")
+                print(f"Imagem salva: {nome_imagem}")
             except Exception as e:
-                print(f"⚠️ Erro ao salvar imagem: {e}")
+                print(f"Erro ao salvar imagem: {e}")
 
         return jsonify({
             'message': 'Escritório cadastrado com sucesso!',
@@ -896,7 +896,7 @@ def criar_escritorio():
 
     except Exception as e:
         con.rollback()
-        print(f"❌ Erro ao cadastrar escritório: {e}")
+        print(f"Erro ao cadastrar escritório: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'error': f'Erro interno: {e}'}), 500
