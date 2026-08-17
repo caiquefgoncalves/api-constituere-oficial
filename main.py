@@ -16,7 +16,7 @@ def handle_options():
 
 app.config.from_pyfile('config.py')
 
-# Criação das pastas de upload
+
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'Usuarios'), exist_ok=True)
