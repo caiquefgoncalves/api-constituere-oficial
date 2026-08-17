@@ -3,15 +3,33 @@ from flask_cors import CORS
 import os
 
 app = Flask(__name__)
-ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173", "http://172.20.10.13:5173/ "]
 
-CORS(app, origins=ALLOWED_ORIGINS, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], supports_credentials=True)
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://172.20.10.13:5173",
+    "http://10.92.11.35:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+]
+
+CORS(app,
+     origins=ALLOWED_ORIGINS,
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "X-Access-Token"],
+     expose_headers=["Content-Type", "Authorization", "X-Access-Token"])
 
 
 @app.before_request
 def handle_options():
     if request.method == 'OPTIONS':
-        return make_response(), 200
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', ''))
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-Access-Token')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        return response
 
 
 app.config.from_pyfile('config.py')
@@ -27,7 +45,7 @@ def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
-# Importação das rotas
+
 from usuario import *
 from funcao import *
 
