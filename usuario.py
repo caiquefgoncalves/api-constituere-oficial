@@ -732,6 +732,7 @@ def meus_escritorios():
         cur.close()
         con.close()
 
+
 @app.route('/criar_escritorio', methods=['POST'])
 def criar_escritorio():
     token_data = decodificar_token()
@@ -793,6 +794,107 @@ def criar_escritorio():
     if len(cep_numeros) != 8:
         return jsonify({"error": "CEP inválido. Digite os 8 números do CEP."}), 400
 
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE CNPJ = ?", (cnpj_numeros,))
+        if cur.fetchone():
+            return jsonify({"error": "CNPJ já cadastrado"}), 400
+
+        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE EMAIL = ?", (email,))
+        if cur.fetchone():
+            return jsonify({"error": "E-mail já cadastrado"}), 400
+
+    except Exception as e:
+        return jsonify({"error": f"Erro ao verificar duplicidade: {e}"}), 500
+    finally:
+        cur.close()
+        con.close()
+
+    # 🔍 VALIDAÇÃO DA OAB - ADICIONADO AQUI
+    try:
+        print()
+        print("========================================")
+        print("CONSULTANDO CNSA")
+        print(f"UF: {uf_oab}")
+        print(f"Registro OAB: {registro_oab}")
+        print("========================================")
+
+        inicio_oab = time.perf_counter()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                consultar_cnsa,
+                uf=uf_oab,
+                inscricao=registro_oab
+            )
+
+            try:
+                resultado_cnsa = future.result(timeout=60)
+            except concurrent.futures.TimeoutError:
+                return jsonify({
+                    "error": "A consulta à OAB está demorando muito. Tente novamente mais tarde."
+                }), 408
+
+        tempo_oab = time.perf_counter() - inicio_oab
+        print(f"[TEMPO] Consulta CNSA finalizada: {tempo_oab:.2f} segundos")
+        print("Resultado CNSA:", resultado_cnsa)
+
+    except Exception as e:
+        print(f"Erro ao consultar a CNSA: {e}")
+        return jsonify({"error": "Erro ao consultar a OAB."}), 500
+
+    if not resultado_cnsa:
+        return jsonify({"error": "Não foi possível obter uma resposta da OAB."}), 400
+
+    if resultado_cnsa.get("timeout"):
+        return jsonify({"error": "A consulta à OAB demorou muito. Tente novamente."}), 408
+
+    status = resultado_cnsa.get("status")
+    if status != 200:
+        return jsonify({"error": "Não foi possível validar a inscrição na OAB."}), 400
+
+    dados = resultado_cnsa.get("dados")
+    if not dados:
+        return jsonify({"error": "A OAB não retornou dados para essa inscrição."}), 400
+
+    if isinstance(dados, str):
+        try:
+            dados = json.loads(dados)
+        except Exception:
+            return jsonify({"error": "A resposta da OAB não possui um formato válido."}), 400
+
+    if not isinstance(dados, dict):
+        return jsonify({"error": "Resposta inválida recebida da OAB."}), 400
+
+    items = dados.get("items", [])
+    if not items:
+        mensagem = dados.get("mensagem", "")
+        if mensagem:
+            return jsonify({"error": mensagem}), 400
+        return jsonify({
+            "error": f"OAB {uf_oab}-{registro_oab} não encontrada no cadastro da OAB. Verifique se o número e a UF estão corretos."
+        }), 400
+
+    inscricao_oab = items[0]
+    situacao = inscricao_oab.get("situacao", "")
+
+    if situacao:
+        if situacao.strip().upper() != "REGULAR":
+            return jsonify({
+                "error": f"A inscrição da OAB está com situação {situacao}. Apenas inscrições regulares podem cadastrar um escritório."
+            }), 400
+
+    print()
+    print("========================================")
+    print("OAB VALIDADA COM SUCESSO")
+    print(f"UF: {uf_oab}")
+    print(f"Registro: {registro_oab}")
+    if situacao:
+        print(f"Situação: {situacao}")
+    print("========================================")
+
     senha_cripto = None
     if senha:
         if senha_forte(senha) == False:
@@ -805,79 +907,61 @@ def criar_escritorio():
     cur = con.cursor()
 
     try:
-
-        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE CNPJ = ?", (cnpj_numeros,))
-        if cur.fetchone():
-            return jsonify({"error": "CNPJ já cadastrado"}), 400
-
-
-        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE EMAIL = ?", (email,))
-        if cur.fetchone():
-            return jsonify({"error": "E-mail já cadastrado"}), 400
-
-
         cur.execute("""
-            INSERT INTO ESCRITORIOS (
-                RAZAO_SOCIAL,
-                NOME_FANTASIA,
-                REGISTRO_OAB,
-                UF_OAB,
-                TELEFONE,
-                EMAIL,
-                CNPJ,
-                CEP,
-                LOGRADOURO,
-                NUMERO,
-                COMPLEMENTO,
-                BAIRRO,
-                CIDADE,
-                ESTADO,
-                SENHA,
-                DATA_CADASTRO
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING ID_ESCRITORIOS
-        """, (
-            razao_social.strip(),
-            nome_fantasia.strip(),
-            registro_oab.strip(),
-            uf_oab.strip().upper(),
-            telefone_numeros,
-            email.strip(),
-            cnpj_numeros,
-            cep_numeros,
-            logradouro.strip(),
-            numero,
-            complemento,
-            bairro.strip(),
-            cidade.strip(),
-            estado.strip().upper(),
-            senha_cripto,
-            datetime.datetime.now()
-        ))
+                    INSERT INTO ESCRITORIOS (RAZAO_SOCIAL,
+                                             NOME_FANTASIA,
+                                             REGISTRO_OAB,
+                                             UF_OAB,
+                                             TELEFONE,
+                                             EMAIL,
+                                             CNPJ,
+                                             CEP,
+                                             LOGRADOURO,
+                                             NUMERO,
+                                             COMPLEMENTO,
+                                             BAIRRO,
+                                             CIDADE,
+                                             ESTADO,
+                                             SENHA,
+                                             DATA_CADASTRO)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID_ESCRITORIOS
+                    """, (
+                        razao_social.strip(),
+                        nome_fantasia.strip(),
+                        registro_oab.strip(),
+                        uf_oab.strip().upper(),
+                        telefone_numeros,
+                        email.strip(),
+                        cnpj_numeros,
+                        cep_numeros,
+                        logradouro.strip(),
+                        numero,
+                        complemento,
+                        bairro.strip(),
+                        cidade.strip(),
+                        estado.strip().upper(),
+                        senha_cripto,
+                        datetime.datetime.now()
+                    ))
 
         id_escritorio = cur.fetchone()[0]
 
-
         cur.execute("""
-            INSERT INTO ADVOGADO_ESCRITORIO (
-                ID_USUARIOS,
-                ID_ESCRITORIOS,
-                STATUS
-            )
-            VALUES (?, ?, ?)
-        """, (
-            id_usuario,
-            id_escritorio,
-            'PROPRIETARIO'
-        ))
+                    INSERT INTO ADVOGADO_ESCRITORIO (ID_USUARIOS,
+                                                     ID_ESCRITORIOS,
+                                                     STATUS)
+                    VALUES (?, ?, ?)
+                    """, (
+                        id_usuario,
+                        id_escritorio,
+                        'PROPRIETARIO'
+                    ))
 
         con.commit()
 
-        print(f"Escritório cadastrado. ID: {id_escritorio}")
-        print(f"Advogado {id_usuario} vinculado como PROPRIETARIO")
+        print(f"✅ Escritório cadastrado. ID: {id_escritorio}")
+        print(f"✅ Advogado {id_usuario} vinculado como PROPRIETARIO")
 
-        # Salva a foto se existir
         foto_perfil = request.files.get('foto_perfil')
         if foto_perfil:
             try:
@@ -885,9 +969,9 @@ def criar_escritorio():
                 caminho = os.path.join(app.config['UPLOAD_FOLDER'], 'Escritorios')
                 os.makedirs(caminho, exist_ok=True)
                 foto_perfil.save(os.path.join(caminho, nome_imagem))
-                print(f"Imagem salva: {nome_imagem}")
+                print(f"✅ Imagem salva: {nome_imagem}")
             except Exception as e:
-                print(f"Erro ao salvar imagem: {e}")
+                print(f"⚠️ Erro ao salvar imagem: {e}")
 
         return jsonify({
             'message': 'Escritório cadastrado com sucesso!',
@@ -903,3 +987,182 @@ def criar_escritorio():
     finally:
         cur.close()
         con.close()
+
+@app.route('/adicionar_advogado_escritorio', methods=['POST'])
+def adicionar_advogado_escritorio():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({
+            'sucesso': False,
+            'mensagem': 'Token necessário.'
+        }), 401
+
+    id_usuario_logado = token_data['id_usuarios']
+
+    dados = request.get_json()
+
+    email = dados.get('email')
+    status = dados.get('status')
+
+    if not email:
+        return jsonify({
+            'sucesso': False,
+            'mensagem': 'Informe o e-mail do advogado.'
+        }), 400
+
+    if not status:
+        return jsonify({
+            'sucesso': False,
+            'mensagem': 'Informe a posição do advogado.'
+        }), 400
+
+    status = status.strip().upper()
+
+    if status not in ['PROPRIETARIO', 'PARCEIRO']:
+        return jsonify({
+            'sucesso': False,
+            'mensagem': 'A posição deve ser PROPRIETARIO ou SOCIO.'
+        }), 400
+
+    conexao_db = None
+    cursor = None
+
+    try:
+        conexao_db = conexao()
+        cursor = conexao_db.cursor()
+
+        cursor.execute("""
+            SELECT ID_ESCRITORIOS
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+        """, (id_usuario_logado,))
+
+        escritorio = cursor.fetchone()
+
+        if not escritorio:
+            return jsonify({
+                'sucesso': False,
+                'mensagem': 'O usuário não está vinculado a nenhum escritório.'
+            }), 404
+
+        id_escritorio = escritorio[0]
+
+        cursor.execute("""
+            SELECT
+                ID_ESCRITORIOS,
+                NOME_FANTASIA
+            FROM ESCRITORIOS
+            WHERE ID_ESCRITORIOS = ?
+        """, (id_escritorio,))
+
+        escritorio_dados = cursor.fetchone()
+
+        if not escritorio_dados:
+            return jsonify({
+                'sucesso': False,
+                'mensagem': 'Escritório não encontrado.'
+            }), 404
+
+        nome_escritorio = escritorio_dados[1]
+
+        cursor.execute("""
+            SELECT
+                ID_USUARIOS,
+                NOME,
+                EMAIL,
+                TIPO
+            FROM USUARIOS
+            WHERE EMAIL = ?
+        """, (email.strip(),))
+
+        advogado = cursor.fetchone()
+
+        if not advogado:
+            return jsonify({
+                'sucesso': False,
+                'mensagem': 'Não foi encontrado nenhum usuário cadastrado com esse e-mail.'
+            }), 404
+
+        id_advogado = advogado[0]
+        nome_advogado = advogado[1]
+        email_advogado = advogado[2]
+        tipo_usuario = advogado[3]
+
+        if tipo_usuario != 0:
+            return jsonify({
+                'sucesso': False,
+                'mensagem': 'O usuário informado não é um advogado.'
+            }), 400
+
+        if id_advogado == id_usuario_logado:
+            return jsonify({
+                'sucesso': False,
+                'mensagem': 'Você não pode adicionar a si mesmo ao escritório.'
+            }), 400
+
+        cursor.execute("""
+            SELECT
+                ID,
+                STATUS
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+            AND ID_ESCRITORIOS = ?
+        """, (id_advogado, id_escritorio))
+
+        vinculo = cursor.fetchone()
+
+        if vinculo:
+            return jsonify({
+                'sucesso': False,
+                'mensagem': 'Este advogado já está vinculado a este escritório.'
+            }), 400
+
+        cursor.execute("""
+            INSERT INTO ADVOGADO_ESCRITORIO
+            (
+                ID_USUARIOS,
+                ID_ESCRITORIOS,
+                STATUS
+            )
+            VALUES (?, ?, ?)
+        """, (
+            id_advogado,
+            id_escritorio,
+            status
+        ))
+
+        conexao_db.commit()
+
+        enviar_email(
+            email_advogado,
+            'Convite para escritório - Constituere',
+            nome_escritorio,
+            nome_advogado
+        )
+
+        return jsonify({
+            'sucesso': True,
+            'mensagem': 'Advogado adicionado ao escritório com sucesso.'
+        }), 200
+
+    except Exception as e:
+
+        if conexao_db:
+            try:
+                conexao_db.rollback()
+            except:
+                pass
+
+        return jsonify({
+            'sucesso': False,
+            'mensagem': f'Erro ao adicionar advogado: {str(e)}'
+        }), 500
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if conexao_db:
+            conexao_db.close()

@@ -1,9 +1,13 @@
 from flask_bcrypt import generate_password_hash, check_password_hash
-from flask import jsonify, request
+from flask import jsonify, request, render_template
 from db import conexao
 from flask import current_app
 import jwt
 import datetime
+import smtplib
+from email.mime.text import MIMEText
+from main import app
+
 
 
 def verificar_existente(valor, campo, id_usuarios=None):
@@ -161,3 +165,30 @@ def validar_cpf(cpf):
         return False
 
     return True
+
+
+def enviar_email(destinatario, assunto, nomeescritorio,  nome):
+
+    user = "juriscriptoffice@gmail.com"
+    senha = "mufi rewg elal bbaw"
+    try:
+        with app.app_context():
+            html = render_template("email.html", nomeescritorio=nomeescritorio, nome=nome)
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = assunto
+        msg["From"] = user
+        msg["To"] = destinatario
+
+
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        # para trocar a porta para 587 que é uma existente deve adicionar essa linha a mais, é uma porta que começa sem criptografia
+        # server = smtplib.SMTP("smtp.gmail.com", 587)
+        # server.starttls()
+        server.login(user, senha)
+        server.send_message(msg)
+        server.quit()
+        print("Email enviado com sucesso!")
+    except Exception as e:
+        print("Erro ao enviar email:", e)
