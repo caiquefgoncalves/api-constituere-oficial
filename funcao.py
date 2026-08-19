@@ -86,25 +86,18 @@ def gerar_token(tipo, id_usuarios, tempo):
 
 
 def decodificar_token():
-    """
-    Decodifica o token JWT - Tenta várias fontes
-    Prioridade: 1. Header X-Access-Token, 2. Cookie, 3. Outras fontes
-    """
     try:
         token = None
 
-        # 1. PRIORIDADE: Tenta do header X-Access-Token (enviado pelo front-end)
         token = request.headers.get('X-Access-Token')
         if token:
             print("✅ Token encontrado no header X-Access-Token")
 
-        # 2. Tenta do cookie
         if not token:
             token = request.cookies.get('acess_token')
             if token:
                 print("✅ Token encontrado no cookie")
 
-        # 3. Tenta do header Authorization (fallback)
         if not token:
             auth_header = request.headers.get('Authorization')
             if auth_header and auth_header.startswith('Bearer '):
@@ -167,10 +160,10 @@ def validar_cpf(cpf):
     return True
 
 
-def enviar_email(destinatario, assunto, nomeescritorio,  nome):
-
+def enviar_email(destinatario, assunto, nomeescritorio, nome):
     user = "juriscriptoffice@gmail.com"
     senha = "mufi rewg elal bbaw"
+
     try:
         with app.app_context():
             html = render_template("email.html", nomeescritorio=nomeescritorio, nome=nome)
@@ -181,14 +174,14 @@ def enviar_email(destinatario, assunto, nomeescritorio,  nome):
         msg["To"] = destinatario
 
 
-
         server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-        # para trocar a porta para 587 que é uma existente deve adicionar essa linha a mais, é uma porta que começa sem criptografia
-        # server = smtplib.SMTP("smtp.gmail.com", 587)
-        # server.starttls()
         server.login(user, senha)
         server.send_message(msg)
         server.quit()
-        print("Email enviado com sucesso!")
+
+        print(f"Email enviado com sucesso para {destinatario}!")
+        return True
+
     except Exception as e:
-        print("Erro ao enviar email:", e)
+        print(f"Erro ao enviar email para {destinatario}: {e}")
+        return False

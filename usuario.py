@@ -493,28 +493,31 @@ def login():
 
         usuario = cur.fetchone()
 
-        if not usuario:
+        if not usuario and not senha:
             return jsonify({"error": "Usuário não encontrado"}), 404
+
+        if not usuario:
+            return jsonify({"error": "CPF/CNPJ ou senha incorretos"}), 404
 
         id_usuario, tipo, nome, senha_hash, ativo = usuario
 
         if ativo == 0:
             return jsonify({"error": "Usuário inativado"}), 400
 
-        if check_password_hash(senha_hash, senha):
-            token = gerar_token(tipo, id_usuario, 1440)
-            resp = make_response(jsonify({
-                'message': f'Bem-vindo, {nome}!',
-                'nome': nome,
-                'token': token,
-                'tipo': tipo,
-                'id_usuario': id_usuario,
-                'foto_perfil': f'{id_usuario}.jpeg'
-            }))
-            resp.set_cookie('acess_token', token, httponly=True, secure=False, samesite='Lax', path="/", max_age=7600)
-            return resp
+        if not check_password_hash(senha_hash, senha):
+            return jsonify({"error": "CPF/CNPJ ou senha incorretos"}), 400
 
-        return jsonify({"error": "Senha incorreta"}), 400
+        token = gerar_token(tipo, id_usuario, 1440)
+        resp = make_response(jsonify({
+            'message': f'Bem-vindo, {nome}!',
+            'nome': nome,
+            'token': token,
+            'tipo': tipo,
+            'id_usuario': id_usuario,
+            'foto_perfil': f'{id_usuario}.jpeg'
+        }))
+        resp.set_cookie('acess_token', token, httponly=True, secure=False, samesite='Lax', path="/", max_age=7600)
+        return resp
 
     except Exception as e:
         return jsonify({'error': f'Erro: {e}'}), 500
@@ -579,12 +582,6 @@ def meus_dados():
         con.close()
 
 
-
-
-
-
-
-
 @app.route('/escritorio/<int:id_escritorio>', methods=['GET'])
 def detalhes_escritorio(id_escritorio):
     token_data = decodificar_token()
@@ -617,8 +614,8 @@ def detalhes_escritorio(id_escritorio):
                 e.DATA_CADASTRO,
                 ae.STATUS
             FROM ESCRITORIOS e
-            INNER JOIN ADVOGADO_ESCRITORIO ae ON e.ID_ESCRITORIOS = ae.ID_ESCRITORIO
-            WHERE e.ID_ESCRITORIOS = ? AND ae.ID_USUARIO = ?
+            INNER JOIN ADVOGADO_ESCRITORIO ae ON e.ID_ESCRITORIOS = ae.ID_ESCRITORIOS
+            WHERE e.ID_ESCRITORIOS = ? AND ae.ID_USUARIOS = ?
         """, (id_escritorio, id_usuario))
 
         escritorio = cur.fetchone()
@@ -649,6 +646,9 @@ def detalhes_escritorio(id_escritorio):
         }), 200
 
     except Exception as e:
+        print(f"Erro ao buscar detalhes do escritório: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
@@ -812,7 +812,6 @@ def criar_escritorio():
         cur.close()
         con.close()
 
-    # 🔍 VALIDAÇÃO DA OAB - ADICIONADO AQUI
     try:
         print()
         print("========================================")
@@ -1019,10 +1018,10 @@ def adicionar_advogado_escritorio():
 
     status = status.strip().upper()
 
-    if status not in ['PROPRIETARIO', 'PARCEIRO']:
+    if status not in ['PROPRIETARIO', 'PARCEIRO', 'ASSOCIADO']:
         return jsonify({
             'sucesso': False,
-            'mensagem': 'A posição deve ser PROPRIETARIO ou SOCIO.'
+            'mensagem': 'A posição deve ser PROPRIETARIO, PARCEIRO ou ASSOCIADO.'
         }), 400
 
     conexao_db = None
@@ -1134,6 +1133,7 @@ def adicionar_advogado_escritorio():
 
         conexao_db.commit()
 
+
         enviar_email(
             email_advogado,
             'Convite para escritório - Constituere',
@@ -1147,7 +1147,6 @@ def adicionar_advogado_escritorio():
         }), 200
 
     except Exception as e:
-
         if conexao_db:
             try:
                 conexao_db.rollback()
@@ -1160,9 +1159,7 @@ def adicionar_advogado_escritorio():
         }), 500
 
     finally:
-
         if cursor:
             cursor.close()
-
         if conexao_db:
             conexao_db.close()
