@@ -5,7 +5,7 @@ DEBUG = True
 
 
 DB_HOST = 'localhost'
-DB_NAME = r'C:\Users\Usuario\Downloads\api-constituere-oficial-main\BANCO_CONSTITUERE.FDB'
+DB_NAME = r'C:\Users\Usuario\Desktop\api-constituere-oficial-main\BANCO_CONSTITUERE.FDB'
 DB_USER = 'sysdba'
 DB_PASSWORD = 'SYSDBA'
 

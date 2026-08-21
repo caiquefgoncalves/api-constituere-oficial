@@ -276,10 +276,23 @@ def editar_perfil():
     if not estado_civil:
         return jsonify({"error": "Estado civil é obrigatório"}), 400
 
+    # 🔍 LIMPA O CPF ANTES DE VALIDAR
+    cpf_limpo = ''.join(filter(str.isdigit, cpf))
+
+    # 🔍 VALIDAÇÃO DO CPF
+    try:
+        from funcao import validar_cpf
+        if not validar_cpf(cpf_limpo):
+            return jsonify({"error": "CPF inválido"}), 400
+    except Exception as e:
+        print(f"Erro ao validar CPF: {e}")
+        # Se a função não existir, continua sem validação
+
     con = conexao()
     cur = con.cursor()
     try:
-        cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE CPF = ? AND ID_USUARIOS != ?", (cpf, id_usuario))
+        # Usa o CPF limpo para verificar duplicidade
+        cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE CPF = ? AND ID_USUARIOS != ?", (cpf_limpo, id_usuario))
         if cur.fetchone():
             return jsonify({"error": "CPF já cadastrado para outro usuário"}), 400
 
@@ -336,7 +349,7 @@ def editar_perfil():
                     uf_oab=uf_oab,
                     num_oab=num_oab,
                     nome=nome,
-                    apenas_regular=True
+                    apenas_regular=True  # 🔥 USA True COMO NO CADASTRO
                 )
 
                 try:
@@ -361,6 +374,7 @@ def editar_perfil():
 
         items = resultado_oab.get("items", [])
 
+        # 🔥 USA A MESMA LÓGICA DO CADASTRO
         if not items:
             mensagem = resultado_oab.get("mensagem", "")
             if mensagem and "Advogado encontrado, mas a situação é" in mensagem:
@@ -373,9 +387,10 @@ def editar_perfil():
         nome_oab = advogado.get("nome", "")
         situacao = advogado.get("situacao", "")
 
+        # 🔥 VERIFICA A SITUAÇÃO IGUAL AO CADASTRO
         if situacao.upper() != "REGULAR":
             return jsonify({
-                "error": f"Sua situação é cancelada/suspensa. Apenas advogados regulares podem editar seu perfil."
+                "error": f"Sua situação é {situacao}. Apenas advogados regulares podem editar seu perfil."
             }), 400
 
         if nome.strip().upper() != nome_oab.strip().upper():
@@ -409,7 +424,7 @@ def editar_perfil():
             """, (
                 nome,
                 email,
-                cpf,
+                cpf_limpo,  # Usa o CPF limpo
                 telefone,
                 rg,
                 orgao_expedidor,
@@ -437,7 +452,7 @@ def editar_perfil():
             """, (
                 nome,
                 email,
-                cpf,
+                cpf_limpo,  # Usa o CPF limpo
                 telefone,
                 rg,
                 orgao_expedidor,
