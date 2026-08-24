@@ -498,6 +498,10 @@ def login():
     if decodificar_token() != False:
         return jsonify({'error': 'Você já está logado'}), 400
 
+
+    if not validar_cpf(cpf_cnpj):
+        return jsonify({"error": "Usuário não encontrado"}), 404
+
     con = conexao()
     cur = con.cursor()
     try:
@@ -508,19 +512,19 @@ def login():
 
         usuario = cur.fetchone()
 
-        if not usuario and not senha:
-            return jsonify({"error": "Usuário não encontrado"}), 404
 
         if not usuario:
-            return jsonify({"error": "CPF/CNPJ ou senha incorretos"}), 404
+            return jsonify({"error": "Usuário não encontrado"}), 404
 
         id_usuario, tipo, nome, senha_hash, ativo = usuario
 
         if ativo == 0:
             return jsonify({"error": "Usuário inativado"}), 400
 
+
         if not check_password_hash(senha_hash, senha):
             return jsonify({"error": "CPF/CNPJ ou senha incorretos"}), 400
+
 
         token = gerar_token(tipo, id_usuario, 1440)
         resp = make_response(jsonify({
