@@ -10,6 +10,7 @@ import time
 from consulta_cnsa import consultar_cnsa
 from consulta_oab import consultar_oab
 
+
 @app.route('/criar_usuarios', methods=['POST'])
 def criar_usuarios():
     nome = request.form.get('nome')
@@ -19,22 +20,29 @@ def criar_usuarios():
     senha = request.form.get('senha')
     confirmar_senha = request.form.get('confirmar_senha')
     tipo = request.form.get('tipo')
-
+    cep = request.form.get('cep')
+    logradouro = request.form.get('logradouro')
+    numero = request.form.get('numero')
+    complemento = request.form.get('complemento')
+    bairro = request.form.get('bairro')
+    cidade = request.form.get('cidade')
+    estado = request.form.get('estado')
     rg = request.form.get('rg')
     orgao_expedidor = request.form.get('orgao_expedidor')
-    num_oab = request.form.get('num_oab')
-    uf_oab = request.form.get('uf_oab')
     nacionalidade = request.form.get('nacionalidade')
     estado_civil = request.form.get('estado_civil')
-
+    data_nascimento = request.form.get('data_nascimento')
+    sexo = request.form.get('sexo')
+    profissao = request.form.get('profissao')
+    num_oab = request.form.get('num_oab')
+    uf_oab = request.form.get('uf_oab')
+    razao_social = request.form.get('razao_social')
+    nome_fantasia = request.form.get('nome_fantasia')
+    cnpj = request.form.get('cnpj')
+    carteira_trabalho = request.form.get('carteira_trabalho')
+    serie_carteira = request.form.get('serie_carteira')
     if not nome:
         return jsonify({"error": "Nome é obrigatório"}), 400
-
-    if not cpf:
-        return jsonify({"error": "CPF é obrigatório"}), 400
-
-    if not validar_cpf(cpf):
-        return jsonify({"error": "CPF inválido"}), 400
 
     if not email:
         return jsonify({"error": "E-mail é obrigatório"}), 400
@@ -56,24 +64,60 @@ def criar_usuarios():
     except ValueError:
         return jsonify({"error": "Tipo de usuário inválido"}), 400
 
-    if tipo not in [0, 1, 2]:
+    if tipo not in [0, 1, 2, 3]:
         return jsonify({"error": "Tipo de usuário inválido"}), 400
 
-    if verificar_existente(cpf, "CPF"):
-        return jsonify({"error": "CPF já cadastrado"}), 400
-
-    if verificar_existente(email, "EMAIL"):
-        return jsonify({"error": "E-mail já cadastrado"}), 400
 
     if tipo == 0:
+        if not cpf:
+            return jsonify({"error": "CPF é obrigatório"}), 400
+        if not validar_cpf(cpf):
+            return jsonify({"error": "CPF inválido"}), 400
+        if verificar_existente(cpf, "CPF"):
+            return jsonify({"error": "CPF já cadastrado"}), 400
+        if verificar_existente(email, "EMAIL"):
+            return jsonify({"error": "E-mail já cadastrado"}), 400
         if not num_oab:
             return jsonify({"error": "Número da OAB é obrigatório"}), 400
-
         if not uf_oab:
             return jsonify({"error": "UF da OAB é obrigatória"}), 400
-
         if verificar_existente(num_oab, "NUM_OAB"):
             return jsonify({"error": "Número da OAB já cadastrado"}), 400
+
+    elif tipo == 1:
+        if not cnpj:
+            return jsonify({"error": "CNPJ é obrigatório"}), 400
+        if verificar_existente(cnpj, "CNPJ"):
+            return jsonify({"error": "CNPJ já cadastrado"}), 400
+        if verificar_existente(email, "EMAIL"):
+            return jsonify({"error": "E-mail já cadastrado"}), 400
+
+    elif tipo == 2:
+        if not cpf:
+            return jsonify({"error": "CPF é obrigatório"}), 400
+        if not validar_cpf(cpf):
+            return jsonify({"error": "CPF inválido"}), 400
+        if verificar_existente(cpf, "CPF"):
+            return jsonify({"error": "CPF já cadastrado"}), 400
+        if verificar_existente(email, "EMAIL"):
+            return jsonify({"error": "E-mail já cadastrado"}), 400
+        if not data_nascimento:
+            return jsonify({"error": "Data de nascimento é obrigatória"}), 400
+        if not sexo:
+            return jsonify({"error": "Sexo é obrigatório"}), 400
+
+    elif tipo == 3:
+        if not cnpj:
+            return jsonify({"error": "CNPJ é obrigatório"}), 400
+        if verificar_existente(cnpj, "CNPJ"):
+            return jsonify({"error": "CNPJ já cadastrado"}), 400
+        if verificar_existente(email, "EMAIL"):
+            return jsonify({"error": "E-mail já cadastrado"}), 400
+        if not razao_social:
+            return jsonify({"error": "Razão social é obrigatória"}), 400
+        if not nome_fantasia:
+            return jsonify({"error": "Nome fantasia é obrigatório"}), 400
+
 
     if senha_forte(senha) == False:
         return jsonify({
@@ -83,8 +127,8 @@ def criar_usuarios():
     if senha_correspondente(senha, confirmar_senha) == False:
         return jsonify({"error": "Senhas não correspondem"}), 400
 
-    if tipo == 0:
 
+    if tipo == 0:
         try:
             print(f"Consultando OAB: {uf_oab}-{num_oab} | Nome: {nome}")
 
@@ -143,10 +187,8 @@ def criar_usuarios():
                 "nome_oab": nome_oab
             }), 400
 
-        print(
-            f"OAB validada com sucesso: "
-            f"{uf_oab}-{num_oab} - {nome_oab}"
-        )
+        print(f"OAB validada com sucesso: {uf_oab}-{num_oab} - {nome_oab}")
+
 
     senha_cripto = generate_password_hash(senha).decode('utf-8')
 
@@ -168,59 +210,83 @@ def criar_usuarios():
                 UF_OAB,
                 NACIONALIDADE,
                 ESTADO_CIVIL,
+                DATA_NASCIMENTO,
+                SEXO,
+                PROFISSAO,
+                CNPJ,
+                RAZAO_SOCIAL,
+                NOME_FANTASIA,
+                CEP,
+                LOGRADOURO,
+                NUMERO,
+                COMPLEMENTO,
+                BAIRRO,
+                CIDADE,
+                ESTADO,
+                CARTERA_TRABALHO,
+                SERIE_CARTERA,
                 DATA_CADASTRO,
                 ATIVO
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING ID_USUARIOS
         """, (
             nome,
             email,
             senha_cripto,
-            cpf,
+            cpf if cpf else None,
             telefone,
             tipo,
-            rg,
-            orgao_expedidor,
-            num_oab,
-            uf_oab,
-            nacionalidade,
-            estado_civil,
+            rg if rg else None,
+            orgao_expedidor if orgao_expedidor else None,
+            num_oab if num_oab else None,
+            uf_oab if uf_oab else None,
+            nacionalidade if nacionalidade else None,
+            estado_civil if estado_civil else None,
+            data_nascimento if data_nascimento else None,
+            sexo if sexo else None,
+            profissao if profissao else None,
+            cnpj if cnpj else None,
+            razao_social if razao_social else None,
+            nome_fantasia if nome_fantasia else None,
+            cep if cep else None,
+            logradouro if logradouro else None,
+            numero if numero else None,
+            complemento if complemento else None,
+            bairro if bairro else None,
+            cidade if cidade else None,
+            estado if estado else None,
+            carteira_trabalho if carteira_trabalho else None,
+            serie_carteira if serie_carteira else None,
             datetime.datetime.now(),
             1
         ))
 
         id_usuario = cur.fetchone()[0]
-
         con.commit()
 
-        foto_perfil = request.files.get('foto_perfil')
 
+        foto_perfil = request.files.get('foto_perfil')
         if foto_perfil:
             try:
                 nome_imagem = f'{id_usuario}.jpeg'
-
-                caminho = os.path.join(
-                    app.config['UPLOAD_FOLDER'],
-                    'Usuarios'
-                )
-
+                caminho = os.path.join(app.config['UPLOAD_FOLDER'], 'Usuarios')
                 os.makedirs(caminho, exist_ok=True)
-
-                foto_perfil.save(
-                    os.path.join(caminho, nome_imagem)
-                )
-
+                foto_perfil.save(os.path.join(caminho, nome_imagem))
             except Exception as e:
                 print(f"Erro ao salvar imagem: {e}")
 
         return jsonify({
-            'message': 'Cadastro realizado com sucesso!'
+            'message': 'Cadastro realizado com sucesso!',
+            'id': id_usuario,
+            'usuario_id': id_usuario
         }), 201
 
     except Exception as e:
         con.rollback()
-
+        print(f"Erro ao cadastrar usuário: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'error': f'Erro interno: {e}'
         }), 500
@@ -228,7 +294,6 @@ def criar_usuarios():
     finally:
         cur.close()
         con.close()
-
 
 @app.route('/editar_perfil', methods=['PUT'])
 def editar_perfil():
@@ -276,22 +341,21 @@ def editar_perfil():
     if not estado_civil:
         return jsonify({"error": "Estado civil é obrigatório"}), 400
 
-    # 🔍 LIMPA O CPF ANTES DE VALIDAR
+
     cpf_limpo = ''.join(filter(str.isdigit, cpf))
 
-    # 🔍 VALIDAÇÃO DO CPF
+
     try:
         from funcao import validar_cpf
         if not validar_cpf(cpf_limpo):
             return jsonify({"error": "CPF inválido"}), 400
     except Exception as e:
         print(f"Erro ao validar CPF: {e}")
-        # Se a função não existir, continua sem validação
+
 
     con = conexao()
     cur = con.cursor()
     try:
-        # Usa o CPF limpo para verificar duplicidade
         cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE CPF = ? AND ID_USUARIOS != ?", (cpf_limpo, id_usuario))
         if cur.fetchone():
             return jsonify({"error": "CPF já cadastrado para outro usuário"}), 400
@@ -349,7 +413,7 @@ def editar_perfil():
                     uf_oab=uf_oab,
                     num_oab=num_oab,
                     nome=nome,
-                    apenas_regular=True  # 🔥 USA True COMO NO CADASTRO
+                    apenas_regular=True
                 )
 
                 try:
@@ -374,7 +438,6 @@ def editar_perfil():
 
         items = resultado_oab.get("items", [])
 
-        # 🔥 USA A MESMA LÓGICA DO CADASTRO
         if not items:
             mensagem = resultado_oab.get("mensagem", "")
             if mensagem and "Advogado encontrado, mas a situação é" in mensagem:
@@ -387,7 +450,6 @@ def editar_perfil():
         nome_oab = advogado.get("nome", "")
         situacao = advogado.get("situacao", "")
 
-        # 🔥 VERIFICA A SITUAÇÃO IGUAL AO CADASTRO
         if situacao.upper() != "REGULAR":
             return jsonify({
                 "error": f"Sua situação é {situacao}. Apenas advogados regulares podem editar seu perfil."
@@ -424,7 +486,7 @@ def editar_perfil():
             """, (
                 nome,
                 email,
-                cpf_limpo,  # Usa o CPF limpo
+                cpf_limpo,
                 telefone,
                 rg,
                 orgao_expedidor,
@@ -452,7 +514,7 @@ def editar_perfil():
             """, (
                 nome,
                 email,
-                cpf_limpo,  # Usa o CPF limpo
+                cpf_limpo,
                 telefone,
                 rg,
                 orgao_expedidor,
@@ -1182,3 +1244,409 @@ def adicionar_advogado_escritorio():
             cursor.close()
         if conexao_db:
             conexao_db.close()
+
+
+@app.route('/representante', methods=['POST'])
+def criar_representante():
+    """
+    Rota para cadastrar um representante de um cliente jurídico
+    """
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    if tipo_usuario not in [0, 1]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    dados = request.get_json()
+
+    id_cliente = dados.get('id_cliente')
+    nome_completo = dados.get('nome_completo')
+    profissao = dados.get('profissao')
+    cpf = dados.get('cpf')
+    sexo = dados.get('sexo')
+    rg = dados.get('rg')
+    orgao_expedidor = dados.get('orgao_expedidor')
+    nacionalidade = dados.get('nacionalidade')
+    estado_civil = dados.get('estado_civil')
+
+    if not id_cliente:
+        return jsonify({'error': 'ID do cliente é obrigatório'}), 400
+    if not nome_completo or not nome_completo.strip():
+        return jsonify({'error': 'Nome completo é obrigatório'}), 400
+    if not cpf:
+        return jsonify({'error': 'CPF é obrigatório'}), 400
+    if not validar_cpf(cpf):
+        return jsonify({'error': 'CPF inválido'}), 400
+    if not sexo:
+        return jsonify({'error': 'Sexo é obrigatório'}), 400
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE ID_USUARIOS = ? AND TIPO = 3", (id_cliente,))
+        if not cur.fetchone():
+            return jsonify({'error': 'Cliente jurídico não encontrado'}), 404
+
+        cur.execute("SELECT ID_REPRESENTANTE FROM REPRESENTANTES WHERE CPF = ? AND ID_CLIENTE_JURIDICO = ?", (cpf, id_cliente))
+        if cur.fetchone():
+            return jsonify({'error': 'Este CPF já está cadastrado como representante para este cliente'}), 400
+
+        cur.execute("""
+            INSERT INTO REPRESENTANTES
+            (ID_CLIENTE_JURIDICO, NOME_COMPLETO, PROFISSAO, CPF, SEXO, RG, ORGAO_EXPEDIDOR, NACIONALIDADE, ESTADO_CIVIL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING ID_REPRESENTANTE
+        """, (
+            id_cliente,
+            nome_completo.strip(),
+            profissao.strip() if profissao else None,
+            cpf,
+            sexo,
+            rg.strip() if rg else None,
+            orgao_expedidor.strip() if orgao_expedidor else None,
+            nacionalidade.strip() if nacionalidade else None,
+            estado_civil.strip() if estado_civil else None
+        ))
+
+        id_representante = cur.fetchone()[0]
+        con.commit()
+
+        return jsonify({
+            'mensagem': 'Representante cadastrado com sucesso!',
+            'id_representante': id_representante
+        }), 201
+
+    except Exception as e:
+        con.rollback()
+        return jsonify({'error': f'Erro ao cadastrar representante: {str(e)}'}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/clientes', methods=['GET'])
+def listar_clientes():
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    if tipo_usuario not in [0, 1]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT 
+                ID_USUARIOS, 
+                NOME, 
+                CPF, 
+                EMAIL, 
+                TELEFONE,
+                TIPO,
+                ATIVO,
+                RAZAO_SOCIAL,
+                NOME_FANTASIA,
+                CNPJ,
+                DATA_CADASTRO
+            FROM USUARIOS
+            WHERE TIPO IN (2, 3)
+            ORDER BY DATA_CADASTRO DESC
+        """)
+
+        rows = cur.fetchall()
+        clientes = []
+        for row in rows:
+            nome_exibicao = row[1] if row[1] else (row[7] or row[8] or '--')
+            doc = row[2] if row[2] else (row[9] if row[9] else '--')
+            if doc and doc != '--':
+                if len(doc) == 11:
+                    doc = f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
+                elif len(doc) == 14:
+                    doc = f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
+
+            status = 'ativo' if row[6] == 1 else 'inativo'
+
+            data_cadastro = None
+            if row[10]:
+                if hasattr(row[10], 'strftime'):
+                    data_cadastro = row[10].strftime('%Y-%m-%d')
+                else:
+                    data_cadastro = str(row[10])
+
+            clientes.append({
+                'id': row[0],
+                'nome': nome_exibicao,
+                'cpf': doc,
+                'email': row[3] or '--',
+                'telefone': row[4] or '--',
+                'tipo': 'fisico' if row[5] == 2 else 'juridico',
+                'status': status,
+                'data_cadastro': data_cadastro
+            })
+
+        return jsonify({'clientes': clientes}), 200
+
+    except Exception as e:
+        print(f"Erro ao listar clientes: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+
+@app.route('/cliente/<int:id_cliente>', methods=['GET'])
+def buscar_cliente(id_cliente):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    if tipo_usuario not in [0, 1]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+
+        cur.execute("""
+            SELECT 
+                ID_USUARIOS, 
+                NOME, 
+                CPF, 
+                EMAIL, 
+                TELEFONE,
+                TIPO,
+                ATIVO,
+                RAZAO_SOCIAL,
+                NOME_FANTASIA,
+                CNPJ,
+                DATA_CADASTRO,
+                RG,
+                ORGAO_EXPEDIDOR,
+                NACIONALIDADE,
+                ESTADO_CIVIL,
+                PROFISSAO,
+                CEP,
+                LOGRADOURO,
+                NUMERO,
+                COMPLEMENTO,
+                BAIRRO,
+                CIDADE,
+                ESTADO,
+                SEXO,
+                DATA_NASCIMENTO
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ?
+        """, (id_cliente,))
+
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'Cliente não encontrado'}), 404
+
+        nome_exibicao = row[1] if row[1] else (row[7] or row[8] or '--')
+        doc = row[2] if row[2] else (row[9] if row[9] else '--')
+
+        status = 'ativo' if row[6] == 1 else 'inativo'
+        tipo = 'fisico' if row[5] == 2 else 'juridico'
+
+        cliente = {
+            'id': row[0],
+            'nome': nome_exibicao,
+            'cpf': doc,
+            'email': row[3] or '--',
+            'telefone': row[4] or '--',
+            'tipo': tipo,
+            'status': status,
+            'data_cadastro': row[10].strftime('%d/%m/%Y') if row[10] else None,
+            'rg': row[11] or '--',
+            'orgao_expedidor': row[12] or '--',
+            'nacionalidade': row[13] or '--',
+            'estado_civil': row[14] or '--',
+            'profissao': row[15] or '--',
+            'cep': row[16] or '--',
+            'logradouro': row[17] or '--',
+            'numero': row[18] or '--',
+            'complemento': row[19] or '--',
+            'bairro': row[20] or '--',
+            'cidade': row[21] or '--',
+            'estado': row[22] or '--',
+            'sexo': row[23] or '--',
+            'data_nascimento': row[24].strftime('%d/%m/%Y') if row[24] else '--',
+            'razao_social': row[7] or '--',
+            'nome_fantasia': row[8] or '--'
+        }
+
+
+        if tipo == 'juridico':
+            cur.execute("""
+                SELECT 
+                    ID_REPRESENTANTE,
+                    NOME_COMPLETO,
+                    PROFISSAO,
+                    CPF,
+                    SEXO,
+                    RG,
+                    ORGAO_EXPEDIDOR,
+                    NACIONALIDADE,
+                    ESTADO_CIVIL
+                FROM REPRESENTANTES
+                WHERE ID_CLIENTE_JURIDICO = ?
+                AND ATIVO = 1
+            """, (id_cliente,))
+
+            rep = cur.fetchone()
+            if rep:
+                cliente['representante'] = {
+                    'id': rep[0],
+                    'nome': rep[1] or '--',
+                    'profissao': rep[2] or '--',
+                    'cpf': rep[3] or '--',
+                    'sexo': rep[4] or '--',
+                    'rg': rep[5] or '--',
+                    'orgao_expedidor': rep[6] or '--',
+                    'nacionalidade': rep[7] or '--',
+                    'estado_civil': rep[8] or '--'
+                }
+            else:
+                cliente['representante'] = None
+
+        return jsonify({'cliente': cliente}), 200
+
+    except Exception as e:
+        print(f"Erro ao buscar cliente: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+
+@app.route('/cliente/<int:id_cliente>', methods=['PUT'])
+def atualizar_cliente(id_cliente):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    if tipo_usuario not in [0, 1]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    dados = request.get_json()
+
+    nome = dados.get('nome')
+    cpf = dados.get('cpf')
+    email = dados.get('email')
+    telefone = dados.get('telefone')
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
+        if not cur.fetchone():
+            return jsonify({'error': 'Cliente não encontrado'}), 404
+
+        cur.execute("""
+            UPDATE USUARIOS
+            SET NOME = ?,
+                CPF = ?,
+                EMAIL = ?,
+                TELEFONE = ?
+            WHERE ID_USUARIOS = ?
+        """, (nome, cpf, email, telefone, id_cliente))
+
+        con.commit()
+        return jsonify({'message': 'Cliente atualizado com sucesso!'}), 200
+
+    except Exception as e:
+        con.rollback()
+        print(f"Erro ao atualizar cliente: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+
+@app.route('/cliente/<int:id_cliente>/inativar', methods=['PUT'])
+def inativar_cliente(id_cliente):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    if tipo_usuario not in [0, 1]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
+        if not cur.fetchone():
+            return jsonify({'error': 'Cliente não encontrado'}), 404
+
+        cur.execute("""
+            UPDATE USUARIOS
+            SET ATIVO = 0
+            WHERE ID_USUARIOS = ?
+        """, (id_cliente,))
+
+        con.commit()
+        return jsonify({'message': 'Cliente inativado com sucesso!'}), 200
+
+    except Exception as e:
+        con.rollback()
+        print(f"Erro ao inativar cliente: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/<int:id_cliente>/ativar', methods=['PUT'])
+def ativar_cliente(id_cliente):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    if tipo_usuario not in [0, 1]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
+        if not cur.fetchone():
+            return jsonify({'error': 'Cliente não encontrado'}), 404
+
+        cur.execute("""
+            UPDATE USUARIOS
+            SET ATIVO = 1
+            WHERE ID_USUARIOS = ?
+        """, (id_cliente,))
+
+        con.commit()
+        return jsonify({'message': 'Cliente ativado com sucesso!'}), 200
+
+    except Exception as e:
+        con.rollback()
+        print(f"Erro ao ativar cliente: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+

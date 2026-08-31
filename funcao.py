@@ -18,7 +18,8 @@ def verificar_existente(valor, campo, id_usuarios=None):
         campos_permitidos = {
             "CPF": "CPF",
             "EMAIL": "EMAIL",
-            "NUM_OAB": "NUM_OAB"
+            "NUM_OAB": "NUM_OAB",
+            "CNPJ": "CNPJ"  
         }
 
         if campo not in campos_permitidos:
