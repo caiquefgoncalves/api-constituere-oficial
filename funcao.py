@@ -9,7 +9,6 @@ from email.mime.text import MIMEText
 from main import app
 
 
-
 def verificar_existente(valor, campo, id_usuarios=None):
     con = conexao()
     cur = con.cursor()
@@ -19,7 +18,7 @@ def verificar_existente(valor, campo, id_usuarios=None):
             "CPF": "CPF",
             "EMAIL": "EMAIL",
             "NUM_OAB": "NUM_OAB",
-            "CNPJ": "CNPJ"  
+            "CNPJ": "CNPJ"
         }
 
         if campo not in campos_permitidos:
@@ -161,6 +160,43 @@ def validar_cpf(cpf):
     return True
 
 
+def validar_idade(data_nascimento):
+    """
+    Valida se a idade está entre 18 e 120 anos
+
+    Args:
+        data_nascimento: string no formato YYYY-MM-DD
+
+    Returns:
+        tuple: (valido, mensagem_erro)
+    """
+    if not data_nascimento:
+        return False, "Data de nascimento é obrigatória"
+
+    try:
+        # Converte a string para data
+        ano, mes, dia = data_nascimento.split('-')
+        data_nasc = datetime.datetime(int(ano), int(mes), int(dia))
+        data_atual = datetime.datetime.now()
+
+        # Calcula a idade
+        idade = data_atual.year - data_nasc.year
+        if data_atual.month < data_nasc.month or (
+                data_atual.month == data_nasc.month and data_atual.day < data_nasc.day):
+            idade -= 1
+
+        if idade < 18:
+            return False, "O cliente deve ter no mínimo 18 anos para ser cadastrado."
+        if idade > 120:
+            return False, "A idade do cliente não pode ser superior a 120 anos."
+
+        return True, "Idade válida"
+
+    except Exception as e:
+        print(f"Erro ao validar idade: {e}")
+        return False, "Data de nascimento inválida."
+
+
 def enviar_email(destinatario, assunto, nomeescritorio, nome):
     user = "juriscriptoffice@gmail.com"
     senha = "mufi rewg elal bbaw"
@@ -173,7 +209,6 @@ def enviar_email(destinatario, assunto, nomeescritorio, nome):
         msg["Subject"] = assunto
         msg["From"] = user
         msg["To"] = destinatario
-
 
         server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
         server.login(user, senha)

@@ -5,8 +5,8 @@ DEBUG = True
 
 
 DB_HOST = 'localhost'
-DB_NAME = r'C:\Users\Usuario\Desktop\api-constituere-oficial-main\BANCO_CONSTITUERE.FDB'
+DB_NAME = r'C:\Users\Aluno\Downloads\api-constituere-oficial-main\BANCO_CONSTITUERE.FDB'
 DB_USER = 'sysdba'
-DB_PASSWORD = 'SYSDBA'
+DB_PASSWORD = 'sysdba'
 
 UPLOAD_FOLDER = os.path.abspath(os.path.dirname(__file__))
