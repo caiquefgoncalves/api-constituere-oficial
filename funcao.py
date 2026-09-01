@@ -1,12 +1,13 @@
-from flask_bcrypt import generate_password_hash, check_password_hash
-from flask import jsonify, request, render_template
+from flask import jsonify, request, render_template, current_app
 from db import conexao
-from flask import current_app
 import jwt
 import datetime
 import smtplib
 from email.mime.text import MIMEText
-from main import app
+import re
+import calendar
+import datetime
+from decimal import Decimal, ROUND_HALF_UP
 
 
 def verificar_existente(valor, campo, id_usuarios=None):
@@ -76,56 +77,6 @@ def senha_forte(senha):
     return all(criterios.values())
 
 
-def gerar_token(tipo, id_usuarios, tempo):
-    payload = {
-        'tipo': tipo,
-        'id_usuarios': id_usuarios,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=tempo)
-    }
-    return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
-
-
-def decodificar_token():
-    try:
-        token = None
-
-        token = request.headers.get('X-Access-Token')
-        if token:
-            print("✅ Token encontrado no header X-Access-Token")
-
-        if not token:
-            token = request.cookies.get('acess_token')
-            if token:
-                print("✅ Token encontrado no cookie")
-
-        if not token:
-            auth_header = request.headers.get('Authorization')
-            if auth_header and auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
-                if token:
-                    print("✅ Token encontrado no header Authorization")
-
-        if not token:
-            print("❌ Token não encontrado em nenhuma fonte")
-            return False
-
-        senha_secreta = current_app.config['SECRET_KEY']
-        payload = jwt.decode(token, senha_secreta, algorithms=['HS256'])
-
-        print(f"✅ Token decodificado - ID: {payload['id_usuarios']}, Tipo: {payload['tipo']}")
-        return {'tipo': payload['tipo'], 'id_usuarios': payload['id_usuarios']}
-
-    except jwt.ExpiredSignatureError:
-        print("❌ Token expirado")
-        return False
-    except jwt.InvalidTokenError as e:
-        print(f"❌ Token inválido: {e}")
-        return False
-    except Exception as e:
-        print(f"❌ Erro ao decodificar token: {e}")
-        return False
-
-
 def validar_cpf(cpf):
     cpf = ''.join(filter(str.isdigit, str(cpf)))
 
@@ -174,12 +125,10 @@ def validar_idade(data_nascimento):
         return False, "Data de nascimento é obrigatória"
 
     try:
-        # Converte a string para data
         ano, mes, dia = data_nascimento.split('-')
         data_nasc = datetime.datetime(int(ano), int(mes), int(dia))
         data_atual = datetime.datetime.now()
 
-        # Calcula a idade
         idade = data_atual.year - data_nasc.year
         if data_atual.month < data_nasc.month or (
                 data_atual.month == data_nasc.month and data_atual.day < data_nasc.day):
@@ -197,11 +146,121 @@ def validar_idade(data_nascimento):
         return False, "Data de nascimento inválida."
 
 
+def converter_decimal(valor):
+    if valor is None or valor == '':
+        return None
+
+    if isinstance(valor, str):
+        valor = valor.replace('R$', '').replace(' ', '')
+
+        if ',' in valor:
+            valor = valor.replace('.', '').replace(',', '.')
+
+    return Decimal(str(valor)).quantize(
+        Decimal('0.01'),
+        rounding=ROUND_HALF_UP
+    )
+
+
+def limpar_documento(valor):
+    if not valor:
+        return None
+
+    return re.sub(r'\D', '', str(valor))
+
+
+def validar_numero_processo(numero_processo):
+    padrao = r'^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$'
+
+    return re.match(
+        padrao,
+        numero_processo
+    ) is not None
+
+
+def ajustar_fim_semana(data_vencimento):
+    if data_vencimento.weekday() == 5:
+        return data_vencimento + datetime.timedelta(days=2)
+
+    if data_vencimento.weekday() == 6:
+        return data_vencimento + datetime.timedelta(days=1)
+
+    return data_vencimento
+
+
+def criar_data_vencimento(ano, mes, dia):
+    ultimo_dia = calendar.monthrange(
+        ano,
+        mes
+    )[1]
+
+    dia = min(
+        dia,
+        ultimo_dia
+    )
+
+    vencimento = datetime.date(
+        ano,
+        mes,
+        dia
+    )
+
+    return ajustar_fim_semana(
+        vencimento
+    )
+
+
+def adicionar_meses(ano, mes, quantidade):
+    total = (
+        ano * 12
+        + (mes - 1)
+        + quantidade
+    )
+
+    novo_ano = total // 12
+    novo_mes = total % 12 + 1
+
+    return novo_ano, novo_mes
+
+
+def dividir_valor(valor_total, quantidade):
+    valor_total = converter_decimal(
+        valor_total
+    )
+
+    if valor_total is None:
+        return []
+
+    valor_base = (
+        valor_total / Decimal(quantidade)
+    ).quantize(
+        Decimal('0.01'),
+        rounding=ROUND_HALF_UP
+    )
+
+    valores = [
+        valor_base
+        for _ in range(quantidade)
+    ]
+
+    soma = sum(
+        valores,
+        Decimal('0.00')
+    )
+
+    diferenca = valor_total - soma
+
+    valores[-1] += diferenca
+
+    return valores
+
+
 def enviar_email(destinatario, assunto, nomeescritorio, nome):
     user = "juriscriptoffice@gmail.com"
     senha = "mufi rewg elal bbaw"
 
     try:
+        from main import app
         with app.app_context():
             html = render_template("email.html", nomeescritorio=nomeescritorio, nome=nome)
 
@@ -220,4 +279,56 @@ def enviar_email(destinatario, assunto, nomeescritorio, nome):
 
     except Exception as e:
         print(f"Erro ao enviar email para {destinatario}: {e}")
+        return False
+
+
+def gerar_token(tipo, id_usuarios, tempo):
+    from main import app
+    payload = {
+        'tipo': tipo,
+        'id_usuarios': id_usuarios,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=tempo)
+    }
+    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+
+def decodificar_token():
+    try:
+        token = None
+
+        token = request.headers.get('X-Access-Token')
+        if token:
+            print("✅ Token encontrado no header X-Access-Token")
+
+        if not token:
+            token = request.cookies.get('acess_token')
+            if token:
+                print("✅ Token encontrado no cookie")
+
+        if not token:
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header.split(' ')[1]
+                if token:
+                    print("✅ Token encontrado no header Authorization")
+
+        if not token:
+            print("❌ Token não encontrado em nenhuma fonte")
+            return False
+
+        from main import app
+        senha_secreta = app.config['SECRET_KEY']
+        payload = jwt.decode(token, senha_secreta, algorithms=['HS256'])
+
+        print(f"✅ Token decodificado - ID: {payload['id_usuarios']}, Tipo: {payload['tipo']}")
+        return {'tipo': payload['tipo'], 'id_usuarios': payload['id_usuarios']}
+
+    except jwt.ExpiredSignatureError:
+        print("❌ Token expirado")
+        return False
+    except jwt.InvalidTokenError as e:
+        print(f"❌ Token inválido: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Erro ao decodificar token: {e}")
         return False

@@ -36,7 +36,6 @@ def handle_options():
 
 app.config.from_pyfile('config.py')
 
-
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'Usuarios'), exist_ok=True)
@@ -47,9 +46,8 @@ def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
-
 from usuario import *
-from funcao import *
+from processos import *
 
 if __name__ == '__main__':
     print("\n=== ROTAS REGISTRADAS ===")
