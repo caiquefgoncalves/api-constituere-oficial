@@ -244,6 +244,15 @@ def cadastrar_processo():
         )
     )
 
+    distribuicao_exito = honorarios.get('distribuicao_exito')
+    valor_entrada_exito = converter_decimal(honorarios.get('valor_entrada_exito'))
+    numero_parcelas_exito = honorarios.get('numero_parcelas_exito')
+    dia_vencimento_exito = honorarios.get('dia_vencimento_exito')
+    mes_inicio_exito = honorarios.get('mes_inicio_exito')
+    valor_salario_exito = converter_decimal(honorarios.get('valor_salario_exito'))
+    valor_causa_exito = converter_decimal(honorarios.get('valor_causa_exito'))
+    quantidade_exito = honorarios.get('quantidade_exito')
+
     valor_total = converter_decimal(0)
 
     if tipo_honorario == 'SALARIOS':
@@ -411,39 +420,77 @@ def cadastrar_processo():
 
     if tem_exito:
         if not tipo_exito:
-            return jsonify({
-                'error': 'Tipo do honorário de êxito é obrigatório'
-            }), 400
-
+            return jsonify({'error': 'Tipo do honorário de êxito é obrigatório'}), 400
         tipo_exito = tipo_exito.upper()
+        if tipo_exito not in ['PERCENTUAL', 'SALARIOS_BENEFICIO']:
+            return jsonify({'error': 'Tipo do honorário de êxito inválido'}), 400
+        if valor_exito is None or valor_exito <= 0:
+            return jsonify({'error': 'Valor do êxito é obrigatório'}), 400
+        if tipo_exito == 'PERCENTUAL' and valor_exito > 100:
+            return jsonify({'error': 'Percentual de êxito não pode ser maior que 100'}), 400
 
-        if tipo_exito not in [
-            'PERCENTUAL',
-            'SALARIOS_BENEFICIO'
-        ]:
-            return jsonify({
-                'error': 'Tipo do honorário de êxito inválido'
-            }), 400
+        if not distribuicao_exito:
+            return jsonify({'error': 'Distribuição do êxito é obrigatória'}), 400
+        distribuicao_exito = distribuicao_exito.upper()
+        if distribuicao_exito not in ['AVISTA', 'PARCELADO', 'ENTRADA_PARCELAS']:
+            return jsonify({'error': 'Distribuição do êxito inválida'}), 400
 
-        if (
-            valor_exito is None
-            or valor_exito <= 0
-        ):
-            return jsonify({
-                'error': 'Valor do êxito é obrigatório'
-            }), 400
+        if tipo_exito == 'SALARIOS_BENEFICIO':
+            if not quantidade_exito or quantidade_exito <= 0:
+                return jsonify({'error': 'Quantidade de salários do êxito é obrigatória'}), 400
+            if not valor_salario_exito or valor_salario_exito <= 0:
+                return jsonify({'error': 'Valor do salário do êxito é obrigatório'}), 400
+            valor_total_exito = quantidade_exito * valor_salario_exito
+        else:
+            if not valor_causa_exito or valor_causa_exito <= 0:
+                return jsonify({'error': 'Valor da causa para êxito percentual é obrigatório'}), 400
+            valor_total_exito = (valor_exito / 100) * valor_causa_exito
 
-        if (
-            tipo_exito == 'PERCENTUAL'
-            and valor_exito > 100
-        ):
-            return jsonify({
-                'error': 'Percentual de êxito não pode ser maior que 100'
-            }), 400
+        if distribuicao_exito == 'AVISTA':
+            num_parcelas_exito = 1
+            valor_entrada_exito = None
+        elif distribuicao_exito == 'PARCELADO':
+            try:
+                num_parcelas_exito = int(numero_parcelas_exito)
+            except:
+                return jsonify({'error': 'Número de parcelas do êxito inválido'}), 400
+            if num_parcelas_exito <= 0:
+                return jsonify({'error': 'Número de parcelas do êxito deve ser maior que zero'}), 400
+            valor_entrada_exito = None
+        elif distribuicao_exito == 'ENTRADA_PARCELAS':
+            try:
+                num_parcelas_exito = int(numero_parcelas_exito)
+            except:
+                return jsonify({'error': 'Número de parcelas do êxito inválido'}), 400
+            if num_parcelas_exito <= 0:
+                return jsonify({'error': 'Número de parcelas do êxito deve ser maior que zero'}), 400
+            if valor_entrada_exito is None or valor_entrada_exito <= 0:
+                return jsonify({'error': 'Valor da entrada do êxito é obrigatório'}), 400
+            if valor_entrada_exito >= valor_total_exito:
+                return jsonify({'error': 'Valor da entrada do êxito deve ser menor que o valor total'}), 400
+
+        try:
+            dia_vencimento_exito = int(dia_vencimento_exito)
+            mes_inicio_exito = int(mes_inicio_exito)
+        except:
+            return jsonify({'error': 'Dia ou mês de vencimento do êxito inválido'}), 400
+        if dia_vencimento_exito < 1 or dia_vencimento_exito > 31:
+            return jsonify({'error': 'Dia de vencimento do êxito inválido'}), 400
+        if mes_inicio_exito < 1 or mes_inicio_exito > 12:
+            return jsonify({'error': 'Mês de início do êxito inválido'}), 400
 
     else:
         tipo_exito = None
         valor_exito = None
+        distribuicao_exito = None
+        valor_entrada_exito = None
+        num_parcelas_exito = None
+        dia_vencimento_exito = None
+        mes_inicio_exito = None
+        valor_salario_exito = None
+        valor_causa_exito = None
+        quantidade_exito = None
+        valor_total_exito = converter_decimal(0)
 
     data_nascimento = None
 
@@ -477,33 +524,17 @@ def cadastrar_processo():
             }), 409
 
         cur.execute("""
-            SELECT DISTINCT
-                cliente.ID_USUARIOS
-
-            FROM USUARIOS cliente
-
-            INNER JOIN ADVOGADO_ESCRITORIO ae_responsavel
-                ON ae_responsavel.ID_USUARIOS =
-                   cliente.ID_USUARIO_RESPONSAVEL
-
-            INNER JOIN ADVOGADO_ESCRITORIO ae_logado
-                ON ae_logado.ID_ESCRITORIOS =
-                   ae_responsavel.ID_ESCRITORIOS
-
-            WHERE cliente.ID_USUARIOS = ?
-              AND cliente.TIPO IN (2, 3)
-              AND cliente.ATIVO = 1
-              AND ae_logado.ID_USUARIOS = ?
-        """, (
-            id_cliente,
-            id_advogado
-        ))
-
+            SELECT ID_USUARIOS
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ?
+              AND TIPO IN (2, 3)
+              AND ATIVO = 1
+              AND ID_USUARIO_RESPONSAVEL = ?
+        """, (id_cliente, id_advogado))
         cliente = cur.fetchone()
-
         if not cliente:
             return jsonify({
-                'error': 'Cliente não encontrado ou não pertence aos seus escritórios'
+                'error': 'Cliente não encontrado ou não pertence a este advogado'
             }), 403
 
         cur.execute("""
@@ -804,12 +835,85 @@ def cadastrar_processo():
                     numero_parcelas + 1
                 )
 
+        id_pagamento_exito = None
+        if tem_exito:
+            cur.execute("""
+                INSERT INTO PAGAMENTO_EXITO (
+                    ID_PAGAMENTO,
+                    TIPO_PAGAMENTO,
+                    VALOR_SALARIO,
+                    VALOR_CAUSA,
+                    QUANTIDADE,
+                    DISTRIBUICAO,
+                    VALOR_ENTRADA,
+                    NUM_PARCELAS,
+                    DIA_VENCIMENTO,
+                    MES_INICIO
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING ID_PAGAMENTO_EXITO
+            """, (
+                id_pagamento,
+                tipo_exito,
+                valor_salario_exito,
+                valor_causa_exito,
+                quantidade_exito,
+                distribuicao_exito,
+                valor_entrada_exito,
+                num_parcelas_exito,
+                dia_vencimento_exito,
+                mes_inicio_exito
+            ))
+            id_pagamento_exito = cur.fetchone()[0]
+
+            ano_inicio_exito = data_inicio.year
+            if mes_inicio_exito < data_inicio.month:
+                ano_inicio_exito += 1
+
+            if distribuicao_exito == 'AVISTA':
+                vencimento = criar_data_vencimento(ano_inicio_exito, mes_inicio_exito, dia_vencimento_exito)
+                cur.execute("""
+                    INSERT INTO PARCELAS_EXITO (
+                        ID_PAGAMENTO_EXITO, NUMERO_PARCELA, VALOR_PARCELA,
+                        DATA_VENCIMENTO, DATA_PAGAMENTO, VALOR_PAGO, STATUS
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (id_pagamento_exito, 1, valor_total_exito, vencimento, None, None, 'PENDENTE'))
+            elif distribuicao_exito == 'PARCELADO':
+                valores_exito = dividir_valor(valor_total_exito, num_parcelas_exito)
+                for indice in range(num_parcelas_exito):
+                    ano, mes = adicionar_meses(ano_inicio_exito, mes_inicio_exito, indice)
+                    vencimento = criar_data_vencimento(ano, mes, dia_vencimento_exito)
+                    cur.execute("""
+                        INSERT INTO PARCELAS_EXITO (
+                            ID_PAGAMENTO_EXITO, NUMERO_PARCELA, VALOR_PARCELA,
+                            DATA_VENCIMENTO, DATA_PAGAMENTO, VALOR_PAGO, STATUS
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (id_pagamento_exito, indice+1, valores_exito[indice], vencimento, None, None, 'PENDENTE'))
+            elif distribuicao_exito == 'ENTRADA_PARCELAS':
+                cur.execute("""
+                    INSERT INTO PARCELAS_EXITO (
+                        ID_PAGAMENTO_EXITO, NUMERO_PARCELA, VALOR_PARCELA,
+                        DATA_VENCIMENTO, DATA_PAGAMENTO, VALOR_PAGO, STATUS
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (id_pagamento_exito, 0, valor_entrada_exito, data_inicio, None, None, 'PENDENTE'))
+                restante_exito = valor_total_exito - valor_entrada_exito
+                valores_exito = dividir_valor(restante_exito, num_parcelas_exito)
+                for indice in range(num_parcelas_exito):
+                    ano, mes = adicionar_meses(ano_inicio_exito, mes_inicio_exito, indice)
+                    vencimento = criar_data_vencimento(ano, mes, dia_vencimento_exito)
+                    cur.execute("""
+                        INSERT INTO PARCELAS_EXITO (
+                            ID_PAGAMENTO_EXITO, NUMERO_PARCELA, VALOR_PARCELA,
+                            DATA_VENCIMENTO, DATA_PAGAMENTO, VALOR_PAGO, STATUS
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (id_pagamento_exito, indice+1, valores_exito[indice], vencimento, None, None, 'PENDENTE'))
+
         con.commit()
 
         return jsonify({
             'mensagem': 'Processo cadastrado com sucesso',
             'id_processo': id_processo,
             'id_pagamento': id_pagamento,
+            'id_pagamento_exito': id_pagamento_exito,
             'numero_processo': numero_processo,
             'parcelas_criadas': quantidade_parcelas_criadas
         }), 201
@@ -968,13 +1072,7 @@ def listar_processos():
                     or '--'
                 ),
 
-                # Ainda não existe STATUS
-                # na estrutura de PROCESSOS
-                # que você me passou.
                 'status': 'em_andamento',
-
-                # Também não existe DESCRICAO
-                # na tabela PROCESSOS atual.
                 'descricao': ''
             })
 
@@ -993,6 +1091,312 @@ def listar_processos():
             'error': str(e)
         }), 500
 
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/pagamentos', methods=['GET'])
+def listar_pagamentos():
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_advogado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    filtro_status = request.args.get('status')
+    filtro_cliente = request.args.get('cliente')
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 10))
+    offset = (page - 1) * limit
+
+    con = conexao()
+    cur = con.cursor()
+
+    def converter_data_firebird(valor):
+        if valor is None:
+            return None
+        if isinstance(valor, datetime.date):
+            return valor
+        if isinstance(valor, str):
+            for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
+                try:
+                    return datetime.datetime.strptime(valor, fmt).date()
+                except:
+                    continue
+            return None
+        try:
+            dias = int(valor)
+            return datetime.date(1900, 1, 1) + datetime.timedelta(days=dias)
+        except:
+            return None
+
+    try:
+        sql_totais = """
+            SELECT
+                'prolabore' AS tipo,
+                parc.ID_PARCELAS,
+                parc.VALOR_PARCELA,
+                parc.DATA_VENCIMENTO,
+                parc.STATUS,
+                u.NOME AS nome_cliente,
+                u.RAZAO_SOCIAL,
+                u.NOME_FANTASIA
+            FROM PARCELAS parc
+            INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+            INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+            INNER JOIN USUARIOS u ON p.ID_USUARIOS_CLIENTE = u.ID_USUARIOS
+            WHERE p.ID_USUARIOS_ADVOGADO = ?
+
+            UNION ALL
+
+            SELECT
+                'exito' AS tipo,
+                pe.ID_PARCELA_EXITO,
+                pe.VALOR_PARCELA,
+                pe.DATA_VENCIMENTO,
+                pe.STATUS,
+                u.NOME AS nome_cliente,
+                u.RAZAO_SOCIAL,
+                u.NOME_FANTASIA
+            FROM PARCELAS_EXITO pe
+            INNER JOIN PAGAMENTO_EXITO pex ON pe.ID_PAGAMENTO_EXITO = pex.ID_PAGAMENTO_EXITO
+            INNER JOIN PAGAMENTOS pag ON pex.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+            INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+            INNER JOIN USUARIOS u ON p.ID_USUARIOS_CLIENTE = u.ID_USUARIOS
+            WHERE p.ID_USUARIOS_ADVOGADO = ?
+        """
+
+        params_totais = [id_advogado, id_advogado]
+
+        if filtro_cliente:
+            sql_totais += " AND (UPPER(nome_cliente) LIKE ? OR UPPER(RAZAO_SOCIAL) LIKE ? OR UPPER(NOME_FANTASIA) LIKE ?)"
+            like = f"%{filtro_cliente.upper()}%"
+            params_totais.extend([like, like, like])
+
+        cur.execute(sql_totais, tuple(params_totais))
+        rows_totais = cur.fetchall()
+
+        total_recebido = 0.0
+        total_a_pagar = 0.0
+        total_atrasado = 0.0
+        hoje = datetime.date.today()
+
+        for row in rows_totais:
+            valor = float(row[2]) if row[2] else 0.0
+            status = row[4]
+            data_venc_raw = row[3]
+            data_venc = converter_data_firebird(data_venc_raw)
+
+            if status == 'PAGA':
+                total_recebido += valor
+            else:  # PENDENTE ou outro
+                if data_venc and data_venc < hoje:
+                    total_atrasado += valor
+                else:
+                    total_a_pagar += valor
+
+
+        sql_lista = """
+            SELECT FIRST ? SKIP ?
+                tipo,
+                id,
+                numero,
+                valor,
+                vencimento,
+                pagamento,
+                status,
+                forma,
+                nome_cliente,
+                razao,
+                fantasia,
+                tipo_processo,
+                num_processo
+            FROM (
+                SELECT
+                    'prolabore' AS tipo,
+                    parc.ID_PARCELAS AS id,
+                    parc.NUMERO_PARCELA AS numero,
+                    parc.VALOR_PARCELA AS valor,
+                    parc.DATA_VENCIMENTO AS vencimento,
+                    parc.DATA_PAGAMENTO AS pagamento,
+                    parc.STATUS AS status,
+                    pag.FORM_PAGAMENTO AS forma,
+                    u.NOME AS nome_cliente,
+                    u.RAZAO_SOCIAL AS razao,
+                    u.NOME_FANTASIA AS fantasia,
+                    p.TIPO_PROCESSO AS tipo_processo,
+                    p.NUM_PROCESSO AS num_processo
+                FROM PARCELAS parc
+                INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+                INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+                INNER JOIN USUARIOS u ON p.ID_USUARIOS_CLIENTE = u.ID_USUARIOS
+                WHERE p.ID_USUARIOS_ADVOGADO = ?
+
+                UNION ALL
+
+                SELECT
+                    'exito' AS tipo,
+                    pe.ID_PARCELA_EXITO AS id,
+                    pe.NUMERO_PARCELA AS numero,
+                    pe.VALOR_PARCELA AS valor,
+                    pe.DATA_VENCIMENTO AS vencimento,
+                    pe.DATA_PAGAMENTO AS pagamento,
+                    pe.STATUS AS status,
+                    '--' AS forma,
+                    u.NOME AS nome_cliente,
+                    u.RAZAO_SOCIAL AS razao,
+                    u.NOME_FANTASIA AS fantasia,
+                    p.TIPO_PROCESSO AS tipo_processo,
+                    p.NUM_PROCESSO AS num_processo
+                FROM PARCELAS_EXITO pe
+                INNER JOIN PAGAMENTO_EXITO pex ON pe.ID_PAGAMENTO_EXITO = pex.ID_PAGAMENTO_EXITO
+                INNER JOIN PAGAMENTOS pag ON pex.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+                INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+                INNER JOIN USUARIOS u ON p.ID_USUARIOS_CLIENTE = u.ID_USUARIOS
+                WHERE p.ID_USUARIOS_ADVOGADO = ?
+            ) AS combined
+            ORDER BY vencimento ASC, id ASC
+        """
+
+        params_lista = [limit, offset, id_advogado, id_advogado]
+
+        if filtro_cliente:
+            sql_lista = sql_lista.replace(
+                "ORDER BY vencimento ASC, id ASC",
+                "WHERE (UPPER(nome_cliente) LIKE ? OR UPPER(razao) LIKE ? OR UPPER(fantasia) LIKE ?) ORDER BY vencimento ASC, id ASC"
+            )
+            like = f"%{filtro_cliente.upper()}%"
+            params_lista.extend([like, like, like])
+
+        cur.execute(sql_lista, tuple(params_lista))
+        rows = cur.fetchall()
+
+        pagamentos = []
+
+        for row in rows:
+            tipo = row[0]
+            id_parcela = row[1]
+            numero_parcela = row[2]
+            valor = float(row[3])
+            data_venc_raw = row[4]
+            data_pag_raw = row[5]
+            status_db = row[6]
+            forma_pagamento = row[7] or '--'
+            nome_cliente = row[8] or row[9] or row[10] or '--'
+            tipo_processo = row[11] or 'Processo'
+
+            data_venc = converter_data_firebird(data_venc_raw)
+            data_pag = converter_data_firebird(data_pag_raw)
+
+            if tipo == 'exito':
+                nome_parcela = f"{tipo_processo} - Êxito - {numero_parcela}ª parcela"
+            else:
+                if numero_parcela == 0:
+                    nome_parcela = f"{tipo_processo} - Entrada"
+                else:
+                    nome_parcela = f"{tipo_processo} - {numero_parcela}ª parcela"
+
+            if status_db == 'PAGA':
+                status_pt = 'Paga'
+            else:
+                if data_venc and data_venc < hoje:
+                    status_pt = 'Atrasada'
+                else:
+                    status_pt = 'A pagar'
+
+            pagamentos.append({
+                'id': id_parcela,
+                'nome': nome_parcela,
+                'valor': valor,
+                'cliente': nome_cliente,
+                'status': status_pt,
+                'pagamento': forma_pagamento,
+                'vencimento': data_venc.strftime('%d/%m/%Y') if data_venc else '--',
+                'data_pagamento': data_pag.strftime('%d/%m/%Y') if data_pag else None,
+                'numero_parcela': numero_parcela,
+                'tipo': tipo
+            })
+
+        if filtro_status and filtro_status != 'todos':
+            pagamentos = [p for p in pagamentos if p['status'] == filtro_status]
+
+        return jsonify({
+            'pagamentos': pagamentos,
+            'totais': {
+                'recebido': round(total_recebido, 2),
+                'a_pagar': round(total_a_pagar, 2),
+                'atrasado': round(total_atrasado, 2)
+            },
+            'pagina': page,
+            'limite': limit,
+            'tem_mais': len(pagamentos) == limit
+        }), 200
+
+    except Exception as e:
+        print("Erro ao listar pagamentos:", e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/pagamentos/<int:id_parcela>/baixar', methods=['PUT'])
+def baixar_parcela(id_parcela):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_advogado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT parc.ID_PARCELAS, parc.STATUS
+            FROM PARCELAS parc
+            INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+            INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+            WHERE parc.ID_PARCELAS = ? AND p.ID_USUARIOS_ADVOGADO = ?
+        """, (id_parcela, id_advogado))
+
+        parcela = cur.fetchone()
+
+        if not parcela:
+            return jsonify({'error': 'Parcela não encontrada'}), 404
+
+        if parcela[1] == 'PAGA':
+            return jsonify({'error': 'Esta parcela já foi paga'}), 400
+
+        data_pagamento = datetime.date.today()
+        cur.execute("""
+            UPDATE PARCELAS
+            SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
+            WHERE ID_PARCELAS = ?
+        """, (data_pagamento, id_parcela))
+
+        con.commit()
+
+        return jsonify({
+            'mensagem': 'Pagamento confirmado com sucesso!',
+            'data_pagamento': data_pagamento.strftime('%d/%m/%Y')
+        }), 200
+
+    except Exception as e:
+        con.rollback()
+        print("Erro ao dar baixa na parcela:", e)
+        return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
         con.close()

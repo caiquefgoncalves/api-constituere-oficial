@@ -1,3 +1,4 @@
+from flask import jsonify, request, make_response
 from funcao import *
 from flask_bcrypt import generate_password_hash, check_password_hash
 from main import app
@@ -8,6 +9,7 @@ import concurrent.futures
 import time
 from consulta_cnsa import consultar_cnsa
 from consulta_oab import consultar_oab
+
 
 
 @app.route('/criar_usuarios', methods=['POST'])
@@ -1287,18 +1289,12 @@ def criar_representante():
 @app.route('/clientes', methods=['GET'])
 def listar_clientes():
     token_data = decodificar_token()
-
     if token_data == False:
-        return jsonify({
-            'error': 'Token necessário'
-        }), 401
+        return jsonify({'error': 'Token necessário'}), 401
 
     tipo_usuario = token_data['tipo']
-
     if tipo_usuario not in [0, 1]:
-        return jsonify({
-            'error': 'Acesso não autorizado'
-        }), 403
+        return jsonify({'error': 'Acesso não autorizado'}), 403
 
     id_usuario = token_data['id_usuarios']
 
@@ -1306,118 +1302,46 @@ def listar_clientes():
     cur = con.cursor()
 
     try:
-        if tipo_usuario == 0:
-            cur.execute("""
-                SELECT DISTINCT
-                    cliente.ID_USUARIOS,
-                    cliente.NOME,
-                    cliente.CPF,
-                    cliente.EMAIL,
-                    cliente.TELEFONE,
-                    cliente.TIPO,
-                    cliente.ATIVO,
-                    cliente.RAZAO_SOCIAL,
-                    cliente.NOME_FANTASIA,
-                    cliente.CNPJ,
-                    cliente.DATA_CADASTRO
 
-                FROM USUARIOS cliente
-
-                INNER JOIN ADVOGADO_ESCRITORIO ae_responsavel
-                    ON ae_responsavel.ID_USUARIOS =
-                       cliente.ID_USUARIO_RESPONSAVEL
-
-                INNER JOIN ADVOGADO_ESCRITORIO ae_logado
-                    ON ae_logado.ID_ESCRITORIOS =
-                       ae_responsavel.ID_ESCRITORIOS
-
-                WHERE cliente.TIPO IN (2, 3)
-                  AND ae_logado.ID_USUARIOS = ?
-
-                ORDER BY cliente.DATA_CADASTRO DESC
-            """, (
-                id_usuario,
-            ))
-
-        else:
-            cur.execute("""
-                SELECT
-                    ID_USUARIOS,
-                    NOME,
-                    CPF,
-                    EMAIL,
-                    TELEFONE,
-                    TIPO,
-                    ATIVO,
-                    RAZAO_SOCIAL,
-                    NOME_FANTASIA,
-                    CNPJ,
-                    DATA_CADASTRO
-
-                FROM USUARIOS
-
-                WHERE TIPO IN (2, 3)
-                  AND ID_USUARIO_RESPONSAVEL = ?
-
-                ORDER BY DATA_CADASTRO DESC
-            """, (
-                id_usuario,
-            ))
+        cur.execute("""
+            SELECT 
+                u.ID_USUARIOS, 
+                u.NOME, 
+                u.CPF, 
+                u.EMAIL, 
+                u.TELEFONE,
+                u.TIPO,
+                u.ATIVO,
+                u.RAZAO_SOCIAL,
+                u.NOME_FANTASIA,
+                u.CNPJ,
+                u.DATA_CADASTRO
+            FROM USUARIOS u
+            WHERE u.TIPO IN (2, 3)
+            AND u.ID_USUARIO_RESPONSAVEL = ?
+            ORDER BY u.DATA_CADASTRO DESC
+        """, (id_usuario,))
 
         rows = cur.fetchall()
-
         clientes = []
-
         for row in rows:
-            nome_exibicao = (
-                row[1]
-                if row[1]
-                else (
-                    row[7]
-                    or row[8]
-                    or '--'
-                )
-            )
-
-            doc = (
-                row[2]
-                if row[2]
-                else (
-                    row[9]
-                    if row[9]
-                    else '--'
-                )
-            )
+            nome_exibicao = row[1] if row[1] else (row[7] or row[8] or '--')
+            doc = row[2] if row[2] else (row[9] if row[9] else '--')
 
             if doc and doc != '--':
                 if len(doc) == 11:
-                    doc = (
-                        f"{doc[:3]}."
-                        f"{doc[3:6]}."
-                        f"{doc[6:9]}-"
-                        f"{doc[9:]}"
-                    )
-
+                    doc = f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
                 elif len(doc) == 14:
-                    doc = (
-                        f"{doc[:2]}."
-                        f"{doc[2:5]}."
-                        f"{doc[5:8]}/"
-                        f"{doc[8:12]}-"
-                        f"{doc[12:]}"
-                    )
+                    doc = f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
 
-            status = (
-                'ativo'
-                if row[6] == 1
-                else 'inativo'
-            )
+            status = 'ativo' if row[6] == 1 else 'inativo'
 
-            data_cadastro = (
-                row[10].strftime('%d/%m/%Y')
-                if row[10]
-                else None
-            )
+            data_cadastro = None
+            if row[10]:
+                if hasattr(row[10], 'strftime'):
+                    data_cadastro = row[10].strftime('%d/%m/%Y')
+                else:
+                    data_cadastro = str(row[10])
 
             clientes.append({
                 'id': row[0],
@@ -1425,24 +1349,16 @@ def listar_clientes():
                 'cpf': doc,
                 'email': row[3] or '--',
                 'telefone': row[4] or '--',
-                'tipo': (
-                    'fisico'
-                    if row[5] == 2
-                    else 'juridico'
-                ),
+                'tipo': 'fisico' if row[5] == 2 else 'juridico',
                 'status': status,
                 'data_cadastro': data_cadastro
             })
 
-        return jsonify({
-            'clientes': clientes
-        }), 200
+        return jsonify({'clientes': clientes}), 200
 
     except Exception as e:
-        return jsonify({
-            'error': str(e)
-        }), 500
-
+        print(f"Erro ao listar clientes: {e}")
+        return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
         con.close()
@@ -2129,7 +2045,6 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
     tipo_usuario = token_data['tipo']
     id_usuario_logado = token_data['id_usuarios']
 
-    # Apenas advogados
     if tipo_usuario != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
