@@ -214,6 +214,8 @@ def criar_usuarios():
     finally:
         cur.close()
         con.close()
+
+
 @app.route('/editar_perfil', methods=['PUT'])
 def editar_perfil():
     token_data = decodificar_token()
