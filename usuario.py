@@ -1391,8 +1391,8 @@ def buscar_cliente(id_cliente):
                 RG, ORGAO_EXPEDIDOR, NACIONALIDADE,
                 ESTADO_CIVIL, PROFISSAO, CEP, LOGRADOURO,
                 NUMERO, COMPLEMENTO, BAIRRO, CIDADE, ESTADO,
-                SEXO, DATA_NASCIMENTO,
-                ID_USUARIO_RESPONSAVEL
+                SEXO, DATA_NASCIMENTO, CARTERA_TRABALHO,
+                SERIE_CARTERA, ID_USUARIO_RESPONSAVEL
             FROM USUARIOS
             WHERE ID_USUARIOS = ? AND TIPO IN (2, 3)
         """, (id_cliente,))
@@ -1401,39 +1401,43 @@ def buscar_cliente(id_cliente):
         if not row:
             return jsonify({'error': 'Cliente não encontrado'}), 404
 
-        if row[25] != id_usuario:
+        if row[27] != id_usuario:
             return jsonify({'error': 'Você não tem permissão para acessar este cliente'}), 403
 
         cliente = {
             'id': row[0],
-            'nome': row[1] if row[1] else (row[7] or row[8] or '--'),
-            'cpf': row[2] if row[2] else (row[9] if row[9] else '--'),
-            'email': row[3] or '--',
-            'telefone': row[4] or '--',
+            'nome': row[1] or '',
+            'cpf': row[2] or '',
+            'email': row[3] if row[3] and row[3] != '--' else '',
+            'telefone': row[4] or '',
             'tipo': 'fisico' if row[5] == 2 else 'juridico',
             'status': 'ativo' if row[6] == 1 else 'inativo',
+            'razao_social': row[7] or '',
+            'nome_fantasia': row[8] or '',
+            'cnpj': row[9] or '',
             'data_cadastro': row[10].strftime('%d/%m/%Y') if row[10] else None,
-            'rg': row[11] or '--',
-            'orgao_expedidor': row[12] or '--',
-            'nacionalidade': row[13] or '--',
-            'estado_civil': row[14] or '--',
-            'profissao': row[15] or '--',
-            'cep': row[16] or '--',
-            'logradouro': row[17] or '--',
-            'numero': row[18] or '--',
-            'complemento': row[19] or '--',
-            'bairro': row[20] or '--',
-            'cidade': row[21] or '--',
-            'estado': row[22] or '--',
-            'sexo': row[23] or '--',
-            'data_nascimento': row[24].strftime('%d/%m/%Y') if row[24] else None,
-            'razao_social': row[7] or '--',
-            'nome_fantasia': row[8] or '--'
+            'rg': row[11] or '',
+            'orgao_expedidor': row[12] or '',
+            'nacionalidade': row[13] or '',
+            'estado_civil': row[14] or '',
+            'profissao': row[15] or '',
+            'cep': row[16] or '',
+            'logradouro': row[17] or '',
+            'numero': row[18] or '',
+            'complemento': row[19] or '',
+            'bairro': row[20] or '',
+            'cidade': row[21] or '',
+            'estado': row[22] or '',
+            'sexo': row[23] or '',
+            'data_nascimento': row[24].strftime('%d/%m/%Y') if row[24] else '',
+            'carteira_trabalho': row[25] or '',
+            'serie_carteira': row[26] or ''
         }
 
         if cliente['tipo'] == 'juridico':
             cur.execute("""
                 SELECT
+                    ID_REPRESENTANTE,
                     NOME_COMPLETO, PROFISSAO, CPF, SEXO,
                     RG, ORGAO_EXPEDIDOR, NACIONALIDADE, ESTADO_CIVIL
                 FROM REPRESENTANTES
@@ -1442,19 +1446,21 @@ def buscar_cliente(id_cliente):
             rep = cur.fetchone()
             if rep:
                 cliente['representante'] = {
-                    'nome': rep[0] or '--',
-                    'profissao': rep[1] or '--',
-                    'cpf': rep[2] or '--',
-                    'sexo': rep[3] or '--',
-                    'rg': rep[4] or '--',
-                    'orgao_expedidor': rep[5] or '--',
-                    'nacionalidade': rep[6] or '--',
-                    'estado_civil': rep[7] or '--'
+                    'id': rep[0],
+                    'nome': rep[1] or '',
+                    'profissao': rep[2] or '',
+                    'cpf': rep[3] or '',
+                    'sexo': rep[4] or '',
+                    'rg': rep[5] or '',
+                    'orgao_expedidor': rep[6] or '',
+                    'nacionalidade': rep[7] or '',
+                    'estado_civil': rep[8] or ''
                 }
 
         return jsonify({'cliente': cliente}), 200
 
     except Exception as e:
+        print(f"Erro ao buscar cliente: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
@@ -1472,36 +1478,181 @@ def atualizar_cliente(id_cliente):
     if tipo_usuario not in [0, 1]:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
+    id_usuario = token_data['id_usuarios']
     dados = request.get_json()
 
-    nome = dados.get('nome')
-    cpf = dados.get('cpf')
-    email = dados.get('email')
-    telefone = dados.get('telefone')
+    if not dados:
+        return jsonify({'error': 'Dados não enviados'}), 400
 
     con = conexao()
     cur = con.cursor()
 
     try:
-        cur.execute("SELECT ID_USUARIOS FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
-        if not cur.fetchone():
-            return jsonify({'error': 'Cliente não encontrado'}), 404
+        cur.execute("""
+            SELECT ID_USUARIOS, TIPO
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ?
+              AND TIPO IN (2, 3)
+              AND ID_USUARIO_RESPONSAVEL = ?
+        """, (id_cliente, id_usuario))
+
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'Cliente não encontrado ou não pertence a você'}), 404
+
+        tipo_cliente = row[1]
+
+
+        if tipo_cliente == 2:
+            cpf = dados.get('cpf')
+            if cpf:
+                cpf_limpo = ''.join(filter(str.isdigit, cpf))
+                if len(cpf_limpo) != 11:
+                    return jsonify({'error': 'CPF inválido'}), 400
+                cur.execute("""
+                    SELECT ID_USUARIOS FROM USUARIOS
+                    WHERE CPF = ? AND ID_USUARIOS != ?
+                """, (cpf_limpo, id_cliente))
+                if cur.fetchone():
+                    return jsonify({'error': 'CPF já cadastrado para outro usuário'}), 400
+
+        if tipo_cliente == 3:
+            cnpj = dados.get('cnpj')
+            if cnpj:
+                cnpj_limpo = ''.join(filter(str.isdigit, cnpj))
+                if len(cnpj_limpo) != 14:
+                    return jsonify({'error': 'CNPJ inválido'}), 400
+                cur.execute("""
+                    SELECT ID_USUARIOS FROM USUARIOS
+                    WHERE CNPJ = ? AND ID_USUARIOS != ?
+                """, (cnpj_limpo, id_cliente))
+                if cur.fetchone():
+                    return jsonify({'error': 'CNPJ já cadastrado para outro usuário'}), 400
+
+        email = dados.get('email')
+        if email:
+            cur.execute("""
+                SELECT ID_USUARIOS FROM USUARIOS
+                WHERE EMAIL = ? AND ID_USUARIOS != ?
+            """, (email, id_cliente))
+            if cur.fetchone():
+                return jsonify({'error': 'E-mail já cadastrado para outro usuário'}), 400
+
+        data_nasc = dados.get('data_nascimento') or None
 
         cur.execute("""
-            UPDATE USUARIOS
-            SET NOME = ?,
+            UPDATE USUARIOS SET
+                NOME = ?,
+                RAZAO_SOCIAL = ?,
+                NOME_FANTASIA = ?,
                 CPF = ?,
+                CNPJ = ?,
                 EMAIL = ?,
-                TELEFONE = ?
+                TELEFONE = ?,
+                DATA_NASCIMENTO = ?,
+                SEXO = ?,
+                RG = ?,
+                ORGAO_EXPEDIDOR = ?,
+                CARTERA_TRABALHO = ?,
+                SERIE_CARTERA = ?,
+                PROFISSAO = ?,
+                ESTADO_CIVIL = ?,
+                NACIONALIDADE = ?,
+                CEP = ?,
+                LOGRADOURO = ?,
+                NUMERO = ?,
+                COMPLEMENTO = ?,
+                BAIRRO = ?,
+                CIDADE = ?,
+                ESTADO = ?
             WHERE ID_USUARIOS = ?
-        """, (nome, cpf, email, telefone, id_cliente))
+        """, (
+            dados.get('nome'),
+            dados.get('razao_social'),
+            dados.get('nome_fantasia'),
+            dados.get('cpf') or None,
+            dados.get('cnpj') or None,
+            dados.get('email'),
+            dados.get('telefone'),
+            data_nasc,
+            dados.get('sexo') or None,
+            dados.get('rg') or None,
+            dados.get('orgao_expedidor') or None,
+            dados.get('carteira_trabalho') or None,
+            dados.get('serie_carteira') or None,
+            dados.get('profissao') or None,
+            dados.get('estado_civil') or None,
+            dados.get('nacionalidade') or None,
+            dados.get('cep') or None,
+            dados.get('logradouro') or None,
+            dados.get('numero') or None,
+            dados.get('complemento') or None,
+            dados.get('bairro') or None,
+            dados.get('cidade') or None,
+            dados.get('estado') or None,
+            id_cliente
+        ))
+
+        if tipo_cliente == 3:
+            representante = dados.get('representante')
+            if representante:
+                cur.execute("""
+                    SELECT ID_REPRESENTANTE
+                    FROM REPRESENTANTES
+                    WHERE ID_CLIENTE_JURIDICO = ? AND ATIVO = 1
+                """, (id_cliente,))
+                existe = cur.fetchone()
+
+                if existe:
+                    cur.execute("""
+                        UPDATE REPRESENTANTES SET
+                            NOME_COMPLETO = ?,
+                            PROFISSAO = ?,
+                            CPF = ?,
+                            SEXO = ?,
+                            RG = ?,
+                            ORGAO_EXPEDIDOR = ?,
+                            NACIONALIDADE = ?,
+                            ESTADO_CIVIL = ?
+                        WHERE ID_REPRESENTANTE = ?
+                    """, (
+                        representante.get('nome'),
+                        representante.get('profissao'),
+                        representante.get('cpf'),
+                        representante.get('sexo'),
+                        representante.get('rg'),
+                        representante.get('orgao_expedidor'),
+                        representante.get('nacionalidade'),
+                        representante.get('estado_civil'),
+                        existe[0]
+                    ))
+                else:
+                    if representante.get('nome') and representante.get('cpf'):
+                        cur.execute("""
+                            INSERT INTO REPRESENTANTES
+                            (ID_CLIENTE_JURIDICO, NOME_COMPLETO, PROFISSAO, CPF, SEXO,
+                             RG, ORGAO_EXPEDIDOR, NACIONALIDADE, ESTADO_CIVIL, ATIVO)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """, (
+                            id_cliente,
+                            representante.get('nome'),
+                            representante.get('profissao'),
+                            representante.get('cpf'),
+                            representante.get('sexo'),
+                            representante.get('rg'),
+                            representante.get('orgao_expedidor'),
+                            representante.get('nacionalidade'),
+                            representante.get('estado_civil')
+                        ))
 
         con.commit()
-        return jsonify({'message': 'Cliente atualizado com sucesso!'}), 200
+        return jsonify({'mensagem': 'Cliente atualizado com sucesso!'}), 200
 
     except Exception as e:
         con.rollback()
         print(f"Erro ao atualizar cliente: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
@@ -1864,6 +2015,7 @@ def listar_advogados():
                 u.EMAIL,
                 u.NUM_OAB,
                 u.UF_OAB,
+                u.ATIVO,
                 e.ID_ESCRITORIOS,
                 e.NOME_FANTASIA,
                 e.RAZAO_SOCIAL,
@@ -1884,7 +2036,6 @@ def listar_advogados():
 
             WHERE
                 u.TIPO = 0
-                AND u.ATIVO = 1
                 AND u.ID_USUARIOS <> ?
         """
 
@@ -1894,17 +2045,11 @@ def listar_advogados():
         ]
 
         if id_escritorio:
-            sql += """
-                AND ae.ID_ESCRITORIOS = ?
-            """
-
+            sql += " AND ae.ID_ESCRITORIOS = ? "
             parametros.append(id_escritorio)
 
         if status:
-            sql += """
-                AND UPPER(ae.STATUS) = ?
-            """
-
+            sql += " AND UPPER(ae.STATUS) = ? "
             parametros.append(status)
 
         sql += """
@@ -1929,6 +2074,7 @@ def listar_advogados():
                     'email': row[2] or '--',
                     'numero_oab': row[3] or '--',
                     'uf_oab': row[4] or '--',
+                    'ativo_advogado': row[5] == 1,
                     'oab': (
                         f'{row[3]}/{row[4]}'
                         if row[3] and row[4]
@@ -1937,7 +2083,7 @@ def listar_advogados():
                     'escritorios': []
                 }
 
-            status_logado = row[9]
+            status_logado = row[10]
 
             pode_gerenciar = (
                 status_logado is not None
@@ -1945,13 +2091,13 @@ def listar_advogados():
             )
 
             advogados_dict[id_advogado]['escritorios'].append({
-                'id': row[5],
+                'id': row[6],
                 'nome': (
-                    row[6]
-                    or row[7]
+                    row[7]
+                    or row[8]
                     or '--'
                 ),
-                'status': row[8] or '--',
+                'status': row[9] or '--',
                 'pode_gerenciar': pode_gerenciar
             })
 
@@ -2188,4 +2334,227 @@ def filtro_cargos_advogados():
         'cargos': cargos
     }), 200
 
+@app.route('/advogado/<int:id_advogado>/inativar', methods=['PUT'])
+def inativar_advogado(id_advogado):
+    token_data = decodificar_token()
 
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_usuario_logado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    if id_advogado == id_usuario_logado:
+        return jsonify({'error': 'Você não pode inativar sua própria conta'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT ID_USUARIOS, TIPO, ATIVO
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ? AND TIPO = 0
+        """, (id_advogado,))
+
+        alvo = cur.fetchone()
+
+        if not alvo:
+            return jsonify({'error': 'Advogado não encontrado'}), 404
+
+        if alvo[2] == 0:
+            return jsonify({'error': 'Advogado já está inativo'}), 400
+
+        cur.execute("""
+            SELECT 1
+            FROM ADVOGADO_ESCRITORIO ae_logado
+            INNER JOIN ADVOGADO_ESCRITORIO ae_alvo
+                ON ae_alvo.ID_ESCRITORIOS = ae_logado.ID_ESCRITORIOS
+            WHERE ae_logado.ID_USUARIOS = ?
+              AND ae_logado.STATUS = 'PROPRIETARIO'
+              AND ae_alvo.ID_USUARIOS = ?
+        """, (id_usuario_logado, id_advogado))
+
+        if not cur.fetchone():
+            return jsonify({
+                'error': 'Você precisa ser proprietário de um escritório onde este advogado está vinculado'
+            }), 403
+
+        cur.execute("""
+            UPDATE USUARIOS
+            SET ATIVO = 0
+            WHERE ID_USUARIOS = ?
+        """, (id_advogado,))
+
+        con.commit()
+
+        return jsonify({
+            'mensagem': 'Advogado inativado com sucesso',
+            'id_advogado': id_advogado
+        }), 200
+
+    except Exception as e:
+        con.rollback()
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/advogado/<int:id_advogado>/ativar', methods=['PUT'])
+def ativar_advogado(id_advogado):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_usuario_logado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT ID_USUARIOS, TIPO, ATIVO
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ? AND TIPO = 0
+        """, (id_advogado,))
+
+        alvo = cur.fetchone()
+
+        if not alvo:
+            return jsonify({'error': 'Advogado não encontrado'}), 404
+
+        if alvo[2] == 1:
+            return jsonify({'error': 'Advogado já está ativo'}), 400
+
+        cur.execute("""
+            SELECT 1
+            FROM ADVOGADO_ESCRITORIO ae_logado
+            INNER JOIN ADVOGADO_ESCRITORIO ae_alvo
+                ON ae_alvo.ID_ESCRITORIOS = ae_logado.ID_ESCRITORIOS
+            WHERE ae_logado.ID_USUARIOS = ?
+              AND ae_logado.STATUS = 'PROPRIETARIO'
+              AND ae_alvo.ID_USUARIOS = ?
+        """, (id_usuario_logado, id_advogado))
+
+        if not cur.fetchone():
+            return jsonify({
+                'error': 'Você precisa ser proprietário de um escritório onde este advogado está vinculado'
+            }), 403
+
+        cur.execute("""
+            UPDATE USUARIOS
+            SET ATIVO = 1
+            WHERE ID_USUARIOS = ?
+        """, (id_advogado,))
+
+        con.commit()
+
+        return jsonify({
+            'mensagem': 'Advogado ativado com sucesso',
+            'id_advogado': id_advogado
+        }), 200
+
+    except Exception as e:
+        con.rollback()
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/advogado_escritorio/<int:id_advogado>/<int:id_escritorio>', methods=['DELETE'])
+def remover_advogado_escritorio(id_advogado, id_escritorio):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_usuario_logado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT STATUS
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+        """, (id_usuario_logado, id_escritorio))
+
+        vinculo_logado = cur.fetchone()
+
+        if not vinculo_logado:
+            return jsonify({'error': 'Você não pertence a este escritório'}), 403
+
+        status_logado = vinculo_logado[0]
+
+        if not status_logado or status_logado.upper() != 'PROPRIETARIO':
+            return jsonify({'error': 'Somente proprietários podem remover advogados'}), 403
+
+        if id_advogado == id_usuario_logado:
+            return jsonify({'error': 'Você não pode remover a si mesmo do escritório'}), 403
+
+        cur.execute("""
+            SELECT STATUS
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+        """, (id_advogado, id_escritorio))
+
+        vinculo_advogado = cur.fetchone()
+
+        if not vinculo_advogado:
+            return jsonify({'error': 'Advogado não pertence a este escritório'}), 404
+
+        status_advogado = vinculo_advogado[0]
+
+        if status_advogado and status_advogado.upper() == 'PROPRIETARIO':
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM ADVOGADO_ESCRITORIO
+                WHERE ID_ESCRITORIOS = ?
+                  AND UPPER(STATUS) = 'PROPRIETARIO'
+            """, (id_escritorio,))
+
+            total_proprietarios = cur.fetchone()[0]
+
+            if total_proprietarios <= 1:
+                return jsonify({'error': 'Não é possível remover o único proprietário do escritório'}), 400
+
+        cur.execute("""
+            DELETE FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+        """, (id_advogado, id_escritorio))
+
+        con.commit()
+
+        return jsonify({
+            'mensagem': 'Advogado retirado do escritório com sucesso',
+            'id_advogado': id_advogado,
+            'id_escritorio': id_escritorio
+        }), 200
+
+    except Exception as e:
+        con.rollback()
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        cur.close()
+        con.close()
