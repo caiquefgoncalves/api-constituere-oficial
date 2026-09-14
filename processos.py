@@ -1720,6 +1720,10 @@ def cadastrar_atualizacao_processo(id_processo):
 
         if data_atualizacao.date() > datetime.date.today():
             return jsonify({'error': 'A data da atualização não pode ser uma data futura'}), 400
+
+        limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+        if data_atualizacao.date() < limite_120_anos:
+            return jsonify({'error': 'A data da atualização não pode ser superior a 120 anos atrás'}), 400
     else:
         data_atualizacao = datetime.datetime.now()
 
@@ -1988,6 +1992,12 @@ def editar_atualizacao_processo(id_processo, id_atualizacao):
         if data_atualizacao.date() > datetime.date.today():
             return jsonify({
                 'error': 'A data da atualização não pode ser uma data futura'
+            }), 400
+
+        limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+        if data_atualizacao.date() < limite_120_anos:
+            return jsonify({
+                'error': 'A data da atualização não pode ser superior a 120 anos atrás'
             }), 400
 
     con = conexao()
@@ -4487,6 +4497,249 @@ def excluir_atualizacao_processo(id_processo, id_atualizacao):
             'error': str(e)
         }), 500
 
+    finally:
+        cur.close()
+        con.close()
+
+@app.route('/processo/<int:id_processo>/parte_contraria', methods=['GET'])
+def buscar_parte_contraria(id_processo):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_advogado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT ID_PROCESSOS
+            FROM PROCESSOS
+            WHERE ID_PROCESSOS = ?
+              AND ID_USUARIOS_ADVOGADO = ?
+        """, (id_processo, id_advogado))
+
+        if not cur.fetchone():
+            return jsonify({'error': 'Processo não encontrado'}), 404
+
+        cur.execute("""
+            SELECT
+                ID_PARTE_CONTRARIA,
+                NOME,
+                CPF,
+                RG,
+                ORGAO_EXPEDIDOR,
+                NACIONALIDADE,
+                ESTADO_CIVIL,
+                DATA_NASCIMENTO,
+                SEXO,
+                CARTEIRA_TRABALHO,
+                SERIE_CARTEIRA,
+                PROFISSAO,
+                CEP,
+                LOGRADOURO,
+                NUMERO,
+                COMPLEMENTO,
+                BAIRRO,
+                CIDADE,
+                ESTADO,
+                TELEFONE,
+                EMAIL,
+                CNPJ,
+                RAZAO_SOCIAL,
+                NOME_FANTASIA
+            FROM PARTE_CONTRARIA
+            WHERE ID_PROCESSO = ?
+        """, (id_processo,))
+
+        row = cur.fetchone()
+
+        if not row:
+            return jsonify({'dados': None}), 200
+
+        data_nascimento = None
+        if row[7]:
+            try:
+                data_nascimento = row[7].strftime('%d/%m/%Y')
+            except:
+                data_nascimento = str(row[7])
+
+        dados = {
+            'id': row[0],
+            'nome': row[1] or '',
+            'cpf': row[2] or '',
+            'rg': row[3] or '',
+            'orgao_expedidor': row[4] or '',
+            'nacionalidade': row[5] or '',
+            'estado_civil': row[6] or '',
+            'data_nascimento': data_nascimento or '',
+            'sexo': row[8] or '',
+            'carteira_trabalho': row[9] or '',
+            'serie_carteira': row[10] or '',
+            'profissao': row[11] or '',
+            'cep': row[12] or '',
+            'logradouro': row[13] or '',
+            'numero': row[14] or '',
+            'complemento': row[15] or '',
+            'bairro': row[16] or '',
+            'cidade': row[17] or '',
+            'estado': row[18] or '',
+            'telefone': row[19] or '',
+            'email': row[20] or '',
+            'cnpj': row[21] or '',
+            'razao_social': row[22] or '',
+            'nome_fantasia': row[23] or ''
+        }
+
+        return jsonify({'dados': dados}), 200
+
+    except Exception as e:
+        print('Erro ao buscar parte contrária:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+@app.route('/processo/<int:id_processo>/parte_contraria', methods=['PUT'])
+def atualizar_parte_contraria(id_processo):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_advogado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    dados = request.get_json()
+
+    if not dados:
+        return jsonify({'error': 'Dados não enviados'}), 400
+
+    cpf = limpar_documento(dados.get('cpf'))
+    cnpj = limpar_documento(dados.get('cnpj'))
+
+    if cpf and cnpj:
+        return jsonify({'error': 'Informe apenas CPF ou CNPJ da parte contrária'}), 400
+
+    if not cpf and not cnpj:
+        return jsonify({'error': 'Informe CPF ou CNPJ da parte contrária'}), 400
+
+    if cpf:
+        if len(cpf) != 11:
+            return jsonify({'error': 'CPF da parte contrária inválido'}), 400
+        if not dados.get('nome'):
+            return jsonify({'error': 'Nome da parte contrária é obrigatório'}), 400
+
+    if cnpj:
+        if len(cnpj) != 14:
+            return jsonify({'error': 'CNPJ da parte contrária inválido'}), 400
+        if not dados.get('razao_social'):
+            return jsonify({'error': 'Razão social da parte contrária é obrigatória'}), 400
+
+    data_nascimento = None
+
+    if dados.get('data_nascimento'):
+        try:
+            data_nascimento = datetime.datetime.strptime(dados.get('data_nascimento'), '%d/%m/%Y').date()
+        except:
+            return jsonify({'error': 'Data de nascimento inválida'}), 400
+
+        if data_nascimento > datetime.date.today():
+            return jsonify({'error': 'A data de nascimento não pode ser uma data futura'}), 400
+
+        limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+        if data_nascimento < limite_120_anos:
+            return jsonify({'error': 'A data de nascimento não pode ser superior a 120 anos atrás'}), 400
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT ID_PROCESSOS
+            FROM PROCESSOS
+            WHERE ID_PROCESSOS = ?
+              AND ID_USUARIOS_ADVOGADO = ?
+        """, (id_processo, id_advogado))
+
+        if not cur.fetchone():
+            return jsonify({'error': 'Processo não encontrado'}), 404
+
+        cur.execute("""
+            UPDATE PARTE_CONTRARIA
+            SET
+                NOME = ?,
+                CPF = ?,
+                RG = ?,
+                ORGAO_EXPEDIDOR = ?,
+                NACIONALIDADE = ?,
+                ESTADO_CIVIL = ?,
+                DATA_NASCIMENTO = ?,
+                SEXO = ?,
+                CARTEIRA_TRABALHO = ?,
+                SERIE_CARTEIRA = ?,
+                PROFISSAO = ?,
+                CEP = ?,
+                LOGRADOURO = ?,
+                NUMERO = ?,
+                COMPLEMENTO = ?,
+                BAIRRO = ?,
+                CIDADE = ?,
+                ESTADO = ?,
+                TELEFONE = ?,
+                EMAIL = ?,
+                CNPJ = ?,
+                RAZAO_SOCIAL = ?,
+                NOME_FANTASIA = ?
+            WHERE ID_PROCESSO = ?
+        """, (
+            dados.get('nome'),
+            cpf if cpf else None,
+            dados.get('rg'),
+            dados.get('orgao_expedidor'),
+            dados.get('nacionalidade'),
+            dados.get('estado_civil'),
+            data_nascimento,
+            dados.get('sexo'),
+            dados.get('carteira_trabalho'),
+            dados.get('serie_carteira'),
+            dados.get('profissao'),
+            limpar_documento(dados.get('cep')),
+            dados.get('logradouro'),
+            dados.get('numero'),
+            dados.get('complemento'),
+            dados.get('bairro'),
+            dados.get('cidade'),
+            dados.get('estado'),
+            limpar_documento(dados.get('telefone')),
+            dados.get('email'),
+            cnpj if cnpj else None,
+            dados.get('razao_social'),
+            dados.get('nome_fantasia'),
+            id_processo
+        ))
+
+        con.commit()
+
+        return jsonify({'mensagem': 'Parte contrária atualizada com sucesso'}), 200
+
+    except Exception as e:
+        con.rollback()
+        print('Erro ao atualizar parte contrária:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
         con.close()

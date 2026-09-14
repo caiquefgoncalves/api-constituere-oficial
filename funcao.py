@@ -310,7 +310,7 @@ def decodificar_token():
             if auth_header and auth_header.startswith('Bearer '):
                 token = auth_header.split(' ')[1]
                 if token:
-                    print("✅ Token encontrado no header Authorization")
+                    print("✅Token encontrado no header Authorization")
 
         if not token:
             print("❌ Token não encontrado em nenhuma fonte")
