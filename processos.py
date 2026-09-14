@@ -57,6 +57,10 @@ def cadastrar_processo():
         if not validar_numero_processo(numero_processo):
             return jsonify({'error': 'Número do processo inválido'}), 400
 
+        apenas_digitos = ''.join(filter(str.isdigit, numero_processo))
+        if apenas_digitos and len(set(apenas_digitos)) == 1 and apenas_digitos[0] == '0':
+            return jsonify({'error': 'Número do processo não pode ser todo zero'}), 400
+
     try:
         instancia = int(instancia)
     except:
@@ -73,6 +77,10 @@ def cadastrar_processo():
 
         if data_inicio > datetime.date.today():
             return jsonify({'error': 'A data de início não pode ser uma data futura'}), 400
+
+        limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+        if data_inicio < limite_120_anos:
+            return jsonify({'error': 'A data de início não pode ser superior a 120 anos atrás'}), 400
     else:
         data_inicio = datetime.date.today()
 
@@ -141,7 +149,7 @@ def cadastrar_processo():
         if valor_honorario is None or valor_honorario <= 0:
             return jsonify({'error': 'Valor do salário é obrigatório'}), 400
 
-        valor_total = numero_salarios * valor_honorario
+        valor_total = converter_decimal(numero_salarios) * valor_honorario
 
     elif tipo_honorario == 'REAIS':
         numero_salarios = None
@@ -228,7 +236,7 @@ def cadastrar_processo():
             return jsonify({'error': 'Tipo do honorário de êxito inválido'}), 400
         if valor_exito is None or valor_exito <= 0:
             return jsonify({'error': 'Valor do êxito é obrigatório'}), 400
-        if tipo_exito == 'PERCENTUAL' and valor_exito > 100:
+        if tipo_exito == 'PERCENTUAL' and float(valor_exito) > 100:
             return jsonify({'error': 'Percentual de êxito não pode ser maior que 100'}), 400
 
         if not distribuicao_exito:
@@ -238,18 +246,18 @@ def cadastrar_processo():
             return jsonify({'error': 'Distribuição do êxito inválida'}), 400
 
         if tipo_exito == 'SALARIOS_BENEFICIO':
-            if not quantidade_exito or quantidade_exito <= 0:
+            if not quantidade_exito or float(quantidade_exito) <= 0:
                 return jsonify({'error': 'Quantidade de salários do êxito é obrigatória'}), 400
-            if not valor_salario_exito or valor_salario_exito <= 0:
-                if valor_honorario and valor_honorario > 0:
+            if not valor_salario_exito or float(valor_salario_exito) <= 0:
+                if valor_honorario and float(valor_honorario) > 0:
                     valor_salario_exito = valor_honorario
                 else:
                     return jsonify({'error': 'Valor do salário do êxito é obrigatório'}), 400
-            valor_total_exito = quantidade_exito * valor_salario_exito
+            valor_total_exito = float(quantidade_exito) * float(valor_salario_exito)
         else:
-            if not valor_causa_exito or valor_causa_exito <= 0:
-                valor_causa_exito = 45000.00
-            valor_total_exito = (valor_exito / 100) * valor_causa_exito
+            if not valor_causa_exito or float(valor_causa_exito) <= 0:
+                valor_causa_exito = converter_decimal(45000)
+            valor_total_exito = (float(valor_exito) / 100) * float(valor_causa_exito)
 
         if distribuicao_exito == 'AVISTA':
             num_parcelas_exito = 1
@@ -269,9 +277,9 @@ def cadastrar_processo():
                 return jsonify({'error': 'Número de parcelas do êxito inválido'}), 400
             if num_parcelas_exito <= 0:
                 return jsonify({'error': 'Número de parcelas do êxito deve ser maior que zero'}), 400
-            if valor_entrada_exito is None or valor_entrada_exito <= 0:
+            if valor_entrada_exito is None or float(valor_entrada_exito) <= 0:
                 return jsonify({'error': 'Valor da entrada do êxito é obrigatório'}), 400
-            if valor_entrada_exito >= valor_total_exito:
+            if float(valor_entrada_exito) >= float(valor_total_exito):
                 return jsonify({'error': 'Valor da entrada do êxito deve ser menor que o valor total'}), 400
 
         try:
@@ -496,8 +504,8 @@ def cadastrar_processo():
 
         id_pagamento_exito = None
         if tem_exito:
-            if not valor_causa_exito or valor_causa_exito <= 0:
-                valor_causa_exito = 45000.00
+            if not valor_causa_exito or float(valor_causa_exito) <= 0:
+                valor_causa_exito = converter_decimal(45000)
 
             cur.execute("""
                 INSERT INTO PAGAMENTO_EXITO (
@@ -543,8 +551,8 @@ def cadastrar_processo():
                         DATA_VENCIMENTO, DATA_PAGAMENTO, VALOR_PAGO, STATUS
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (id_pagamento_exito, 0, valor_entrada_exito, data_inicio, None, None, 'PENDENTE'))
-                restante_exito = valor_total_exito - valor_entrada_exito
-                valores_exito = dividir_valor(restante_exito, num_parcelas_exito)
+                restante_exito = float(valor_total_exito) - float(valor_entrada_exito)
+                valores_exito = dividir_valor(converter_decimal(restante_exito), num_parcelas_exito)
                 for indice in range(num_parcelas_exito):
                     ano, mes = adicionar_meses(ano_inicio_exito, mes_inicio_exito, indice)
                     vencimento = criar_data_vencimento(ano, mes, dia_vencimento_exito)
@@ -568,6 +576,9 @@ def cadastrar_processo():
 
     except Exception as e:
         con.rollback()
+        print('Erro ao cadastrar processo:', e)
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
@@ -1690,6 +1701,7 @@ def cadastrar_atualizacao_processo(id_processo):
     titulo = (dados.get('titulo') or '').strip()
     descricao = (dados.get('descricao') or '').strip()
     processo_concluido = dados.get('processo_concluido', 0)
+    data_recebida = (dados.get('data') or '').strip()
 
     if not titulo:
         return jsonify({'error': 'Título é obrigatório'}), 400
@@ -1699,6 +1711,17 @@ def cadastrar_atualizacao_processo(id_processo):
 
     if descricao and len(descricao) > 254:
         return jsonify({'error': 'Descrição deve ter no máximo 254 caracteres'}), 400
+
+    if data_recebida:
+        try:
+            data_atualizacao = datetime.datetime.strptime(data_recebida, '%d/%m/%Y')
+        except:
+            return jsonify({'error': 'Data da atualização inválida'}), 400
+
+        if data_atualizacao.date() > datetime.date.today():
+            return jsonify({'error': 'A data da atualização não pode ser uma data futura'}), 400
+    else:
+        data_atualizacao = datetime.datetime.now()
 
     try:
         processo_concluido = int(processo_concluido)
@@ -1731,11 +1754,12 @@ def cadastrar_atualizacao_processo(id_processo):
                 ID_PROCESSOS,
                 TITULO,
                 DESCRICAO,
-                PROCESSO_CONCLUIDO
+                PROCESSO_CONCLUIDO,
+                "DATA"
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             RETURNING ID_ATUALIZACOES, "DATA"
-        """, (id_processo, titulo, descricao if descricao else None, processo_concluido))
+        """, (id_processo, titulo, descricao if descricao else None, processo_concluido, data_atualizacao))
 
         resultado = cur.fetchone()
         id_atualizacao = resultado[0]
@@ -1917,6 +1941,11 @@ def editar_atualizacao_processo(id_processo, id_atualizacao):
         0
     )
 
+    data_recebida = (
+        dados.get('data')
+        or ''
+    ).strip()
+
     if not titulo:
         return jsonify({
             'error': 'Título é obrigatório'
@@ -1945,6 +1974,21 @@ def editar_atualizacao_processo(id_processo, id_atualizacao):
         return jsonify({
             'error': 'Processo concluído deve ser 0 ou 1'
         }), 400
+
+    data_atualizacao = None
+
+    if data_recebida:
+        try:
+            data_atualizacao = datetime.datetime.strptime(data_recebida, '%d/%m/%Y')
+        except:
+            return jsonify({
+                'error': 'Data da atualização inválida'
+            }), 400
+
+        if data_atualizacao.date() > datetime.date.today():
+            return jsonify({
+                'error': 'A data da atualização não pode ser uma data futura'
+            }), 400
 
     con = conexao()
     cur = con.cursor()
@@ -1988,21 +2032,40 @@ def editar_atualizacao_processo(id_processo, id_atualizacao):
                 'error': 'Atualização não encontrada'
             }), 404
 
-        cur.execute("""
-            UPDATE ATUALIZACOES
-            SET
-                TITULO = ?,
-                DESCRICAO = ?,
-                PROCESSO_CONCLUIDO = ?
-            WHERE ID_ATUALIZACOES = ?
-              AND ID_PROCESSOS = ?
-        """, (
-            titulo,
-            descricao if descricao else None,
-            processo_concluido,
-            id_atualizacao,
-            id_processo
-        ))
+        if data_atualizacao is not None:
+            cur.execute("""
+                UPDATE ATUALIZACOES
+                SET
+                    TITULO = ?,
+                    DESCRICAO = ?,
+                    PROCESSO_CONCLUIDO = ?,
+                    "DATA" = ?
+                WHERE ID_ATUALIZACOES = ?
+                  AND ID_PROCESSOS = ?
+            """, (
+                titulo,
+                descricao if descricao else None,
+                processo_concluido,
+                data_atualizacao,
+                id_atualizacao,
+                id_processo
+            ))
+        else:
+            cur.execute("""
+                UPDATE ATUALIZACOES
+                SET
+                    TITULO = ?,
+                    DESCRICAO = ?,
+                    PROCESSO_CONCLUIDO = ?
+                WHERE ID_ATUALIZACOES = ?
+                  AND ID_PROCESSOS = ?
+            """, (
+                titulo,
+                descricao if descricao else None,
+                processo_concluido,
+                id_atualizacao,
+                id_processo
+            ))
 
         if processo_concluido == 1:
             cur.execute("""
@@ -2067,129 +2130,6 @@ def editar_atualizacao_processo(id_processo, id_atualizacao):
 
         print(
             'Erro ao editar atualização:',
-            e
-        )
-
-        return jsonify({
-            'error': str(e)
-        }), 500
-
-    finally:
-        cur.close()
-        con.close()
-
-
-@app.route('/processo/<int:id_processo>/atualizacoes/<int:id_atualizacao>', methods=['DELETE'])
-def excluir_atualizacao_processo(id_processo, id_atualizacao):
-    token_data = decodificar_token()
-
-    if token_data == False:
-        return jsonify({
-            'error': 'Token necessário'
-        }), 401
-
-    tipo_usuario = token_data['tipo']
-    id_advogado = token_data['id_usuarios']
-
-    if tipo_usuario != 0:
-        return jsonify({
-            'error': 'Acesso não autorizado'
-        }), 403
-
-    con = conexao()
-    cur = con.cursor()
-
-    try:
-        cur.execute("""
-            SELECT
-                p.ID_PROCESSOS,
-                p.STATUS
-            FROM PROCESSOS p
-            WHERE p.ID_PROCESSOS = ?
-              AND p.ID_USUARIOS_ADVOGADO = ?
-        """, (
-            id_processo,
-            id_advogado
-        ))
-
-        processo = cur.fetchone()
-
-        if not processo:
-            return jsonify({
-                'error': 'Processo não encontrado'
-            }), 404
-
-        cur.execute("""
-            SELECT
-                ID_ATUALIZACOES,
-                PROCESSO_CONCLUIDO
-            FROM ATUALIZACOES
-            WHERE ID_ATUALIZACOES = ?
-              AND ID_PROCESSOS = ?
-        """, (
-            id_atualizacao,
-            id_processo
-        ))
-
-        atualizacao = cur.fetchone()
-
-        if not atualizacao:
-            return jsonify({
-                'error': 'Atualização não encontrada'
-            }), 404
-
-        era_conclusao = bool(
-            atualizacao[1]
-        )
-
-        cur.execute("""
-            DELETE FROM ATUALIZACOES
-            WHERE ID_ATUALIZACOES = ?
-              AND ID_PROCESSOS = ?
-        """, (
-            id_atualizacao,
-            id_processo
-        ))
-
-        if era_conclusao:
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM ATUALIZACOES
-                WHERE ID_PROCESSOS = ?
-                  AND PROCESSO_CONCLUIDO = 1
-            """, (
-                id_processo,
-            ))
-
-            quantidade_concluidas = (
-                cur.fetchone()[0]
-            )
-
-            if quantidade_concluidas == 0:
-                cur.execute("""
-                    UPDATE PROCESSOS
-                    SET STATUS = ?
-                    WHERE ID_PROCESSOS = ?
-                      AND ID_USUARIOS_ADVOGADO = ?
-                      AND STATUS = ?
-                """, (
-                    'em_andamento',
-                    id_processo,
-                    id_advogado,
-                    'concluido'
-                ))
-
-        con.commit()
-
-        return jsonify({
-            'mensagem': 'Atualização excluída com sucesso'
-        }), 200
-
-    except Exception as e:
-        con.rollback()
-
-        print(
-            'Erro ao excluir atualização:',
             e
         )
 
@@ -3051,10 +2991,30 @@ def concluir_processo(id_processo):
         or ''
     ).strip()
 
+    data_recebida = (
+        atualizacao.get('data')
+        or ''
+    ).strip()
+
     if not titulo:
         return jsonify({
             'error': 'Título da atualização é obrigatório'
         }), 400
+
+    data_atualizacao = None
+
+    if data_recebida:
+        try:
+            data_atualizacao = datetime.datetime.strptime(data_recebida, '%d/%m/%Y')
+        except:
+            return jsonify({
+                'error': 'Data da atualização inválida'
+            }), 400
+
+        if data_atualizacao.date() > datetime.date.today():
+            return jsonify({
+                'error': 'A data da atualização não pode ser uma data futura'
+            }), 400
 
     tipo_exito = (
         exito.get('tipo_exito')
@@ -3490,7 +3450,7 @@ def concluir_processo(id_processo):
                     MES_INICIO
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, 
                     ?, ?, ?, ?
                 )
                 RETURNING ID_PAGAMENTO_EXITO
@@ -3749,42 +3709,84 @@ def concluir_processo(id_processo):
                     'error': 'Atualização não encontrada'
                 }), 404
 
-            cur.execute("""
-                UPDATE ATUALIZACOES
-                SET
-                    TITULO = ?,
-                    DESCRICAO = ?,
-                    PROCESSO_CONCLUIDO = 1
-                WHERE ID_ATUALIZACOES = ?
-                  AND ID_PROCESSOS = ?
-            """, (
-                titulo,
-                descricao
-                    if descricao
-                    else None,
-                id_atualizacao,
-                id_processo
-            ))
+            if data_atualizacao is not None:
+                cur.execute("""
+                    UPDATE ATUALIZACOES
+                    SET
+                        TITULO = ?,
+                        DESCRICAO = ?,
+                        PROCESSO_CONCLUIDO = 1,
+                        "DATA" = ?
+                    WHERE ID_ATUALIZACOES = ?
+                      AND ID_PROCESSOS = ?
+                """, (
+                    titulo,
+                    descricao
+                        if descricao
+                        else None,
+                    data_atualizacao,
+                    id_atualizacao,
+                    id_processo
+                ))
+            else:
+                cur.execute("""
+                    UPDATE ATUALIZACOES
+                    SET
+                        TITULO = ?,
+                        DESCRICAO = ?,
+                        PROCESSO_CONCLUIDO = 1
+                    WHERE ID_ATUALIZACOES = ?
+                      AND ID_PROCESSOS = ?
+                """, (
+                    titulo,
+                    descricao
+                        if descricao
+                        else None,
+                    id_atualizacao,
+                    id_processo
+                ))
 
         else:
-            cur.execute("""
-                INSERT INTO ATUALIZACOES (
-                    ID_PROCESSOS,
-                    TITULO,
-                    DESCRICAO,
-                    PROCESSO_CONCLUIDO
-                )
-                VALUES (
-                    ?, ?, ?, ?
-                )
-            """, (
-                id_processo,
-                titulo,
-                descricao
-                    if descricao
-                    else None,
-                1
-            ))
+            if data_atualizacao is not None:
+                cur.execute("""
+                    INSERT INTO ATUALIZACOES (
+                        ID_PROCESSOS,
+                        TITULO,
+                        DESCRICAO,
+                        PROCESSO_CONCLUIDO,
+                        "DATA"
+                    )
+                    VALUES (
+                        ?, ?, ?, ?, ?
+                    )
+                """, (
+                    id_processo,
+                    titulo,
+                    descricao
+                        if descricao
+                        else None,
+                    1,
+                    data_atualizacao
+                ))
+            else:
+                cur.execute("""
+                    INSERT INTO ATUALIZACOES (
+                        ID_PROCESSOS,
+                        TITULO,
+                        DESCRICAO,
+                        PROCESSO_CONCLUIDO
+                    )
+                    VALUES (
+                        ?, ?, ?, ?
+                    )
+                """, (
+                    id_processo,
+                    titulo,
+                    descricao
+                        if descricao
+                        else None,
+                    1
+                ))
 
         cur.execute("""
             UPDATE PROCESSOS
@@ -3863,6 +3865,10 @@ def atualizar_processo(id_processo):
         if not validar_numero_processo(numero_processo):
             return jsonify({'error': 'Número do processo inválido'}), 400
 
+        apenas_digitos = ''.join(filter(str.isdigit, numero_processo))
+        if apenas_digitos and len(set(apenas_digitos)) == 1 and apenas_digitos[0] == '0':
+            return jsonify({'error': 'Número do processo não pode ser todo zero'}), 400
+
     try:
         instancia = int(instancia)
     except:
@@ -3879,6 +3885,10 @@ def atualizar_processo(id_processo):
 
         if data_inicio > datetime.date.today():
             return jsonify({'error': 'A data de início não pode ser uma data futura'}), 400
+
+        limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+        if data_inicio < limite_120_anos:
+            return jsonify({'error': 'A data de início não pode ser superior a 120 anos atrás'}), 400
     else:
         data_inicio = datetime.date.today()
 
@@ -4314,6 +4324,169 @@ def listar_processos_escritorio(id_escritorio):
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/processo/verificar_numero', methods=['GET'])
+def verificar_numero_processo():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_advogado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    numero = (request.args.get('numero') or '').strip()
+
+    if not numero:
+        return jsonify({'existe': False}), 200
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT ID_PROCESSOS
+            FROM PROCESSOS
+            WHERE NUM_PROCESSO = ?
+              AND ID_USUARIOS_ADVOGADO = ?
+        """, (numero, id_advogado))
+
+        existe = cur.fetchone() is not None
+
+        return jsonify({'existe': existe}), 200
+
+    except Exception as e:
+        print('Erro ao verificar número:', e)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+@app.route('/processo/<int:id_processo>/atualizacoes/<int:id_atualizacao>', methods=['DELETE'])
+def excluir_atualizacao_processo(id_processo, id_atualizacao):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({
+            'error': 'Token necessário'
+        }), 401
+
+    tipo_usuario = token_data['tipo']
+    id_advogado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({
+            'error': 'Acesso não autorizado'
+        }), 403
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT
+                p.ID_PROCESSOS,
+                p.STATUS
+            FROM PROCESSOS p
+            WHERE p.ID_PROCESSOS = ?
+              AND p.ID_USUARIOS_ADVOGADO = ?
+        """, (
+            id_processo,
+            id_advogado
+        ))
+
+        processo = cur.fetchone()
+
+        if not processo:
+            return jsonify({
+                'error': 'Processo não encontrado'
+            }), 404
+
+        cur.execute("""
+            SELECT
+                ID_ATUALIZACOES,
+                PROCESSO_CONCLUIDO
+            FROM ATUALIZACOES
+            WHERE ID_ATUALIZACOES = ?
+              AND ID_PROCESSOS = ?
+        """, (
+            id_atualizacao,
+            id_processo
+        ))
+
+        atualizacao = cur.fetchone()
+
+        if not atualizacao:
+            return jsonify({
+                'error': 'Atualização não encontrada'
+            }), 404
+
+        era_conclusao = bool(
+            atualizacao[1]
+        )
+
+        cur.execute("""
+            DELETE FROM ATUALIZACOES
+            WHERE ID_ATUALIZACOES = ?
+              AND ID_PROCESSOS = ?
+        """, (
+            id_atualizacao,
+            id_processo
+        ))
+
+        if era_conclusao:
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM ATUALIZACOES
+                WHERE ID_PROCESSOS = ?
+                  AND PROCESSO_CONCLUIDO = 1
+            """, (
+                id_processo,
+            ))
+
+            quantidade_concluidas = (
+                cur.fetchone()[0]
+            )
+
+            if quantidade_concluidas == 0:
+                cur.execute("""
+                    UPDATE PROCESSOS
+                    SET STATUS = ?
+                    WHERE ID_PROCESSOS = ?
+                      AND ID_USUARIOS_ADVOGADO = ?
+                      AND STATUS = ?
+                """, (
+                    'em_andamento',
+                    id_processo,
+                    id_advogado,
+                    'concluido'
+                ))
+
+        con.commit()
+
+        return jsonify({
+            'mensagem': 'Atualização excluída com sucesso'
+        }), 200
+
+    except Exception as e:
+        con.rollback()
+
+        print(
+            'Erro ao excluir atualização:',
+            e
+        )
+
+        return jsonify({
+            'error': str(e)
+        }), 500
+
     finally:
         cur.close()
         con.close()

@@ -12,209 +12,6 @@ from consulta_oab import consultar_oab
 
 
 
-@app.route('/criar_usuarios', methods=['POST'])
-def criar_usuarios():
-    token_data = decodificar_token()
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
-
-    id_usuario_logado = token_data['id_usuarios']
-    tipo_usuario_logado = token_data['tipo']
-
-    if tipo_usuario_logado not in [0, 1]:
-        return jsonify({'error': 'Apenas advogados ou escritórios podem cadastrar clientes'}), 403
-
-    nome = request.form.get('nome')
-    email = request.form.get('email')
-    cpf = request.form.get('cpf_cnpj')
-    telefone = request.form.get('telefone')
-    senha = request.form.get('senha')
-    confirmar_senha = request.form.get('confirmar_senha')
-    tipo = request.form.get('tipo')
-
-    cep = request.form.get('cep')
-    logradouro = request.form.get('logradouro')
-    numero = request.form.get('numero')
-    complemento = request.form.get('complemento')
-    bairro = request.form.get('bairro')
-    cidade = request.form.get('cidade')
-    estado = request.form.get('estado')
-
-    rg = request.form.get('rg')
-    orgao_expedidor = request.form.get('orgao_expedidor')
-    nacionalidade = request.form.get('nacionalidade')
-    estado_civil = request.form.get('estado_civil')
-    data_nascimento = request.form.get('data_nascimento')
-    sexo = request.form.get('sexo')
-    profissao = request.form.get('profissao')
-
-    num_oab = request.form.get('num_oab')
-    uf_oab = request.form.get('uf_oab')
-
-    razao_social = request.form.get('razao_social')
-    nome_fantasia = request.form.get('nome_fantasia')
-    cnpj = request.form.get('cnpj')
-
-    carteira_trabalho = request.form.get('carteira_trabalho')
-    serie_carteira = request.form.get('serie_carteira')
-
-    if not nome:
-        return jsonify({"error": "Nome é obrigatório"}), 400
-    if not email:
-        return jsonify({"error": "E-mail é obrigatório"}), 400
-    if not senha:
-        return jsonify({"error": "Senha é obrigatória"}), 400
-    if not confirmar_senha:
-        return jsonify({"error": "Confirmar senha é obrigatório"}), 400
-    if not telefone:
-        return jsonify({"error": "Telefone é obrigatório"}), 400
-    if tipo is None:
-        return jsonify({"error": "Tipo de usuário é obrigatório"}), 400
-
-    try:
-        tipo = int(tipo)
-    except ValueError:
-        return jsonify({"error": "Tipo de usuário inválido"}), 400
-
-    if tipo not in [0, 1, 2, 3]:
-        return jsonify({"error": "Tipo de usuário inválido"}), 400
-
-    if tipo == 0:
-        if not cpf:
-            return jsonify({"error": "CPF é obrigatório"}), 400
-        if not validar_cpf(cpf):
-            return jsonify({"error": "CPF inválido"}), 400
-        if verificar_existente(cpf, "CPF"):
-            return jsonify({"error": "CPF já cadastrado"}), 400
-        if verificar_existente(email, "EMAIL"):
-            return jsonify({"error": "E-mail já cadastrado"}), 400
-        if not num_oab:
-            return jsonify({"error": "Número da OAB é obrigatório"}), 400
-        if not uf_oab:
-            return jsonify({"error": "UF da OAB é obrigatória"}), 400
-        if verificar_existente(num_oab, "NUM_OAB"):
-            return jsonify({"error": "Número da OAB já cadastrado"}), 400
-
-    elif tipo == 1:
-        if not cnpj:
-            return jsonify({"error": "CNPJ é obrigatório"}), 400
-        if verificar_existente(cnpj, "CNPJ"):
-            return jsonify({"error": "CNPJ já cadastrado"}), 400
-        if verificar_existente(email, "EMAIL"):
-            return jsonify({"error": "E-mail já cadastrado"}), 400
-
-    elif tipo == 2:
-        if not cpf:
-            return jsonify({"error": "CPF é obrigatório"}), 400
-        if not validar_cpf(cpf):
-            return jsonify({"error": "CPF inválido"}), 400
-        if verificar_existente(cpf, "CPF"):
-            return jsonify({"error": "CPF já cadastrado"}), 400
-        if verificar_existente(email, "EMAIL"):
-            return jsonify({"error": "E-mail já cadastrado"}), 400
-        if not data_nascimento:
-            return jsonify({"error": "Data de nascimento é obrigatória"}), 400
-        if not sexo:
-            return jsonify({"error": "Sexo é obrigatório"}), 400
-
-        valido, msg = validar_idade(data_nascimento)
-        if not valido:
-            return jsonify({"error": msg}), 400
-
-    elif tipo == 3:
-        if not cnpj:
-            return jsonify({"error": "CNPJ é obrigatório"}), 400
-        if verificar_existente(cnpj, "CNPJ"):
-            return jsonify({"error": "CNPJ já cadastrado"}), 400
-        if verificar_existente(email, "EMAIL"):
-            return jsonify({"error": "E-mail já cadastrado"}), 400
-        if not razao_social:
-            return jsonify({"error": "Razão social é obrigatória"}), 400
-        if not nome_fantasia:
-            return jsonify({"error": "Nome fantasia é obrigatório"}), 400
-
-    if not senha_forte(senha):
-        return jsonify({"error": "Senha fraca. Use 8+ caracteres, maiúsculas, minúsculas, números e especiais"}), 400
-    if senha != confirmar_senha:
-        return jsonify({"error": "Senhas não correspondem"}), 400
-
-    if tipo == 0:
-        try:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(consultar_oab, uf_oab=uf_oab, num_oab=num_oab, nome=nome, apenas_regular=True)
-                resultado_oab = future.result(timeout=30)
-            if not resultado_oab:
-                return jsonify({"error": "Não foi possível obter uma resposta da OAB."}), 400
-            items = resultado_oab.get("items", [])
-            if not items:
-                return jsonify({"error": f"OAB {uf_oab}-{num_oab} não encontrada."}), 400
-            adv = items[0]
-            if adv.get("situacao", "").upper() != "REGULAR":
-                return jsonify({"error": f"Situação da OAB: {adv.get('situacao')}. Apenas regulares."}), 400
-            if nome.strip().upper() != adv.get("nome", "").strip().upper():
-                return jsonify({"error": "Nome não confere com o da OAB."}), 400
-        except Exception as e:
-            return jsonify({"error": "Erro ao consultar a OAB."}), 500
-
-    data_nascimento_salvar = None
-    if tipo == 2 and data_nascimento:
-        try:
-            data_limpa = data_nascimento.replace('/', '').replace('-', '')
-            if len(data_limpa) == 8:
-                dia, mes, ano = data_limpa[0:2], data_limpa[2:4], data_limpa[4:8]
-                if 1 <= int(dia) <= 31 and 1 <= int(mes) <= 12 and 1900 <= int(ano) <= 2100:
-                    data_nascimento_salvar = f"{ano}-{mes}-{dia}"
-        except:
-            pass
-
-    senha_cripto = generate_password_hash(senha).decode('utf-8')
-    con = conexao()
-    cur = con.cursor()
-
-    try:
-        cur.execute("""
-            INSERT INTO USUARIOS (
-                NOME, EMAIL, SENHA, CPF, TELEFONE, TIPO,
-                RG, ORGAO_EXPEDIDOR, NUM_OAB, UF_OAB,
-                NACIONALIDADE, ESTADO_CIVIL, DATA_NASCIMENTO,
-                SEXO, PROFISSAO, CNPJ, RAZAO_SOCIAL, NOME_FANTASIA,
-                CEP, LOGRADOURO, NUMERO, COMPLEMENTO, BAIRRO,
-                CIDADE, ESTADO, CARTERA_TRABALHO, SERIE_CARTERA,
-                DATA_CADASTRO, ATIVO, ID_USUARIO_RESPONSAVEL
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING ID_USUARIOS
-        """, (
-            nome, email, senha_cripto, cpf, telefone, tipo,
-            rg, orgao_expedidor, num_oab, uf_oab,
-            nacionalidade, estado_civil, data_nascimento_salvar,
-            sexo, profissao, cnpj, razao_social, nome_fantasia,
-            cep, logradouro, numero, complemento, bairro,
-            cidade, estado, carteira_trabalho, serie_carteira,
-            datetime.datetime.now(), 1, id_usuario_logado
-        ))
-
-        id_usuario = cur.fetchone()[0]
-        con.commit()
-
-        foto_perfil = request.files.get('foto_perfil')
-        if foto_perfil:
-            try:
-                caminho = os.path.join(app.config['UPLOAD_FOLDER'], 'Usuarios')
-                os.makedirs(caminho, exist_ok=True)
-                foto_perfil.save(os.path.join(caminho, f'{id_usuario}.jpeg'))
-            except Exception as e:
-                print(f"Erro ao salvar imagem: {e}")
-
-        return jsonify({'message': 'Cadastro realizado com sucesso!', 'id': id_usuario}), 201
-
-    except Exception as e:
-        con.rollback()
-        return jsonify({'error': f'Erro interno: {e}'}), 500
-    finally:
-        cur.close()
-        con.close()
-
 
 @app.route('/editar_perfil', methods=['PUT'])
 def editar_perfil():
@@ -1415,8 +1212,7 @@ def buscar_cliente(id_cliente):
             'razao_social': row[7] or '',
             'nome_fantasia': row[8] or '',
             'cnpj': row[9] or '',
-            'data_cadastro': row[10].strftime('%d/%m/%Y') if row[10] else None,
-            'rg': row[11] or '',
+            'data_cadastro': (row[10].strftime('%d/%m/%Y') if hasattr(row[10], 'strftime') else (str(row[10]) if row[10] else None)),            'rg': row[11] or '',
             'orgao_expedidor': row[12] or '',
             'nacionalidade': row[13] or '',
             'estado_civil': row[14] or '',
@@ -1429,8 +1225,7 @@ def buscar_cliente(id_cliente):
             'cidade': row[21] or '',
             'estado': row[22] or '',
             'sexo': row[23] or '',
-            'data_nascimento': row[24].strftime('%d/%m/%Y') if row[24] else '',
-            'carteira_trabalho': row[25] or '',
+            'data_nascimento': (row[24].strftime('%d/%m/%Y') if hasattr(row[24], 'strftime') else (str(row[24]) if row[24] else '')),            'carteira_trabalho': row[25] or '',
             'serie_carteira': row[26] or ''
         }
 
