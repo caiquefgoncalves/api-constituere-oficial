@@ -183,15 +183,23 @@ def criar_usuarios():
             return jsonify({"error": "Erro ao consultar a OAB."}), 500
 
     data_nascimento_salvar = None
+
     if tipo == 2 and data_nascimento:
         try:
-            data_limpa = data_nascimento.replace('/', '').replace('-', '')
-            if len(data_limpa) == 8:
-                dia, mes, ano = data_limpa[0:2], data_limpa[2:4], data_limpa[4:8]
-                if 1 <= int(dia) <= 31 and 1 <= int(mes) <= 12 and 1900 <= int(ano) <= 2100:
-                    data_nascimento_salvar = f"{ano}-{mes}-{dia}"
-        except:
-            pass
+            texto = str(data_nascimento).strip()
+
+            if '/' in texto:
+                data_obj = datetime.datetime.strptime(texto, '%d/%m/%Y').date()
+            elif '-' in texto:
+                data_obj = datetime.datetime.strptime(texto[:10], '%Y-%m-%d').date()
+            else:
+                data_obj = None
+
+            if data_obj:
+                data_nascimento_salvar = data_obj.strftime('%Y-%m-%d')
+        except Exception as e:
+            print(f"Erro ao converter data de nascimento: {e}")
+            data_nascimento_salvar = None
 
     senha_cripto = generate_password_hash(senha).decode('utf-8')
     con = conexao()

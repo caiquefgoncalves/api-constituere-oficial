@@ -113,10 +113,11 @@ def validar_cpf(cpf):
 
 def validar_idade(data_nascimento):
     """
-    Valida se a idade está entre 18 e 120 anos
+    Valida se a idade está entre 18 e 120 anos.
 
-    Args:
-        data_nascimento: string no formato YYYY-MM-DD
+    Aceita os formatos:
+        - DD/MM/AAAA
+        - AAAA-MM-DD (ISO)
 
     Returns:
         tuple: (valido, mensagem_erro)
@@ -125,8 +126,15 @@ def validar_idade(data_nascimento):
         return False, "Data de nascimento é obrigatória"
 
     try:
-        ano, mes, dia = data_nascimento.split('-')
-        data_nasc = datetime.datetime(int(ano), int(mes), int(dia))
+        texto = str(data_nascimento).strip()
+
+        if '/' in texto:
+            data_nasc = datetime.datetime.strptime(texto, '%d/%m/%Y')
+        elif '-' in texto:
+            data_nasc = datetime.datetime.strptime(texto[:10], '%Y-%m-%d')
+        else:
+            return False, "Data de nascimento inválida."
+
         data_atual = datetime.datetime.now()
 
         idade = data_atual.year - data_nasc.year
