@@ -13,15 +13,33 @@ from consulta_oab import consultar_oab
 
 @app.route('/criar_usuarios', methods=['POST'])
 def criar_usuarios():
-    token_data = decodificar_token()
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
+    tipo = request.form.get('tipo')
 
-    id_usuario_logado = token_data['id_usuarios']
-    tipo_usuario_logado = token_data['tipo']
+    if tipo is None:
+        return jsonify({"error": "Tipo de usuário é obrigatório"}), 400
 
-    if tipo_usuario_logado not in [0, 1]:
-        return jsonify({'error': 'Apenas advogados ou escritórios podem cadastrar clientes'}), 403
+    try:
+        tipo = int(tipo)
+    except ValueError:
+        return jsonify({"error": "Tipo de usuário inválido"}), 400
+
+    if tipo not in [0, 1, 2, 3]:
+        return jsonify({"error": "Tipo de usuário inválido"}), 400
+
+    id_usuario_logado = None
+    tipo_usuario_logado = None
+
+    if tipo in [2, 3]:
+        token_data = decodificar_token()
+
+        if token_data == False:
+            return jsonify({'error': 'Token necessário'}), 401
+
+        id_usuario_logado = token_data['id_usuarios']
+        tipo_usuario_logado = token_data['tipo']
+
+        if tipo_usuario_logado not in [0, 1]:
+            return jsonify({'error': 'Apenas advogados ou escritórios podem cadastrar clientes'}), 403
 
     nome = request.form.get('nome')
     email = request.form.get('email')
@@ -29,7 +47,6 @@ def criar_usuarios():
     telefone = request.form.get('telefone')
     senha = request.form.get('senha')
     confirmar_senha = request.form.get('confirmar_senha')
-    tipo = request.form.get('tipo')
 
     cep = request.form.get('cep')
     logradouro = request.form.get('logradouro')
@@ -67,16 +84,6 @@ def criar_usuarios():
         return jsonify({"error": "Confirmar senha é obrigatório"}), 400
     if not telefone:
         return jsonify({"error": "Telefone é obrigatório"}), 400
-    if tipo is None:
-        return jsonify({"error": "Tipo de usuário é obrigatório"}), 400
-
-    try:
-        tipo = int(tipo)
-    except ValueError:
-        return jsonify({"error": "Tipo de usuário inválido"}), 400
-
-    if tipo not in [0, 1, 2, 3]:
-        return jsonify({"error": "Tipo de usuário inválido"}), 400
 
     if tipo == 0:
         if not cpf:
@@ -280,9 +287,7 @@ def editar_perfil():
     if not estado_civil:
         return jsonify({"error": "Estado civil é obrigatório"}), 400
 
-
     cpf_limpo = ''.join(filter(str.isdigit, cpf))
-
 
     try:
         from funcao import validar_cpf
@@ -290,7 +295,6 @@ def editar_perfil():
             return jsonify({"error": "CPF inválido"}), 400
     except Exception as e:
         print(f"Erro ao validar CPF: {e}")
-
 
     con = conexao()
     cur = con.cursor()
@@ -310,14 +314,15 @@ def editar_perfil():
                 {"error": f"Este número de OAB ({uf_oab}-{num_oab}) já está cadastrado para outro usuário."}), 400
 
         cur.execute("""
-            SELECT NUM_OAB, UF_OAB
+            SELECT NOME, NUM_OAB, UF_OAB
             FROM USUARIOS
             WHERE ID_USUARIOS = ?
         """, (id_usuario,))
         usuario_atual = cur.fetchone()
 
-        oab_atual = usuario_atual[0] if usuario_atual else None
-        uf_oab_atual = usuario_atual[1] if usuario_atual else None
+        nome_atual = usuario_atual[0] if usuario_atual else None
+        oab_atual = usuario_atual[1] if usuario_atual else None
+        uf_oab_atual = usuario_atual[2] if usuario_atual else None
 
     except Exception as e:
         return jsonify({"error": f"Erro ao verificar duplicidade: {e}"}), 500
@@ -338,9 +343,16 @@ def editar_perfil():
     else:
         senha_cripto = None
 
+    nome_alterado = (
+        nome_atual is None
+        or nome.strip().upper() != (nome_atual or '').strip().upper()
+    )
+
     oab_alterada = (num_oab != oab_atual) or (uf_oab != uf_oab_atual)
 
-    if oab_alterada:
+    precisa_validar_oab = oab_alterada or nome_alterado
+
+    if precisa_validar_oab:
         from consulta_oab import consultar_oab
 
         try:
@@ -385,23 +397,30 @@ def editar_perfil():
                 "error": f"OAB {uf_oab}-{num_oab} não encontrada no cadastro da OAB. Verifique se o número e a UF estão corretos."
             }), 400
 
-        advogado = items[0]
-        nome_oab = advogado.get("nome", "")
-        situacao = advogado.get("situacao", "")
+        nome_normalizado = nome.strip().upper()
+        advogado_valido = None
 
-        if situacao.upper() != "REGULAR":
+        for item in items:
+            nome_item = (item.get("nome") or "").strip().upper()
+            situacao_item = (item.get("situacao") or "").strip().upper()
+
+            if situacao_item == "REGULAR" and nome_item == nome_normalizado:
+                advogado_valido = item
+                break
+
+        if not advogado_valido:
+            for item in items:
+                situacao_item = (item.get("situacao") or "").strip().upper()
+                if situacao_item and situacao_item != "REGULAR":
+                    return jsonify({
+                        "error": f"Sua situação é {situacao_item}. Apenas advogados regulares podem editar seu perfil."
+                    }), 400
+
             return jsonify({
-                "error": f"Sua situação é {situacao}. Apenas advogados regulares podem editar seu perfil."
+                "error": "O nome informado não corresponde ao nome cadastrado na OAB."
             }), 400
 
-        if nome.strip().upper() != nome_oab.strip().upper():
-            return jsonify({
-                "error": "O nome informado não corresponde ao nome cadastrado na OAB.",
-                "nome_informado": nome,
-                "nome_oab": nome_oab
-            }), 400
-
-        print(f"OAB validada com sucesso na edição: {uf_oab}-{num_oab} - {nome_oab}")
+        print(f"OAB validada com sucesso na edição: {uf_oab}-{num_oab} - {advogado_valido.get('nome')}")
 
     con = conexao()
     cur = con.cursor()
@@ -484,7 +503,6 @@ def editar_perfil():
     finally:
         cur.close()
         con.close()
-
 
 @app.route('/login', methods=['POST'])
 def login():
