@@ -120,6 +120,26 @@ def criar_usuarios():
         if not valido:
             return jsonify({"error": msg}), 400
 
+        try:
+            texto_nasc = str(data_nascimento).strip()
+
+            if '/' in texto_nasc:
+                data_nasc_obj = datetime.datetime.strptime(texto_nasc, '%d/%m/%Y').date()
+            elif '-' in texto_nasc:
+                data_nasc_obj = datetime.datetime.strptime(texto_nasc[:10], '%Y-%m-%d').date()
+            else:
+                raise ValueError('Formato desconhecido')
+
+            if data_nasc_obj > datetime.date.today():
+                return jsonify({"error": "A data de nascimento não pode ser uma data futura"}), 400
+
+            limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+            if data_nasc_obj < limite_120_anos:
+                return jsonify({"error": "A data de nascimento não pode ser superior a 120 anos atrás"}), 400
+
+        except:
+            return jsonify({"error": "Data de nascimento inválida"}), 400
+
     elif tipo == 3:
         if not cnpj:
             return jsonify({"error": "CNPJ é obrigatório"}), 400
