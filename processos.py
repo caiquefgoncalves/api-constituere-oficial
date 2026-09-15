@@ -71,7 +71,12 @@ def cadastrar_processo():
 
     if data_inicio_recebida:
         try:
-            data_inicio = datetime.datetime.strptime(data_inicio_recebida, '%d/%m/%Y').date()
+            texto_data_inicio = str(data_inicio_recebida).strip()
+
+            if '/' in texto_data_inicio:
+                data_inicio = datetime.datetime.strptime(texto_data_inicio, '%d/%m/%Y').date()
+            else:
+                data_inicio = datetime.datetime.strptime(texto_data_inicio[:10], '%Y-%m-%d').date()
         except:
             return jsonify({'error': 'Data de início inválida'}), 400
 
@@ -310,11 +315,26 @@ def cadastrar_processo():
 
     data_nascimento = None
 
-    if parte.get('data_nascimento'):
-        try:
-            data_nascimento = datetime.datetime.strptime(parte.get('data_nascimento'), '%d/%m/%Y').date()
-        except:
-            return jsonify({'error': 'Data de nascimento inválida'}), 400
+    data_nasc_recebida = parte.get('data_nascimento')
+
+    if data_nasc_recebida:
+        texto_nasc = str(data_nasc_recebida).strip()
+
+        if texto_nasc:
+            try:
+                if '/' in texto_nasc:
+                    data_nascimento = datetime.datetime.strptime(texto_nasc, '%d/%m/%Y').date()
+                else:
+                    data_nascimento = datetime.datetime.strptime(texto_nasc[:10], '%Y-%m-%d').date()
+
+                if data_nascimento > datetime.date.today():
+                    return jsonify({'error': 'A data de nascimento não pode ser uma data futura'}), 400
+
+                limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+                if data_nascimento < limite_120_anos:
+                    return jsonify({'error': 'A data de nascimento não pode ser superior a 120 anos atrás'}), 400
+            except:
+                return jsonify({'error': 'Data de nascimento inválida'}), 400
 
     con = conexao()
     cur = con.cursor()
@@ -583,7 +603,6 @@ def cadastrar_processo():
     finally:
         cur.close()
         con.close()
-
 
 @app.route('/processos', methods=['GET'])
 def listar_processos():
@@ -4649,19 +4668,26 @@ def atualizar_parte_contraria(id_processo):
 
     data_nascimento = None
 
-    if dados.get('data_nascimento'):
-        try:
-            data_nascimento = datetime.datetime.strptime(dados.get('data_nascimento'), '%d/%m/%Y').date()
-        except:
-            return jsonify({'error': 'Data de nascimento inválida'}), 400
+    data_nasc_recebida = dados.get('data_nascimento')
 
-        if data_nascimento > datetime.date.today():
-            return jsonify({'error': 'A data de nascimento não pode ser uma data futura'}), 400
+    if data_nasc_recebida:
+        texto_nasc = str(data_nasc_recebida).strip()
 
-        limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
-        if data_nascimento < limite_120_anos:
-            return jsonify({'error': 'A data de nascimento não pode ser superior a 120 anos atrás'}), 400
+        if texto_nasc:
+            try:
+                if '/' in texto_nasc:
+                    data_nascimento = datetime.datetime.strptime(texto_nasc, '%d/%m/%Y').date()
+                else:
+                    data_nascimento = datetime.datetime.strptime(texto_nasc[:10], '%Y-%m-%d').date()
 
+                if data_nascimento > datetime.date.today():
+                    return jsonify({'error': 'A data de nascimento não pode ser uma data futura'}), 400
+
+                limite_120_anos = datetime.date.today() - datetime.timedelta(days=120 * 365)
+                if data_nascimento < limite_120_anos:
+                    return jsonify({'error': 'A data de nascimento não pode ser superior a 120 anos atrás'}), 400
+            except:
+                return jsonify({'error': 'Data de nascimento inválida'}), 400
     con = conexao()
     cur = con.cursor()
 
