@@ -1,7 +1,7 @@
 from flask import jsonify, request, make_response
 from funcao import *
 from flask_bcrypt import generate_password_hash, check_password_hash
-from main import app
+from main import app, socketio
 from db import conexao
 import os
 import datetime
@@ -2225,7 +2225,7 @@ def filtro_escritorios_advogados():
         cur.close()
         con.close()
 
-@app.route('/alterar_cargo_advogado/<int:id_advogado>/<int:id_escritorio>',methods=['PUT'])
+@app.route('/alterar_cargo_advogado/<int:id_advogado>/<int:id_escritorio>', methods=['PUT'])
 def alterar_cargo_advogado(id_advogado, id_escritorio):
     token_data = decodificar_token()
 
@@ -2248,7 +2248,7 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
     if not novo_status:
         return jsonify({'error': 'Status é obrigatório'}), 400
 
-    novo_status = novo_status.upper()
+    novo_status = novo_status.strip().upper()
 
     if novo_status not in ['PROPRIETARIO', 'PARCEIRO']:
         return jsonify({
@@ -2259,7 +2259,6 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
     cur = con.cursor()
 
     try:
-
         cur.execute("""
             SELECT STATUS
             FROM ADVOGADO_ESCRITORIO
@@ -2277,7 +2276,6 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
                 'error': 'Você não pertence a este escritório'
             }), 403
 
-
         status_logado = vinculo_logado[0]
 
         if not status_logado or status_logado.upper() != 'PROPRIETARIO':
@@ -2291,10 +2289,14 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
             }), 403
 
         cur.execute("""
-            SELECT STATUS
-            FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ?
-              AND ID_ESCRITORIOS = ?
+            SELECT
+                ae.STATUS,
+                u.NOME
+            FROM ADVOGADO_ESCRITORIO ae
+            INNER JOIN USUARIOS u
+                ON u.ID_USUARIOS = ae.ID_USUARIOS
+            WHERE ae.ID_USUARIOS = ?
+              AND ae.ID_ESCRITORIOS = ?
         """, (
             id_advogado,
             id_escritorio
@@ -2308,14 +2310,61 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
             }), 404
 
         status_atual = vinculo_advogado[0]
+        nome_advogado = vinculo_advogado[1]
 
-        if (
-            status_atual
-            and status_atual.upper() == novo_status
-        ):
+        if status_atual and status_atual.upper() == novo_status:
             return jsonify({
                 'error': f'Advogado já é {novo_status}'
             }), 400
+
+        cur.execute("""
+            SELECT
+                NOME_FANTASIA,
+                RAZAO_SOCIAL
+            FROM ESCRITORIOS
+            WHERE ID_ESCRITORIOS = ?
+        """, (
+            id_escritorio,
+        ))
+
+        escritorio = cur.fetchone()
+
+        if not escritorio:
+            return jsonify({
+                'error': 'Escritório não encontrado'
+            }), 404
+
+        nome_escritorio = (
+            escritorio[0]
+            or escritorio[1]
+            or 'Escritório'
+        )
+
+        nomes_cargos = {
+            'PROPRIETARIO': 'Proprietário',
+            'PARCEIRO': 'Parceiro',
+            'ASSOCIADO': 'Associado'
+        }
+
+        status_anterior_formatado = (
+            nomes_cargos.get(
+                status_atual.upper(),
+                status_atual
+            )
+            if status_atual
+            else 'Não definido'
+        )
+
+        status_novo_formatado = nomes_cargos.get(
+            novo_status,
+            novo_status
+        )
+
+        mensagem_notificacao = (
+            f'Sua posição no escritório {nome_escritorio} '
+            f'foi alterada de {status_anterior_formatado} '
+            f'para {status_novo_formatado}.'
+        )
 
         cur.execute("""
             UPDATE ADVOGADO_ESCRITORIO
@@ -2328,7 +2377,49 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
             id_escritorio
         ))
 
+        cur.execute("""
+            INSERT INTO NOTIFICACOES (
+                ID_USUARIOS,
+                TIPO,
+                TITULO,
+                MENSAGEM
+            )
+            VALUES (?, ?, ?, ?)
+            RETURNING ID_NOTIFICACAO
+        """, (
+            id_advogado,
+            'ALTERACAO_CARGO',
+            'Posição alterada',
+            mensagem_notificacao
+        ))
+
+        id_notificacao = cur.fetchone()[0]
+
         con.commit()
+
+        agora = datetime.datetime.now()
+
+        notificacao = {
+            'id': id_notificacao,
+            'tipo': 'ALTERACAO_CARGO',
+            'titulo': 'Posição alterada',
+            'mensagem': mensagem_notificacao,
+            'lida': False,
+            'data_criacao': agora.isoformat(),
+            'data_leitura': None,
+            'id_advogado': id_advogado,
+            'nome_advogado': nome_advogado,
+            'id_escritorio': id_escritorio,
+            'nome_escritorio': nome_escritorio,
+            'status_anterior': status_atual,
+            'status_novo': novo_status
+        }
+
+        socketio.emit(
+            'nova_notificacao',
+            notificacao,
+            room=f'usuario_{id_advogado}'
+        )
 
         return jsonify({
             'mensagem': 'Cargo alterado com sucesso',
@@ -2603,3 +2694,120 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
 
 
 
+@app.route('/notificacoes', methods=['GET'])
+def listar_notificacoes():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({
+            'error': 'Token necessário'
+        }), 401
+
+    id_usuario = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT
+                ID_NOTIFICACAO,
+                TIPO,
+                TITULO,
+                MENSAGEM,
+                LIDA,
+                DATA_CRIACAO,
+                DATA_LEITURA
+            FROM NOTIFICACOES
+            WHERE ID_USUARIOS = ?
+            ORDER BY DATA_CRIACAO DESC
+        """, (
+            id_usuario,
+        ))
+
+        rows = cur.fetchall()
+
+        notificacoes = []
+
+        for row in rows:
+            notificacoes.append({
+                'id': row[0],
+                'tipo': row[1],
+                'titulo': row[2],
+                'mensagem': row[3],
+                'lida': row[4] == 1,
+                'data_criacao': (
+                    row[5].isoformat()
+                    if row[5]
+                    else None
+                ),
+                'data_leitura': (
+                    row[6].isoformat()
+                    if row[6]
+                    else None
+                )
+            })
+
+        return jsonify({
+            'notificacoes': notificacoes,
+            'quantidade': len(notificacoes),
+            'nao_lidas': sum(
+                1
+                for notificacao in notificacoes
+                if not notificacao['lida']
+            )
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+    finally:
+        cur.close()
+        con.close()
+
+
+
+@app.route('/notificacoes/marcar_todas_lidas', methods=['PUT'])
+def marcar_todas_notificacoes_lidas():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({
+            'error': 'Token necessário'
+        }), 401
+
+    id_usuario = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            UPDATE NOTIFICACOES
+            SET
+                LIDA = 1,
+                DATA_LEITURA = CURRENT_TIMESTAMP
+            WHERE ID_USUARIOS = ?
+              AND LIDA = 0
+        """, (
+            id_usuario,
+        ))
+
+        con.commit()
+
+        return jsonify({
+            'mensagem': 'Notificações marcadas como lidas'
+        }), 200
+
+    except Exception as e:
+        con.rollback()
+
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+    finally:
+        cur.close()
+        con.close()

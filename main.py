@@ -1,6 +1,7 @@
 from flask import Flask, send_from_directory, jsonify, request, make_response
 from flask_cors import CORS
 import os
+from flask_socketio import SocketIO, join_room, leave_room
 
 app = Flask(__name__)
 
@@ -13,54 +14,175 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://192.168.18.218:5173",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
     "http://172.20.10.2:5173",
     "http://172.20.10.2:3000",
     "http://10.92.11.24:5173",
     "http://10.92.11.24:3000"
 ]
 
-CORS(app,
-     origins=ALLOWED_ORIGINS,
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     supports_credentials=True,
-     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "X-Access-Token"],
-     expose_headers=["Content-Type", "Authorization", "X-Access-Token"])
+CORS(
+    app,
+    origins=ALLOWED_ORIGINS,
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    supports_credentials=True,
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "X-Access-Token"
+    ],
+    expose_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Access-Token"
+    ]
+)
+
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=ALLOWED_ORIGINS
+)
 
 
 @app.before_request
 def handle_options():
     if request.method == 'OPTIONS':
         response = make_response()
-        response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', ''))
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-Access-Token')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+
+        response.headers.add(
+            "Access-Control-Allow-Origin",
+            request.headers.get('Origin', '')
+        )
+
+        response.headers.add(
+            'Access-Control-Allow-Credentials',
+            'true'
+        )
+
+        response.headers.add(
+            'Access-Control-Allow-Headers',
+            'Content-Type, Authorization, X-Requested-With, X-Access-Token'
+        )
+
+        response.headers.add(
+            'Access-Control-Allow-Methods',
+            'GET, POST, PUT, DELETE, OPTIONS'
+        )
+
         return response
 
 
 app.config.from_pyfile('config.py')
 
-app.config['UPLOAD_FOLDER'] = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'uploads')
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'Usuarios'), exist_ok=True)
+app.config['UPLOAD_FOLDER'] = os.path.join(
+    os.path.abspath(os.path.dirname(__file__)),
+    'uploads'
+)
+
+os.makedirs(
+    app.config['UPLOAD_FOLDER'],
+    exist_ok=True
+)
+
+os.makedirs(
+    os.path.join(
+        app.config['UPLOAD_FOLDER'],
+        'Usuarios'
+    ),
+    exist_ok=True
+)
 
 
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    return send_from_directory(
+        app.config['UPLOAD_FOLDER'],
+        filename
+    )
 
 
+# =========================================================
+# SOCKET.IO
+# =========================================================
+
+@socketio.on('connect')
+def socket_connect():
+    print('Cliente conectado ao Socket.IO')
+
+
+@socketio.on('disconnect')
+def socket_disconnect():
+    print('Cliente desconectado do Socket.IO')
+
+
+@socketio.on('entrar_usuario')
+def entrar_usuario(data):
+    try:
+        id_usuario = data.get('id_usuario')
+
+        if not id_usuario:
+            return
+
+        sala = f'usuario_{id_usuario}'
+
+        join_room(sala)
+
+        print(
+            f'Usuário {id_usuario} entrou na sala {sala}'
+        )
+
+    except Exception as e:
+        print(
+            f'Erro ao colocar usuário na sala: {e}'
+        )
+
+
+@socketio.on('sair_usuario')
+def sair_usuario(data):
+    try:
+        id_usuario = data.get('id_usuario')
+
+        if not id_usuario:
+            return
+
+        sala = f'usuario_{id_usuario}'
+
+        leave_room(sala)
+
+        print(
+            f'Usuário {id_usuario} saiu da sala {sala}'
+        )
+
+    except Exception as e:
+        print(
+            f'Erro ao remover usuário da sala: {e}'
+        )
+
+
+# IMPORTAR ROTAS DEPOIS DE CRIAR socketio
 from usuario import *
 from processos import *
 from agendamentos import *
 
+
 if __name__ == '__main__':
     print("\n=== ROTAS REGISTRADAS ===")
+
     for rule in app.url_map.iter_rules():
+
         if not rule.rule.startswith('/static'):
-            print(f"{list(rule.methods)} {rule.rule}")
+
+            print(
+                f"{list(rule.methods)} {rule.rule}"
+            )
+
     print("=========================\n")
 
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=5000,
+        debug=True,
+        allow_unsafe_werkzeug=True
+    )
