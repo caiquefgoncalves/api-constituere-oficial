@@ -4,3 +4,5 @@ Flask-Bcrypt==1.0.1
 fdb==2.0.4
 PyJWT==2.12.1
 selenium
+flask-socketio==5.3.6
+python-socketio==5.11.0

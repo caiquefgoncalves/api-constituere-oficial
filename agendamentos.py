@@ -84,16 +84,19 @@ def converter_duracao(duracao_texto):
     return None
 
 
-def verificar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min, ignorar_id=None):
+def buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min, ignorar_id=None):
+    data_anterior = data_agendamento - datetime.timedelta(days=1)
+    data_posterior = data_agendamento + datetime.timedelta(days=1)
+
     sql = """
-        SELECT ID_AGENDAMENTOS, HORARIO, DURACAO
+        SELECT ID_AGENDAMENTOS, DATA, HORARIO, DURACAO
         FROM AGENDAMENTOS
-        WHERE DATA = ?
+        WHERE DATA BETWEEN ? AND ?
           AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
           AND UPPER(STATUS) NOT IN ('CANCELADO', 'RECUSADO')
     """
 
-    params = [data_agendamento, id_advogado, id_advogado]
+    params = [data_anterior, data_posterior, id_advogado, id_advogado]
 
     if ignorar_id:
         sql += " AND ID_AGENDAMENTOS != ?"
@@ -102,16 +105,21 @@ def verificar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_
     cur.execute(sql, tuple(params))
     existentes = cur.fetchall()
 
-    inicio_novo = horario_min
-    fim_novo = horario_min + duracao_min
+    inicio_novo = (
+        datetime.datetime.combine(data_agendamento, datetime.time(0, 0))
+        + datetime.timedelta(minutes=horario_min)
+    )
+    fim_novo = inicio_novo + datetime.timedelta(minutes=duracao_min)
 
     for existente in existentes:
-        horario_existente = existente[1]
-        duracao_existente = existente[2]
+        id_existente = existente[0]
+        data_existente = existente[1]
+        horario_existente = existente[2]
+        duracao_existente = existente[3]
 
-        inicio_existente = horario_para_minutos(horario_existente)
+        inicio_existente_min = horario_para_minutos(horario_existente)
 
-        if inicio_existente is None:
+        if inicio_existente_min is None:
             continue
 
         if isinstance(duracao_existente, int):
@@ -122,14 +130,32 @@ def verificar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_
         if duracao_existente_min is None:
             continue
 
-        fim_existente = inicio_existente + duracao_existente_min
+        inicio_existente = (
+            datetime.datetime.combine(data_existente, datetime.time(0, 0))
+            + datetime.timedelta(minutes=inicio_existente_min)
+        )
+        fim_existente = inicio_existente + datetime.timedelta(minutes=duracao_existente_min)
 
-        sobrepoe = (inicio_novo < fim_existente) and (fim_novo > inicio_existente)
+        if (inicio_novo < fim_existente) and (fim_novo > inicio_existente):
+            if hasattr(data_existente, 'strftime'):
+                data_fmt = data_existente.strftime('%d/%m/%Y')
+            else:
+                data_fmt = str(data_existente)
 
-        if sobrepoe:
-            return True
+            if isinstance(horario_existente, datetime.time):
+                horario_fmt = horario_existente.strftime('%H:%M')
+            else:
+                horario_fmt = str(horario_existente)[:5]
 
-    return False
+            return {
+                'id': id_existente,
+                'data': data_fmt,
+                'horario': horario_fmt,
+                'duracao_minutos': duracao_existente_min,
+                'duracao_formatada': f"{duracao_existente_min // 60:02d}:{duracao_existente_min % 60:02d}"
+            }
+
+    return None
 
 
 @app.route('/agendamentos', methods=['POST'])
@@ -227,12 +253,22 @@ def cadastrar_agendamento():
             if not cur.fetchone():
                 return jsonify({'error': 'Advogado 2 não encontrado'}), 400
 
-        if verificar_conflito(cur, id_advogado_logado, data_agendamento, horario_min, duracao_min):
-            return jsonify({'error': 'Já existe um agendamento neste dia e horário'}), 409
+        conflito = buscar_conflito(cur, id_advogado_logado, data_agendamento, horario_min, duracao_min)
+
+        if conflito:
+            return jsonify({
+                'error': f'Já existe um agendamento neste período: {conflito["data"]} às {conflito["horario"]} (duração {conflito["duracao_formatada"]}). Escolha outro horário ou ajuste a duração.',
+                'conflito': conflito
+            }), 409
 
         if id_advogado_2:
-            if verificar_conflito(cur, id_advogado_2, data_agendamento, horario_min, duracao_min):
-                return jsonify({'error': 'O advogado 2 já possui agendamento neste dia e horário'}), 409
+            conflito_2 = buscar_conflito(cur, id_advogado_2, data_agendamento, horario_min, duracao_min)
+
+            if conflito_2:
+                return jsonify({
+                    'error': f'O advogado 2 já possui agendamento neste período: {conflito_2["data"]} às {conflito_2["horario"]} (duração {conflito_2["duracao_formatada"]}).',
+                    'conflito': conflito_2
+                }), 409
 
         cur.execute("""
             INSERT INTO AGENDAMENTOS (
@@ -514,12 +550,22 @@ def editar_agendamento(id_agendamento):
             if not cur.fetchone():
                 return jsonify({'error': 'Advogado 2 não encontrado'}), 400
 
-        if verificar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min, ignorar_id=id_agendamento):
-            return jsonify({'error': 'Já existe um agendamento neste dia e horário'}), 409
+        conflito = buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min, ignorar_id=id_agendamento)
+
+        if conflito:
+            return jsonify({
+                'error': f'Já existe um agendamento neste período: {conflito["data"]} às {conflito["horario"]} (duração {conflito["duracao_formatada"]}). Escolha outro horário ou ajuste a duração.',
+                'conflito': conflito
+            }), 409
 
         if id_advogado_2:
-            if verificar_conflito(cur, id_advogado_2, data_agendamento, horario_min, duracao_min, ignorar_id=id_agendamento):
-                return jsonify({'error': 'O advogado 2 já possui agendamento neste dia e horário'}), 409
+            conflito_2 = buscar_conflito(cur, id_advogado_2, data_agendamento, horario_min, duracao_min, ignorar_id=id_agendamento)
+
+            if conflito_2:
+                return jsonify({
+                    'error': f'O advogado 2 já possui agendamento neste período: {conflito_2["data"]} às {conflito_2["horario"]} (duração {conflito_2["duracao_formatada"]}).',
+                    'conflito': conflito_2
+                }), 409
 
         cur.execute("""
             UPDATE AGENDAMENTOS
