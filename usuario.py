@@ -2600,3 +2600,6 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
     finally:
         cur.close()
         con.close()
+
+
+

@@ -54,6 +54,7 @@ def uploaded_file(filename):
 
 from usuario import *
 from processos import *
+from agendamentos import *
 
 if __name__ == '__main__':
     print("\n=== ROTAS REGISTRADAS ===")

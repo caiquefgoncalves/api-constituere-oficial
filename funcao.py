@@ -340,3 +340,40 @@ def decodificar_token():
     except Exception as e:
         print(f"❌ Erro ao decodificar token: {e}")
         return False
+
+
+def enviar_email_motivo(destinatario, assunto, nome_cliente, nome_advogado, data_agendamento, horario_agendamento, assunto_agendamento, motivo, tipo):
+    user = "juriscriptoffice@gmail.com"
+    senha = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            template = "email_desmarcado.html" if tipo == "desmarcado" else "email_recusado.html"
+
+            html = render_template(
+                template,
+                nome_cliente=nome_cliente,
+                nome_advogado=nome_advogado,
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto=assunto_agendamento,
+                motivo=motivo
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = assunto
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"Email enviado com sucesso para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar email para {destinatario}: {e}")
+        return False
