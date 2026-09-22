@@ -1587,60 +1587,66 @@ def listar_clientes():
         tem_parcela_por_cliente = {}
 
         if ids_clientes:
-            placeholders = ','.join(['?'] * len(ids_clientes))
+            try:
+                placeholders = ','.join(['?'] * len(ids_clientes))
 
-            sql_parcelas = f"""
-                SELECT
-                    p.ID_USUARIOS_CLIENTE,
-                    parc.DATA_VENCIMENTO,
-                    parc.STATUS
-                FROM PARCELAS parc
-                INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
-                INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
-                WHERE p.ID_USUARIOS_CLIENTE IN ({placeholders})
+                sql_parcelas = f"""
+                    SELECT
+                        p.ID_USUARIOS_CLIENTE,
+                        parc.DATA_VENCIMENTO,
+                        parc.STATUS
+                    FROM PARCELAS parc
+                    INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+                    INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+                    WHERE p.ID_USUARIOS_CLIENTE IN ({placeholders})
 
-                UNION ALL
+                    UNION ALL
 
-                SELECT
-                    p.ID_USUARIOS_CLIENTE,
-                    pe.DATA_VENCIMENTO,
-                    pe.STATUS
-                FROM PARCELAS_EXITO pe
-                INNER JOIN PAGAMENTO_EXITO pex ON pe.ID_PAGAMENTO_EXITO = pex.ID_PAGAMENTO_EXITO
-                INNER JOIN PAGAMENTOS pag ON pex.ID_PAGAMENTO = pag.ID_PAGAMENTOS
-                INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
-                WHERE p.ID_USUARIOS_CLIENTE IN ({placeholders})
-            """
+                    SELECT
+                        p.ID_USUARIOS_CLIENTE,
+                        pe.DATA_VENCIMENTO,
+                        pe.STATUS
+                    FROM PARCELAS_EXITO pe
+                    INNER JOIN PAGAMENTO_EXITO pex ON pe.ID_PAGAMENTO_EXITO = pex.ID_PAGAMENTO_EXITO
+                    INNER JOIN PAGAMENTOS pag ON pex.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+                    INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+                    WHERE p.ID_USUARIOS_CLIENTE IN ({placeholders})
+                """
 
-            cur.execute(
-                sql_parcelas,
-                tuple(ids_clientes) + tuple(ids_clientes)
-            )
-            parcelas = cur.fetchall()
+                cur.execute(
+                    sql_parcelas,
+                    tuple(ids_clientes) + tuple(ids_clientes)
+                )
+                parcelas = cur.fetchall()
 
-            hoje = datetime.date.today()
-            limite_proximo = hoje + datetime.timedelta(days=7)
+                hoje = datetime.date.today()
+                limite_proximo = hoje + datetime.timedelta(days=7)
 
-            for id_cliente, data_venc_raw, status_parcela in parcelas:
-                tem_parcela_por_cliente[id_cliente] = True
+                for id_cliente, data_venc_raw, status_parcela in parcelas:
+                    tem_parcela_por_cliente[id_cliente] = True
 
-                data_venc = converter_data_pagamento(data_venc_raw)
+                    data_venc = converter_data_pagamento(data_venc_raw)
 
-                if not data_venc:
-                    continue
+                    if not data_venc:
+                        continue
 
-                status_parcela = (status_parcela or '').upper()
+                    status_parcela = (status_parcela or '').upper()
 
-                if status_parcela == 'PAGA':
-                    continue
+                    if status_parcela == 'PAGA':
+                        continue
 
-                status_atual = status_por_cliente.get(id_cliente, 'em_dia')
+                    status_atual = status_por_cliente.get(id_cliente, 'em_dia')
 
-                if data_venc < hoje:
-                    status_por_cliente[id_cliente] = 'inadimplente'
-                elif data_venc <= limite_proximo:
-                    if status_atual != 'inadimplente':
-                        status_por_cliente[id_cliente] = 'proximo_vencimento'
+                    if data_venc < hoje:
+                        status_por_cliente[id_cliente] = 'inadimplente'
+                    elif data_venc <= limite_proximo:
+                        if status_atual != 'inadimplente':
+                            status_por_cliente[id_cliente] = 'proximo_vencimento'
+
+            except Exception as erro_parcelas:
+                print("Aviso: nao foi possivel calcular status financeiro:", erro_parcelas)
+                import traceback
+                traceback.print_exc()
 
         clientes = []
         for row in rows:
@@ -1655,13 +1661,20 @@ def listar_clientes():
                 elif len(doc) == 14:
                     doc = f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
 
-            if row[6] == 0:
-                status = 'inativo'
+            if row[6] == 1:
+                status = 'ativo'
             else:
-                if id_cliente not in tem_parcela_por_cliente:
-                    status = 'sem_parcelas'
+                status = 'inativo'
+
+            if row[6] == 0:
+                status_financeiro = 'inativo'
+            else:
+                if not tem_parcela_por_cliente:
+                    status_financeiro = 'em_dia'
+                elif id_cliente not in tem_parcela_por_cliente:
+                    status_financeiro = 'sem_parcelas'
                 else:
-                    status = status_por_cliente.get(id_cliente, 'em_dia')
+                    status_financeiro = status_por_cliente.get(id_cliente, 'em_dia')
 
             data_cadastro = None
             if row[10]:
@@ -1678,6 +1691,7 @@ def listar_clientes():
                 'telefone': row[4] or '--',
                 'tipo': 'fisico' if row[5] == 2 else 'juridico',
                 'status': status,
+                'status_financeiro': status_financeiro,
                 'data_cadastro': data_cadastro
             })
 
