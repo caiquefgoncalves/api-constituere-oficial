@@ -396,3 +396,328 @@ def converter_data_pagamento(valor):
         return datetime.date(1900, 1, 1) + datetime.timedelta(days=dias)
     except:
         return None
+
+def enviar_email_boas_vindas(destinatario, nome, cpf, senha):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_boas_vindas.html",
+                nome=nome,
+                cpf=cpf,
+                senha=senha
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Bem-vindo à Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"Email de boas-vindas enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar email de boas-vindas para {destinatario}: {e}")
+        return False
+
+def enviar_email_agendamento_criado(
+        destinatario,
+        nome_cliente,
+        nome_advogado,
+        data_agendamento,
+        horario_agendamento,
+        assunto_agendamento
+):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_agendamento_criado.html",
+                nome_cliente=nome_cliente,
+                nome_advogado=nome_advogado,
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto=assunto_agendamento
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Novo agendamento - Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"E-mail (agendamento criado) enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar e-mail (agendamento criado) para {destinatario}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def enviar_email_dois_advogados(
+        destinatario,
+        nome_cliente,
+        nome_advogado_1,
+        nome_advogado_2,
+        data_agendamento,
+        horario_agendamento,
+        assunto_agendamento
+):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_agendamento_dois_advogados.html",
+                nome_cliente=nome_cliente,
+                nome_advogado_1=nome_advogado_1,
+                nome_advogado_2=nome_advogado_2,
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto=assunto_agendamento
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Agendamento confirmado - Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"E-mail (dois advogados) enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar e-mail (dois advogados) para {destinatario}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def enviar_email_um_advogado(
+        destinatario,
+        nome_cliente,
+        nome_advogado_presente,
+        nome_advogado_ausente,
+        data_agendamento,
+        horario_agendamento,
+        assunto_agendamento,
+        motivo
+):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_agendamento_um_advogado.html",
+                nome_cliente=nome_cliente,
+                nome_advogado_presente=nome_advogado_presente,
+                nome_advogado_ausente=nome_advogado_ausente,
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto=assunto_agendamento,
+                motivo=motivo
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Agendamento - Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"E-mail (um advogado) enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar e-mail (um advogado) para {destinatario}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def enviar_email_agendamento_cancelado(
+        destinatario,
+        nome_cliente,
+        nome_advogado_presente,
+        nome_advogado_ausente,
+        data_agendamento,
+        horario_agendamento,
+        assunto_agendamento,
+        motivos,
+        tipo,
+        cenario
+):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    if tipo == 'recusado':
+        verbo_singular = 'recusou'
+        verbo_plural = 'recusaram'
+    else:
+        verbo_singular = 'desmarcou'
+        verbo_plural = 'desmarcaram'
+
+    if cenario == 'unico':
+        texto_principal = (
+            f'Infelizmente seu agendamento foi <strong>cancelado</strong>. '
+            f'O advogado <strong>{nome_advogado_ausente}</strong> '
+            f'{verbo_singular} o compromisso.'
+        )
+    elif cenario == 'dois':
+        texto_principal = (
+            f'Infelizmente seu agendamento foi <strong>cancelado</strong>. '
+            f'Nenhum dos advogados poderá comparecer — '
+            f'ambos {verbo_plural} o compromisso.'
+        )
+    else:
+        texto_principal = (
+            f'Seu agendamento segue <strong>confirmado</strong>, '
+            f'mas apenas o advogado '
+            f'<strong>{nome_advogado_presente}</strong> estará presente. '
+            f'O advogado <strong>{nome_advogado_ausente}</strong> '
+            f'{verbo_singular} o compromisso.'
+        )
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_agendamento_cancelado.html",
+                nome_cliente=nome_cliente,
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto_agendamento=assunto_agendamento,
+                texto_principal=texto_principal,
+                motivos=motivos
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Agendamento cancelado - Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"E-mail (agendamento cancelado - {cenario}) enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar e-mail (agendamento cancelado) para {destinatario}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def enviar_email_um_advogado_confirmado(
+        destinatario,
+        nome_cliente,
+        nome_advogado,
+        data_agendamento,
+        horario_agendamento,
+        assunto_agendamento
+):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_agendamento_um_advogado_confirmado.html",
+                nome_cliente=nome_cliente,
+                nome_advogado=nome_advogado,
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto=assunto_agendamento
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Agendamento confirmado - Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"E-mail (1 advogado confirmou) enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar e-mail (1 advogado confirmou) para {destinatario}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def enviar_email_agendamento_reagendado(
+        destinatario,
+        nome_cliente,
+        nome_advogado,
+        data_agendamento,
+        horario_agendamento,
+        assunto_agendamento
+):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_agendamento_reagendado.html",
+                nome_cliente=nome_cliente,
+                nome_advogado=nome_advogado,
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto=assunto_agendamento
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Agendamento atualizado - Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"E-mail (reagendado) enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar e-mail (reagendado) para {destinatario}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False

@@ -207,29 +207,52 @@ def criar_usuarios():
 
     try:
         cur.execute("""
-            INSERT INTO USUARIOS (
-                NOME, EMAIL, SENHA, CPF, TELEFONE, TIPO,
-                RG, ORGAO_EXPEDIDOR, NUM_OAB, UF_OAB,
-                NACIONALIDADE, ESTADO_CIVIL, DATA_NASCIMENTO,
-                SEXO, PROFISSAO, CNPJ, RAZAO_SOCIAL, NOME_FANTASIA,
-                CEP, LOGRADOURO, NUMERO, COMPLEMENTO, BAIRRO,
-                CIDADE, ESTADO, CARTERA_TRABALHO, SERIE_CARTERA,
-                DATA_CADASTRO, ATIVO, ID_USUARIO_RESPONSAVEL
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING ID_USUARIOS
-        """, (
-            nome, email, senha_cripto, cpf, telefone, tipo,
-            rg, orgao_expedidor, num_oab, uf_oab,
-            nacionalidade, estado_civil, data_nascimento_salvar,
-            sexo, profissao, cnpj, razao_social, nome_fantasia,
-            cep, logradouro, numero, complemento, bairro,
-            cidade, estado, carteira_trabalho, serie_carteira,
-            datetime.datetime.now(), 1, id_usuario_logado
-        ))
+                    INSERT INTO USUARIOS (
+                        NOME, EMAIL, SENHA, CPF, TELEFONE, TIPO,
+                        RG, ORGAO_EXPEDIDOR, NUM_OAB, UF_OAB,
+                        NACIONALIDADE, ESTADO_CIVIL, DATA_NASCIMENTO,
+                        SEXO, PROFISSAO, CNPJ, RAZAO_SOCIAL, NOME_FANTASIA,
+                        CEP, LOGRADOURO, NUMERO, COMPLEMENTO, BAIRRO,
+                        CIDADE, ESTADO, CARTERA_TRABALHO, SERIE_CARTERA,
+                        DATA_CADASTRO, ATIVO, ID_USUARIO_RESPONSAVEL
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        RETURNING ID_USUARIOS
+                    """, (
+                        nome, email, senha_cripto, cpf, telefone, tipo,
+                        rg, orgao_expedidor, num_oab, uf_oab,
+                        nacionalidade, estado_civil, data_nascimento_salvar,
+                        sexo, profissao, cnpj, razao_social, nome_fantasia,
+                        cep, logradouro, numero, complemento, bairro,
+                        cidade, estado, carteira_trabalho, serie_carteira,
+                        datetime.datetime.now(), 1, id_usuario_logado
+                    ))
 
         id_usuario = cur.fetchone()[0]
         con.commit()
+
+        cpf_email = cpf if cpf else cnpj
+        cpf_email_limpo = ''.join(filter(str.isdigit, cpf_email or ''))
+
+        if len(cpf_email_limpo) == 11:
+            cpf_email_formatado = f"{cpf_email_limpo[:3]}.{cpf_email_limpo[3:6]}.{cpf_email_limpo[6:9]}-{cpf_email_limpo[9:]}"
+        elif len(cpf_email_limpo) == 14:
+            cpf_email_formatado = f"{cpf_email_limpo[:2]}.{cpf_email_limpo[2:5]}.{cpf_email_limpo[5:8]}/{cpf_email_limpo[8:12]}-{cpf_email_limpo[12:]}"
+        else:
+            cpf_email_formatado = cpf_email or '--'
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                executor.submit(
+                    enviar_email_boas_vindas,
+                    email,
+                    nome,
+                    cpf_email_formatado,
+                    senha
+                )
+            print(f"Solicitação de envio de e-mail de boas-vindas criada para {email}")
+        except Exception as e:
+            print(f"Erro ao agendar envio de e-mail de boas-vindas: {e}")
 
         foto_perfil = request.files.get('foto_perfil')
         if foto_perfil:
@@ -248,7 +271,6 @@ def criar_usuarios():
     finally:
         cur.close()
         con.close()
-
 @app.route('/editar_perfil', methods=['PUT'])
 def editar_perfil():
     token_data = decodificar_token()
