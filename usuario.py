@@ -1560,29 +1560,92 @@ def listar_clientes():
     cur = con.cursor()
 
     try:
-
         cur.execute("""
-            SELECT 
-                u.ID_USUARIOS, 
-                u.NOME, 
-                u.CPF, 
-                u.EMAIL, 
-                u.TELEFONE,
-                u.TIPO,
-                u.ATIVO,
-                u.RAZAO_SOCIAL,
-                u.NOME_FANTASIA,
-                u.CNPJ,
-                u.DATA_CADASTRO
-            FROM USUARIOS u
-            WHERE u.TIPO IN (2, 3)
-            AND u.ID_USUARIO_RESPONSAVEL = ?
-            ORDER BY u.DATA_CADASTRO DESC
-        """, (id_usuario,))
+                    SELECT
+                        u.ID_USUARIOS,
+                        u.NOME,
+                        u.CPF,
+                        u.EMAIL,
+                        u.TELEFONE,
+                        u.TIPO,
+                        u.ATIVO,
+                        u.RAZAO_SOCIAL,
+                        u.NOME_FANTASIA,
+                        u.CNPJ,
+                        u.DATA_CADASTRO
+                    FROM USUARIOS u
+                    WHERE u.TIPO IN (2, 3)
+                      AND u.ID_USUARIO_RESPONSAVEL = ?
+                    ORDER BY u.DATA_CADASTRO DESC
+                    """, (id_usuario,))
 
         rows = cur.fetchall()
+
+        ids_clientes = [row[0] for row in rows]
+
+        status_por_cliente = {}
+        tem_parcela_por_cliente = {}
+
+        if ids_clientes:
+            placeholders = ','.join(['?'] * len(ids_clientes))
+
+            sql_parcelas = f"""
+                SELECT
+                    p.ID_USUARIOS_CLIENTE,
+                    parc.DATA_VENCIMENTO,
+                    parc.STATUS
+                FROM PARCELAS parc
+                INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+                INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+                WHERE p.ID_USUARIOS_CLIENTE IN ({placeholders})
+
+                UNION ALL
+
+                SELECT
+                    p.ID_USUARIOS_CLIENTE,
+                    pe.DATA_VENCIMENTO,
+                    pe.STATUS
+                FROM PARCELAS_EXITO pe
+                INNER JOIN PAGAMENTO_EXITO pex ON pe.ID_PAGAMENTO_EXITO = pex.ID_PAGAMENTO_EXITO
+                INNER JOIN PAGAMENTOS pag ON pex.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+                INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
+                WHERE p.ID_USUARIOS_CLIENTE IN ({placeholders})
+            """
+
+            cur.execute(
+                sql_parcelas,
+                tuple(ids_clientes) + tuple(ids_clientes)
+            )
+            parcelas = cur.fetchall()
+
+            hoje = datetime.date.today()
+            limite_proximo = hoje + datetime.timedelta(days=7)
+
+            for id_cliente, data_venc_raw, status_parcela in parcelas:
+                tem_parcela_por_cliente[id_cliente] = True
+
+                data_venc = converter_data_pagamento(data_venc_raw)
+
+                if not data_venc:
+                    continue
+
+                status_parcela = (status_parcela or '').upper()
+
+                if status_parcela == 'PAGA':
+                    continue
+
+                status_atual = status_por_cliente.get(id_cliente, 'em_dia')
+
+                if data_venc < hoje:
+                    status_por_cliente[id_cliente] = 'inadimplente'
+                elif data_venc <= limite_proximo:
+                    if status_atual != 'inadimplente':
+                        status_por_cliente[id_cliente] = 'proximo_vencimento'
+
         clientes = []
         for row in rows:
+            id_cliente = row[0]
+
             nome_exibicao = row[1] if row[1] else (row[7] or row[8] or '--')
             doc = row[2] if row[2] else (row[9] if row[9] else '--')
 
@@ -1592,7 +1655,13 @@ def listar_clientes():
                 elif len(doc) == 14:
                     doc = f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
 
-            status = 'ativo' if row[6] == 1 else 'inativo'
+            if row[6] == 0:
+                status = 'inativo'
+            else:
+                if id_cliente not in tem_parcela_por_cliente:
+                    status = 'sem_parcelas'
+                else:
+                    status = status_por_cliente.get(id_cliente, 'em_dia')
 
             data_cadastro = None
             if row[10]:
@@ -1602,7 +1671,7 @@ def listar_clientes():
                     data_cadastro = str(row[10])
 
             clientes.append({
-                'id': row[0],
+                'id': id_cliente,
                 'nome': nome_exibicao,
                 'cpf': doc,
                 'email': row[3] or '--',
@@ -1616,6 +1685,8 @@ def listar_clientes():
 
     except Exception as e:
         print(f"Erro ao listar clientes: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()

@@ -377,3 +377,22 @@ def enviar_email_motivo(destinatario, assunto, nome_cliente, nome_advogado, data
     except Exception as e:
         print(f"Erro ao enviar email para {destinatario}: {e}")
         return False
+
+
+def converter_data_pagamento(valor):
+    if valor is None:
+        return None
+    if isinstance(valor, datetime.date):
+        return valor
+    if isinstance(valor, str):
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
+            try:
+                return datetime.datetime.strptime(valor, fmt).date()
+            except:
+                continue
+        return None
+    try:
+        dias = int(valor)
+        return datetime.date(1900, 1, 1) + datetime.timedelta(days=dias)
+    except:
+        return None
