@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agendamento com um advogado - Constituere</title>
+</head>
+
+<body style="margin: 0; padding: 0; background-color: #f5f5f5; font-family: Arial, Helvetica, sans-serif;">
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background-color: #f5f5f5; padding: 40px 20px;">
+    <tr>
+        <td align="center">
+
+            <table width="600" cellpadding="0" cellspacing="0" border="0"
+                   style="max-width: 600px; width: 100%; background-color: #ffffff; border-radius: 12px; overflow: hidden;">
+
+                <tr>
+                    <td style="background-color: #0047ab; padding: 25px; text-align: center;">
+                        <h1 style="margin: 0; color: #ffffff; font-size: 28px;">
+                            Constituere
+                        </h1>
+                    </td>
+                </tr>
+
+                <tr>
+                    <td style="height: 6px; background-color: #ffbf00;"></td>
+                </tr>
+
+                <tr>
+                    <td style="padding: 40px 35px; color: #333333;">
+
+                        <h2 style="margin: 0 0 20px 0; color: #0047ab; font-size: 24px;">
+                            Olá, {{ nome_cliente }}!
+                        </h2>
+
+                        <p style="margin: 0 0 20px 0; font-size: 16px; line-height: 1.7; color: #444444;">
+                            Seu agendamento segue <strong>confirmado</strong>, mas apenas
+                            <strong>{{ nome_advogado_presente }}</strong> estará presente.
+                            O advogado <strong>{{ nome_advogado_ausente }}</strong> não poderá comparecer.
+                        </p>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                               style="background-color: #f9f9f9; border-radius: 8px; padding: 20px; margin: 20px 0;">
+                            <tr>
+                                <td style="padding: 20px;">
+                                    <p style="margin: 0 0 10px 0; color: #333333; font-size: 15px;">
+                                        <strong>Data:</strong> {{ data_agendamento }}
+                                    </p>
+                                    <p style="margin: 0 0 10px 0; color: #333333; font-size: 15px;">
+                                        <strong>Horário:</strong> {{ horario_agendamento }}
+                                    </p>
+                                    <p style="margin: 0; color: #333333; font-size: 15px;">
+                                        <strong>Assunto:</strong> {{ assunto }}
+                                    </p>
+                                </td>
+                            </tr>
+                        </table>
+
+                        <p style="margin: 30px 0 15px 0; font-size: 15px; color: #333333;">
+                            <strong>Motivo informado por {{ nome_advogado_ausente }}:</strong>
+                        </p>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                               style="background-color: #fff8e1; border-left: 4px solid #ffbf00; border-radius: 4px;">
+                            <tr>
+                                <td style="padding: 18px 22px;">
+                                    <p style="margin: 0; color: #7a5c00; font-size: 15px; line-height: 1.6; font-style: italic;">
+                                        {{ motivo }}
+                                    </p>
+                                </td>
+                            </tr>
+                        </table>
+
+                        <p style="margin: 30px 0 0 0; font-size: 15px; line-height: 1.7; color: #666666;">
+                            Se você tiver alguma dúvida ou quiser remarcar com os dois advogados,
+                            entre em contato diretamente com o escritório.
+                        </p>
+
+                    </td>
+                </tr>
+
+                <tr>
+                    <td style="background-color: #0047ab; padding: 20px; text-align: center;">
+                        <p style="margin: 0; color: #ffffff; font-size: 13px;">
+                            © 2026 JuriScript
+                        </p>
+                        <p style="margin: 8px 0 0 0; color: #ffffff; font-size: 12px;">
+                            Este é um e-mail automático. Por favor, não responda.
+                        </p>
+                    </td>
+                </tr>
+
+            </table>
+
+        </td>
+    </tr>
+</table>
+
+</body>
+</html>
