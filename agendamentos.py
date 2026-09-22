@@ -89,12 +89,12 @@ def buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min
     data_posterior = data_agendamento + datetime.timedelta(days=1)
 
     sql = """
-        SELECT ID_AGENDAMENTOS, DATA, HORARIO, DURACAO
-        FROM AGENDAMENTOS
-        WHERE DATA BETWEEN ? AND ?
-          AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
-          AND UPPER(STATUS) NOT IN ('CANCELADO', 'RECUSADO')
-    """
+          SELECT ID_AGENDAMENTOS, DATA, HORARIO, DURACAO
+          FROM AGENDAMENTOS
+          WHERE DATA BETWEEN ? AND ?
+            AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
+            AND UPPER(STATUS) NOT IN ('CANCELADO', 'RECUSADO') \
+          """
 
     params = [data_anterior, data_posterior, id_advogado, id_advogado]
 
@@ -106,8 +106,8 @@ def buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min
     existentes = cur.fetchall()
 
     inicio_novo = (
-        datetime.datetime.combine(data_agendamento, datetime.time(0, 0))
-        + datetime.timedelta(minutes=horario_min)
+            datetime.datetime.combine(data_agendamento, datetime.time(0, 0))
+            + datetime.timedelta(minutes=horario_min)
     )
     fim_novo = inicio_novo + datetime.timedelta(minutes=duracao_min)
 
@@ -131,8 +131,8 @@ def buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min
             continue
 
         inicio_existente = (
-            datetime.datetime.combine(data_existente, datetime.time(0, 0))
-            + datetime.timedelta(minutes=inicio_existente_min)
+                datetime.datetime.combine(data_existente, datetime.time(0, 0))
+                + datetime.timedelta(minutes=inicio_existente_min)
         )
         fim_existente = inicio_existente + datetime.timedelta(minutes=duracao_existente_min)
 
@@ -230,25 +230,25 @@ def cadastrar_agendamento():
 
     try:
         cur.execute("""
-            SELECT ID_USUARIOS
-            FROM USUARIOS
-            WHERE ID_USUARIOS = ?
-              AND TIPO IN (2, 3)
-              AND ATIVO = 1
-              AND ID_USUARIO_RESPONSAVEL = ?
-        """, (id_cliente, id_advogado_logado))
+                    SELECT ID_USUARIOS
+                    FROM USUARIOS
+                    WHERE ID_USUARIOS = ?
+                      AND TIPO IN (2, 3)
+                      AND ATIVO = 1
+                      AND ID_USUARIO_RESPONSAVEL = ?
+                    """, (id_cliente, id_advogado_logado))
 
         if not cur.fetchone():
             return jsonify({'error': 'Cliente não encontrado ou não pertence a este advogado'}), 403
 
         if id_advogado_2:
             cur.execute("""
-                SELECT ID_USUARIOS
-                FROM USUARIOS
-                WHERE ID_USUARIOS = ?
-                  AND TIPO = 0
-                  AND ATIVO = 1
-            """, (id_advogado_2,))
+                        SELECT ID_USUARIOS
+                        FROM USUARIOS
+                        WHERE ID_USUARIOS = ?
+                          AND TIPO = 0
+                          AND ATIVO = 1
+                        """, (id_advogado_2,))
 
             if not cur.fetchone():
                 return jsonify({'error': 'Advogado 2 não encontrado'}), 400
@@ -271,32 +271,32 @@ def cadastrar_agendamento():
                 }), 409
 
         cur.execute("""
-            INSERT INTO AGENDAMENTOS (
-                ID_USUARIOS_ADVOGADO_1,
-                ID_USUARIOS_ADVOGADO_2,
-                ID_USUARIOS_CLIENTE,
-                CLIENTE,
-                ASSUNTO,
-                DATA,
-                HORARIO,
-                DURACAO,
-                STATUS,
-                DATA_CADASTRO
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING ID_AGENDAMENTOS
-        """, (
-            id_advogado_logado,
-            id_advogado_2 if id_advogado_2 else None,
-            id_cliente,
-            nome_cliente if nome_cliente else '--',
-            assunto,
-            data_agendamento,
-            horario_obj,
-            duracao_min,
-            'a_confirmar',
-            datetime.datetime.now()
-        ))
+                    INSERT INTO AGENDAMENTOS (
+                        ID_USUARIOS_ADVOGADO_1,
+                        ID_USUARIOS_ADVOGADO_2,
+                        ID_USUARIOS_CLIENTE,
+                        CLIENTE,
+                        ASSUNTO,
+                        DATA,
+                        HORARIO,
+                        DURACAO,
+                        STATUS,
+                        DATA_CADASTRO
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        RETURNING ID_AGENDAMENTOS
+                    """, (
+                        id_advogado_logado,
+                        id_advogado_2 if id_advogado_2 else None,
+                        id_cliente,
+                        nome_cliente if nome_cliente else '--',
+                        assunto,
+                        data_agendamento,
+                        horario_obj,
+                        duracao_min,
+                        'a_confirmar',
+                        datetime.datetime.now()
+                    ))
 
         id_agendamento = cur.fetchone()[0]
         con.commit()
@@ -333,6 +333,7 @@ def listar_agendamentos():
     data_inicio_recebida = request.args.get('data_inicio')
     data_fim_recebida = request.args.get('data_fim')
     filtro_status = (request.args.get('status') or '').strip()
+    limite_recebido = request.args.get('limite')
 
     con = conexao()
     cur = con.cursor()
@@ -345,21 +346,21 @@ def listar_agendamentos():
 
     try:
         sql = """
-            SELECT
-                a.ID_AGENDAMENTOS,
-                a.ID_USUARIOS_ADVOGADO_1,
-                a.ID_USUARIOS_ADVOGADO_2,
-                a.ID_USUARIOS_CLIENTE,
-                a.CLIENTE,
-                a.ASSUNTO,
-                a.DATA,
-                a.HORARIO,
-                a.DURACAO,
-                a.STATUS,
-                a.MOTIVO
-            FROM AGENDAMENTOS a
-            WHERE (a.ID_USUARIOS_ADVOGADO_1 = ? OR a.ID_USUARIOS_ADVOGADO_2 = ?)
-        """
+              SELECT
+                  a.ID_AGENDAMENTOS,
+                  a.ID_USUARIOS_ADVOGADO_1,
+                  a.ID_USUARIOS_ADVOGADO_2,
+                  a.ID_USUARIOS_CLIENTE,
+                  a.CLIENTE,
+                  a.ASSUNTO,
+                  a.DATA,
+                  a.HORARIO,
+                  a.DURACAO,
+                  a.STATUS,
+                  a.MOTIVO
+              FROM AGENDAMENTOS a
+              WHERE (a.ID_USUARIOS_ADVOGADO_1 = ? OR a.ID_USUARIOS_ADVOGADO_2 = ?) \
+              """
 
         parametros = [id_advogado, id_advogado]
 
@@ -380,6 +381,14 @@ def listar_agendamentos():
             parametros.append(filtro_status.lower())
 
         sql += " ORDER BY a.DATA ASC, a.HORARIO ASC"
+
+        if limite_recebido:
+            try:
+                limite = int(limite_recebido)
+                if limite > 0:
+                    sql = sql.replace("SELECT", f"SELECT FIRST {limite}", 1)
+            except:
+                pass
 
         cur.execute(sql, tuple(parametros))
         rows = cur.fetchall()
@@ -439,6 +448,144 @@ def listar_agendamentos():
 
     except Exception as e:
         print('Erro ao listar agendamentos:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/escritorio/<int:id_escritorio>/agendamentos', methods=['GET'])
+def listar_agendamentos_escritorio(id_escritorio):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    id_usuario_logado = token_data['id_usuarios']
+
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    limite_recebido = request.args.get('limite')
+
+    con = conexao()
+    cur = con.cursor()
+
+    meses_pt = {
+        1: 'JAN', 2: 'FEV', 3: 'MAR', 4: 'ABR',
+        5: 'MAI', 6: 'JUN', 7: 'JUL', 8: 'AGO',
+        9: 'SET', 10: 'OUT', 11: 'NOV', 12: 'DEZ'
+    }
+
+    try:
+        cur.execute("""
+                    SELECT 1
+                    FROM ADVOGADO_ESCRITORIO
+                    WHERE ID_USUARIOS = ?
+                      AND ID_ESCRITORIOS = ?
+                    """, (id_usuario_logado, id_escritorio))
+
+        if not cur.fetchone():
+            return jsonify({
+                'error': 'Você não possui acesso a este escritório'
+            }), 403
+
+        cur.execute("""
+                    SELECT ID_USUARIOS
+                    FROM ADVOGADO_ESCRITORIO
+                    WHERE ID_ESCRITORIOS = ?
+                    """, (id_escritorio,))
+
+        ids_advogados = [row[0] for row in cur.fetchall()]
+
+        if not ids_advogados:
+            return jsonify({
+                'agendamentos': [],
+                'quantidade': 0
+            }), 200
+
+        placeholders = ','.join(['?'] * len(ids_advogados))
+
+        sql = f"""
+            SELECT
+                a.ID_AGENDAMENTOS,
+                a.CLIENTE,
+                a.ASSUNTO,
+                a.DATA,
+                a.HORARIO,
+                a.DURACAO,
+                a.STATUS
+            FROM AGENDAMENTOS a
+            WHERE (a.ID_USUARIOS_ADVOGADO_1 IN ({placeholders})
+                OR a.ID_USUARIOS_ADVOGADO_2 IN ({placeholders}))
+              AND a.DATA >= ?
+              AND UPPER(a.STATUS) NOT IN ('CANCELADO', 'RECUSADO')
+            ORDER BY a.DATA ASC, a.HORARIO ASC
+        """
+
+        params = list(ids_advogados) + list(ids_advogados) + [datetime.date.today()]
+
+        if limite_recebido:
+            try:
+                limite = int(limite_recebido)
+                if limite > 0:
+                    sql = sql.replace("SELECT", f"SELECT FIRST {limite}", 1)
+            except:
+                pass
+
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+
+        agendamentos = []
+
+        for row in rows:
+            data_agendamento = row[3]
+            horario = row[4]
+            duracao = row[5]
+
+            if hasattr(data_agendamento, 'strftime'):
+                data_formatada = data_agendamento.strftime('%d/%m/%Y')
+                dia = data_agendamento.strftime('%d')
+                mes = meses_pt.get(data_agendamento.month, data_agendamento.strftime('%b').upper())
+            else:
+                data_formatada = str(data_agendamento)
+                dia = '--'
+                mes = '--'
+
+            if isinstance(horario, datetime.time):
+                horario_formatado = horario.strftime('%H:%M')
+            else:
+                horario_formatado = str(horario)[:5] if horario else '--'
+
+            if isinstance(duracao, int):
+                horas = duracao // 60
+                minutos = duracao % 60
+                duracao_formatada = f"{horas:02d}:{minutos:02d}"
+            else:
+                duracao_formatada = str(duracao)
+
+            agendamentos.append({
+                'id': row[0],
+                'cliente': row[1] or '--',
+                'assunto': row[2] or '--',
+                'data': data_formatada,
+                'dia': dia,
+                'mes': mes,
+                'horario': horario_formatado,
+                'duracao': duracao_formatada,
+                'status': row[6] or '--'
+            })
+
+        return jsonify({
+            'agendamentos': agendamentos,
+            'quantidade': len(agendamentos)
+        }), 200
+
+    except Exception as e:
+        print('Erro ao listar agendamentos do escritório:', e)
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -516,36 +663,36 @@ def editar_agendamento(id_agendamento):
 
     try:
         cur.execute("""
-            SELECT ID_AGENDAMENTOS
-            FROM AGENDAMENTOS
-            WHERE ID_AGENDAMENTOS = ?
-              AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
-        """, (id_agendamento, id_advogado, id_advogado))
+                    SELECT ID_AGENDAMENTOS
+                    FROM AGENDAMENTOS
+                    WHERE ID_AGENDAMENTOS = ?
+                      AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
+                    """, (id_agendamento, id_advogado, id_advogado))
 
         if not cur.fetchone():
             return jsonify({'error': 'Agendamento não encontrado'}), 404
 
         if id_cliente:
             cur.execute("""
-                SELECT ID_USUARIOS
-                FROM USUARIOS
-                WHERE ID_USUARIOS = ?
-                  AND TIPO IN (2, 3)
-                  AND ATIVO = 1
-                  AND ID_USUARIO_RESPONSAVEL = ?
-            """, (id_cliente, id_advogado))
+                        SELECT ID_USUARIOS
+                        FROM USUARIOS
+                        WHERE ID_USUARIOS = ?
+                          AND TIPO IN (2, 3)
+                          AND ATIVO = 1
+                          AND ID_USUARIO_RESPONSAVEL = ?
+                        """, (id_cliente, id_advogado))
 
             if not cur.fetchone():
                 return jsonify({'error': 'Cliente não encontrado ou não pertence a este advogado'}), 403
 
         if id_advogado_2:
             cur.execute("""
-                SELECT ID_USUARIOS
-                FROM USUARIOS
-                WHERE ID_USUARIOS = ?
-                  AND TIPO = 0
-                  AND ATIVO = 1
-            """, (id_advogado_2,))
+                        SELECT ID_USUARIOS
+                        FROM USUARIOS
+                        WHERE ID_USUARIOS = ?
+                          AND TIPO = 0
+                          AND ATIVO = 1
+                        """, (id_advogado_2,))
 
             if not cur.fetchone():
                 return jsonify({'error': 'Advogado 2 não encontrado'}), 400
@@ -568,25 +715,25 @@ def editar_agendamento(id_agendamento):
                 }), 409
 
         cur.execute("""
-            UPDATE AGENDAMENTOS
-            SET ID_USUARIOS_ADVOGADO_2 = ?,
-                ID_USUARIOS_CLIENTE = ?,
-                CLIENTE = ?,
-                ASSUNTO = ?,
-                DATA = ?,
-                HORARIO = ?,
-                DURACAO = ?
-            WHERE ID_AGENDAMENTOS = ?
-        """, (
-            id_advogado_2 if id_advogado_2 else None,
-            id_cliente if id_cliente else None,
-            nome_cliente if nome_cliente else '--',
-            assunto,
-            data_agendamento,
-            horario_obj,
-            duracao_min,
-            id_agendamento
-        ))
+                    UPDATE AGENDAMENTOS
+                    SET ID_USUARIOS_ADVOGADO_2 = ?,
+                        ID_USUARIOS_CLIENTE = ?,
+                        CLIENTE = ?,
+                        ASSUNTO = ?,
+                        DATA = ?,
+                        HORARIO = ?,
+                        DURACAO = ?
+                    WHERE ID_AGENDAMENTOS = ?
+                    """, (
+                        id_advogado_2 if id_advogado_2 else None,
+                        id_cliente if id_cliente else None,
+                        nome_cliente if nome_cliente else '--',
+                        assunto,
+                        data_agendamento,
+                        horario_obj,
+                        duracao_min,
+                        id_agendamento
+                    ))
 
         con.commit()
 
@@ -621,20 +768,20 @@ def confirmar_agendamento(id_agendamento):
 
     try:
         cur.execute("""
-            SELECT ID_AGENDAMENTOS
-            FROM AGENDAMENTOS
-            WHERE ID_AGENDAMENTOS = ?
-              AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
-        """, (id_agendamento, id_advogado, id_advogado))
+                    SELECT ID_AGENDAMENTOS
+                    FROM AGENDAMENTOS
+                    WHERE ID_AGENDAMENTOS = ?
+                      AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
+                    """, (id_agendamento, id_advogado, id_advogado))
 
         if not cur.fetchone():
             return jsonify({'error': 'Agendamento não encontrado'}), 404
 
         cur.execute("""
-            UPDATE AGENDAMENTOS
-            SET STATUS = 'confirmado'
-            WHERE ID_AGENDAMENTOS = ?
-        """, (id_agendamento,))
+                    UPDATE AGENDAMENTOS
+                    SET STATUS = 'confirmado'
+                    WHERE ID_AGENDAMENTOS = ?
+                    """, (id_agendamento,))
 
         con.commit()
 
@@ -672,20 +819,20 @@ def cancelar_agendamento(id_agendamento):
 
     try:
         cur.execute("""
-            SELECT
-                a.ID_AGENDAMENTOS,
-                a.CLIENTE,
-                a.DATA,
-                a.HORARIO,
-                a.ASSUNTO,
-                u.EMAIL,
-                adv.NOME
-            FROM AGENDAMENTOS a
-            INNER JOIN USUARIOS u ON u.ID_USUARIOS = a.ID_USUARIOS_CLIENTE
-            INNER JOIN USUARIOS adv ON adv.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1
-            WHERE a.ID_AGENDAMENTOS = ?
-              AND (a.ID_USUARIOS_ADVOGADO_1 = ? OR a.ID_USUARIOS_ADVOGADO_2 = ?)
-        """, (id_agendamento, id_advogado, id_advogado))
+                    SELECT
+                        a.ID_AGENDAMENTOS,
+                        a.CLIENTE,
+                        a.DATA,
+                        a.HORARIO,
+                        a.ASSUNTO,
+                        u.EMAIL,
+                        adv.NOME
+                    FROM AGENDAMENTOS a
+                             INNER JOIN USUARIOS u ON u.ID_USUARIOS = a.ID_USUARIOS_CLIENTE
+                             INNER JOIN USUARIOS adv ON adv.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1
+                    WHERE a.ID_AGENDAMENTOS = ?
+                      AND (a.ID_USUARIOS_ADVOGADO_1 = ? OR a.ID_USUARIOS_ADVOGADO_2 = ?)
+                    """, (id_agendamento, id_advogado, id_advogado))
 
         agendamento = cur.fetchone()
 
@@ -710,11 +857,11 @@ def cancelar_agendamento(id_agendamento):
             horario_formatado = str(horario_ag)[:5]
 
         cur.execute("""
-            UPDATE AGENDAMENTOS
-            SET STATUS = 'cancelado',
-                MOTIVO = ?
-            WHERE ID_AGENDAMENTOS = ?
-        """, (motivo, id_agendamento))
+                    UPDATE AGENDAMENTOS
+                    SET STATUS = 'cancelado',
+                        MOTIVO = ?
+                    WHERE ID_AGENDAMENTOS = ?
+                    """, (motivo, id_agendamento))
 
         con.commit()
 
@@ -768,20 +915,20 @@ def recusar_agendamento(id_agendamento):
 
     try:
         cur.execute("""
-            SELECT
-                a.ID_AGENDAMENTOS,
-                a.CLIENTE,
-                a.DATA,
-                a.HORARIO,
-                a.ASSUNTO,
-                u.EMAIL,
-                adv.NOME
-            FROM AGENDAMENTOS a
-            INNER JOIN USUARIOS u ON u.ID_USUARIOS = a.ID_USUARIOS_CLIENTE
-            INNER JOIN USUARIOS adv ON adv.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1
-            WHERE a.ID_AGENDAMENTOS = ?
-              AND (a.ID_USUARIOS_ADVOGADO_1 = ? OR a.ID_USUARIOS_ADVOGADO_2 = ?)
-        """, (id_agendamento, id_advogado, id_advogado))
+                    SELECT
+                        a.ID_AGENDAMENTOS,
+                        a.CLIENTE,
+                        a.DATA,
+                        a.HORARIO,
+                        a.ASSUNTO,
+                        u.EMAIL,
+                        adv.NOME
+                    FROM AGENDAMENTOS a
+                             INNER JOIN USUARIOS u ON u.ID_USUARIOS = a.ID_USUARIOS_CLIENTE
+                             INNER JOIN USUARIOS adv ON adv.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1
+                    WHERE a.ID_AGENDAMENTOS = ?
+                      AND (a.ID_USUARIOS_ADVOGADO_1 = ? OR a.ID_USUARIOS_ADVOGADO_2 = ?)
+                    """, (id_agendamento, id_advogado, id_advogado))
 
         agendamento = cur.fetchone()
 
@@ -806,11 +953,11 @@ def recusar_agendamento(id_agendamento):
             horario_formatado = str(horario_ag)[:5]
 
         cur.execute("""
-            UPDATE AGENDAMENTOS
-            SET STATUS = 'recusado',
-                MOTIVO = ?
-            WHERE ID_AGENDAMENTOS = ?
-        """, (motivo, id_agendamento))
+                    UPDATE AGENDAMENTOS
+                    SET STATUS = 'recusado',
+                        MOTIVO = ?
+                    WHERE ID_AGENDAMENTOS = ?
+                    """, (motivo, id_agendamento))
 
         con.commit()
 

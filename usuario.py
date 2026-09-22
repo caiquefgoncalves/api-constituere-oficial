@@ -631,8 +631,11 @@ def meus_dados():
 @app.route('/escritorio/<int:id_escritorio>', methods=['GET'])
 def detalhes_escritorio(id_escritorio):
     token_data = decodificar_token()
+
     if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
+        return jsonify({
+            'error': 'Token necessário'
+        }), 401
 
     id_usuario = token_data['id_usuarios']
 
@@ -641,7 +644,7 @@ def detalhes_escritorio(id_escritorio):
 
     try:
         cur.execute("""
-            SELECT 
+            SELECT
                 e.ID_ESCRITORIOS,
                 e.RAZAO_SOCIAL,
                 e.NOME_FANTASIA,
@@ -658,16 +661,38 @@ def detalhes_escritorio(id_escritorio):
                 e.CIDADE,
                 e.ESTADO,
                 e.DATA_CADASTRO,
-                ae.STATUS
+
+                ae.STATUS,
+                ae.ATIVO
+
             FROM ESCRITORIOS e
-            INNER JOIN ADVOGADO_ESCRITORIO ae ON e.ID_ESCRITORIOS = ae.ID_ESCRITORIOS
-            WHERE e.ID_ESCRITORIOS = ? AND ae.ID_USUARIOS = ?
-        """, (id_escritorio, id_usuario))
+
+            INNER JOIN ADVOGADO_ESCRITORIO ae
+                ON ae.ID_ESCRITORIOS = e.ID_ESCRITORIOS
+
+            WHERE e.ID_ESCRITORIOS = ?
+              AND ae.ID_USUARIOS = ?
+        """, (
+            id_escritorio,
+            id_usuario
+        ))
 
         escritorio = cur.fetchone()
 
         if not escritorio:
-            return jsonify({'error': 'Escritório não encontrado'}), 404
+            return jsonify({
+                'error': 'Escritório não encontrado ou você não possui acesso'
+            }), 404
+
+        status_advogado = escritorio[16]
+        ativo_advogado = escritorio[17]
+
+        if ativo_advogado != 1:
+            return jsonify({
+                'error': 'Seu acesso a este escritório está inativo.',
+                'escritorio_inativo': True,
+                'id_escritorio': id_escritorio
+            }), 403
 
         return jsonify({
             'escritorio': {
@@ -686,16 +711,32 @@ def detalhes_escritorio(id_escritorio):
                 'bairro': escritorio[12],
                 'cidade': escritorio[13],
                 'estado': escritorio[14],
-                'data_cadastro': escritorio[15].strftime('%d/%m/%Y %H:%M') if escritorio[15] else None,
-                'status': escritorio[16]
+
+                'data_cadastro': (
+                    escritorio[15].strftime(
+                        '%d/%m/%Y %H:%M'
+                    )
+                    if escritorio[15]
+                    else None
+                ),
+
+                'status': status_advogado,
+                'ativo': ativo_advogado == 1
             }
         }), 200
 
     except Exception as e:
-        print(f"Erro ao buscar detalhes do escritório: {e}")
+        print(
+            f'Erro ao buscar detalhes do escritório: {e}'
+        )
+
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+
+        return jsonify({
+            'error': str(e)
+        }), 500
+
     finally:
         cur.close()
         con.close()
@@ -707,8 +748,11 @@ def detalhes_escritorio(id_escritorio):
 @app.route('/meus_escritorios', methods=['GET'])
 def meus_escritorios():
     token_data = decodificar_token()
+
     if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
+        return jsonify({
+            'error': 'Token necessário'
+        }), 401
 
     id_usuario = token_data['id_usuarios']
 
@@ -717,7 +761,7 @@ def meus_escritorios():
 
     try:
         cur.execute("""
-            SELECT 
+            SELECT
                 e.ID_ESCRITORIOS,
                 e.RAZAO_SOCIAL,
                 e.NOME_FANTASIA,
@@ -734,35 +778,72 @@ def meus_escritorios():
                 e.CIDADE,
                 e.ESTADO,
                 e.DATA_CADASTRO,
-                ae.STATUS
+                ae.STATUS,
+                ae.ATIVO
             FROM ESCRITORIOS e
-            INNER JOIN ADVOGADO_ESCRITORIO ae ON e.ID_ESCRITORIOS = ae.ID_ESCRITORIOS
+
+            INNER JOIN ADVOGADO_ESCRITORIO ae
+                ON e.ID_ESCRITORIOS =
+                   ae.ID_ESCRITORIOS
+
             WHERE ae.ID_USUARIOS = ?
-            ORDER BY e.ID_ESCRITORIOS DESC
-        """, (id_usuario,))
+
+            ORDER BY
+                ae.ATIVO DESC,
+                e.ID_ESCRITORIOS DESC
+        """, (
+            id_usuario,
+        ))
 
         escritorios = cur.fetchall()
 
         resultado = []
+
         for escritorio in escritorios:
             resultado.append({
                 'id': escritorio[0],
-                'razao_social': escritorio[1],
-                'nome_fantasia': escritorio[2],
-                'registro_oab': escritorio[3],
-                'uf_oab': escritorio[4],
-                'telefone': escritorio[5],
-                'email': escritorio[6],
-                'cnpj': escritorio[7],
-                'cep': escritorio[8],
-                'logradouro': escritorio[9],
-                'numero': escritorio[10],
-                'complemento': escritorio[11],
-                'bairro': escritorio[12],
-                'cidade': escritorio[13],
-                'estado': escritorio[14],
-                'data_cadastro': escritorio[15].strftime('%d/%m/%Y %H:%M') if escritorio[15] else None,
-                'status': escritorio[16]
+                'razao_social':
+                    escritorio[1],
+                'nome_fantasia':
+                    escritorio[2],
+                'registro_oab':
+                    escritorio[3],
+                'uf_oab':
+                    escritorio[4],
+                'telefone':
+                    escritorio[5],
+                'email':
+                    escritorio[6],
+                'cnpj':
+                    escritorio[7],
+                'cep':
+                    escritorio[8],
+                'logradouro':
+                    escritorio[9],
+                'numero':
+                    escritorio[10],
+                'complemento':
+                    escritorio[11],
+                'bairro':
+                    escritorio[12],
+                'cidade':
+                    escritorio[13],
+                'estado':
+                    escritorio[14],
+
+                'data_cadastro': (
+                    escritorio[15].strftime(
+                        '%d/%m/%Y %H:%M'
+                    )
+                    if escritorio[15]
+                    else None
+                ),
+
+                'status':
+                    escritorio[16],
+
+                'ativo':
+                    escritorio[17] == 1
             })
 
         return jsonify({
@@ -770,10 +851,12 @@ def meus_escritorios():
         }), 200
 
     except Exception as e:
-        print(f"Erro ao buscar escritórios: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        con.rollback()
+
+        return jsonify({
+            'error': str(e)
+        }), 500
+
     finally:
         cur.close()
         con.close()
@@ -1044,14 +1127,25 @@ def adicionar_advogado_escritorio():
         }), 401
 
     id_usuario_logado = token_data['id_usuarios']
+    tipo_usuario_logado = token_data['tipo']
+
+    if tipo_usuario_logado != 0:
+        return jsonify({
+            'sucesso': False,
+            'mensagem': 'Apenas advogados podem realizar esta ação.'
+        }), 403
 
     dados = request.get_json()
+
+    if not dados:
+        return jsonify({
+            'sucesso': False,
+            'mensagem': 'Dados não enviados.'
+        }), 400
 
     email = dados.get('email')
     status = dados.get('status')
     id_escritorio = dados.get('id_escritorio')
-
-
 
     if not email:
         return jsonify({
@@ -1071,16 +1165,23 @@ def adicionar_advogado_escritorio():
             'mensagem': 'Escritório não informado.'
         }), 400
 
+    email = email.strip()
     status = status.strip().upper()
 
-    if status not in ['PROPRIETARIO', 'PARCEIRO', 'ASSOCIADO']:
+    if status not in [
+        'PROPRIETARIO',
+        'PARCEIRO',
+        'ASSOCIADO'
+    ]:
         return jsonify({
             'sucesso': False,
-            'mensagem': 'A posição deve ser PROPRIETARIO, PARCEIRO ou ASSOCIADO.'
+            'mensagem':
+                'A posição deve ser PROPRIETARIO, PARCEIRO ou ASSOCIADO.'
         }), 400
 
     try:
         id_escritorio = int(id_escritorio)
+
     except (ValueError, TypeError):
         return jsonify({
             'sucesso': False,
@@ -1094,13 +1195,14 @@ def adicionar_advogado_escritorio():
         conexao_db = conexao()
         cursor = conexao_db.cursor()
 
-
-
         cursor.execute("""
-            SELECT ID, STATUS
+            SELECT
+                ID,
+                STATUS,
+                ATIVO
             FROM ADVOGADO_ESCRITORIO
             WHERE ID_USUARIOS = ?
-            AND ID_ESCRITORIOS = ?
+              AND ID_ESCRITORIOS = ?
         """, (
             id_usuario_logado,
             id_escritorio
@@ -1111,18 +1213,41 @@ def adicionar_advogado_escritorio():
         if not vinculo_usuario:
             return jsonify({
                 'sucesso': False,
-                'mensagem': 'Você não possui acesso a este escritório.'
+                'mensagem':
+                    'Você não possui acesso a este escritório.'
             }), 403
 
+        status_usuario = vinculo_usuario[1]
+        ativo_usuario = vinculo_usuario[2]
 
+        if ativo_usuario != 1:
+            return jsonify({
+                'sucesso': False,
+                'mensagem':
+                    'Seu acesso a este escritório está inativo.',
+                'escritorio_inativo': True
+            }), 403
+
+        if (
+            not status_usuario
+            or status_usuario.upper() != 'PROPRIETARIO'
+        ):
+            return jsonify({
+                'sucesso': False,
+                'mensagem':
+                    'Somente proprietários podem adicionar advogados ao escritório.'
+            }), 403
 
         cursor.execute("""
             SELECT
                 ID_ESCRITORIOS,
-                NOME_FANTASIA
+                NOME_FANTASIA,
+                RAZAO_SOCIAL
             FROM ESCRITORIOS
             WHERE ID_ESCRITORIOS = ?
-        """, (id_escritorio,))
+        """, (
+            id_escritorio,
+        ))
 
         escritorio_dados = cursor.fetchone()
 
@@ -1132,58 +1257,69 @@ def adicionar_advogado_escritorio():
                 'mensagem': 'Escritório não encontrado.'
             }), 404
 
-        nome_escritorio = escritorio_dados[1]
-
-
+        nome_escritorio = (
+            escritorio_dados[1]
+            or escritorio_dados[2]
+            or 'Escritório'
+        )
 
         cursor.execute("""
             SELECT
                 ID_USUARIOS,
                 NOME,
                 EMAIL,
-                TIPO
+                TIPO,
+                ATIVO
             FROM USUARIOS
-            WHERE EMAIL = ?
-        """, (email.strip(),))
+            WHERE UPPER(EMAIL) = UPPER(?)
+        """, (
+            email,
+        ))
 
         advogado = cursor.fetchone()
 
         if not advogado:
             return jsonify({
                 'sucesso': False,
-                'mensagem': 'Não foi encontrado nenhum usuário cadastrado com esse e-mail.'
+                'mensagem':
+                    'Não foi encontrado nenhum usuário cadastrado com esse e-mail.'
             }), 404
 
         id_advogado = advogado[0]
         nome_advogado = advogado[1]
         email_advogado = advogado[2]
         tipo_usuario = advogado[3]
-
-
+        ativo_usuario_sistema = advogado[4]
 
         if tipo_usuario != 0:
             return jsonify({
                 'sucesso': False,
-                'mensagem': 'O usuário informado não é um advogado.'
+                'mensagem':
+                    'O usuário informado não é um advogado.'
             }), 400
 
-
+        if ativo_usuario_sistema != 1:
+            return jsonify({
+                'sucesso': False,
+                'mensagem':
+                    'Este advogado está inativo no sistema.'
+            }), 400
 
         if id_advogado == id_usuario_logado:
             return jsonify({
                 'sucesso': False,
-                'mensagem': 'Você não pode adicionar a si mesmo ao escritório.'
+                'mensagem':
+                    'Você não pode adicionar a si mesmo ao escritório.'
             }), 400
-
-
 
         cursor.execute("""
             SELECT
                 ID,
-                STATUS
+                STATUS,
+                ATIVO
             FROM ADVOGADO_ESCRITORIO
             WHERE ID_USUARIOS = ?
-            AND ID_ESCRITORIOS = ?
+              AND ID_ESCRITORIOS = ?
         """, (
             id_advogado,
             id_escritorio
@@ -1192,64 +1328,140 @@ def adicionar_advogado_escritorio():
         vinculo = cursor.fetchone()
 
         if vinculo:
+            if vinculo[2] == 0:
+                return jsonify({
+                    'sucesso': False,
+                    'mensagem':
+                        'Este advogado já está vinculado a este escritório, mas está inativo. Reative o vínculo em vez de adicioná-lo novamente.'
+                }), 400
+
             return jsonify({
                 'sucesso': False,
-                'mensagem': 'Este advogado já está vinculado a este escritório.'
+                'mensagem':
+                    'Este advogado já está vinculado a este escritório.'
             }), 400
 
-
-
         cursor.execute("""
-            INSERT INTO ADVOGADO_ESCRITORIO
-            (
+            INSERT INTO ADVOGADO_ESCRITORIO (
                 ID_USUARIOS,
                 ID_ESCRITORIOS,
-                STATUS
+                STATUS,
+                ATIVO
             )
-            VALUES (?, ?, ?)
+            VALUES (?, ?, ?, ?)
         """, (
             id_advogado,
             id_escritorio,
-            status
+            status,
+            1
         ))
+
+        titulo_notificacao = 'Adicionado ao escritório'
+
+        mensagem_notificacao = (
+            f'Você foi adicionado ao escritório {nome_escritorio} '
+            f'como {status.lower().capitalize()}.'
+        )
+
+        cursor.execute("""
+            INSERT INTO NOTIFICACOES (
+                ID_USUARIOS,
+                TIPO,
+                TITULO,
+                MENSAGEM
+            )
+            VALUES (?, ?, ?, ?)
+            RETURNING ID_NOTIFICACAO
+        """, (
+            id_advogado,
+            'ADVOGADO_ADICIONADO_ESCRITORIO',
+            titulo_notificacao,
+            mensagem_notificacao
+        ))
+
+        id_notificacao = cursor.fetchone()[0]
 
         conexao_db.commit()
 
+        agora = datetime.datetime.now()
 
+        notificacao = {
+            'id': id_notificacao,
+            'tipo': 'ADVOGADO_ADICIONADO_ESCRITORIO',
+            'titulo': titulo_notificacao,
+            'mensagem': mensagem_notificacao,
+            'lida': False,
+            'data_criacao': agora.isoformat(),
+            'data_leitura': None,
+            'id_advogado': id_advogado,
+            'nome_advogado': nome_advogado,
+            'id_escritorio': id_escritorio,
+            'nome_escritorio': nome_escritorio,
+            'status': status
+        }
 
-        enviar_email(
-            email_advogado,
-            'Convite para escritório - Constituere',
-            nome_escritorio,
-            nome_advogado
+        socketio.emit(
+            'nova_notificacao',
+            notificacao,
+            room=f'usuario_{id_advogado}'
         )
+
+        try:
+            enviar_email(
+                email_advogado,
+                'Convite para escritório - Constituere',
+                nome_escritorio,
+                nome_advogado
+            )
+
+        except Exception as e:
+            print(
+                f'Erro ao enviar e-mail para o advogado: {e}'
+            )
 
         return jsonify({
             'sucesso': True,
-            'mensagem': 'Advogado adicionado ao escritório com sucesso.'
+            'mensagem':
+                'Advogado adicionado ao escritório com sucesso.',
+            'advogado': {
+                'id': id_advogado,
+                'nome': nome_advogado,
+                'email': email_advogado,
+                'status': status,
+                'ativo': True
+            },
+            'escritorio': {
+                'id': id_escritorio,
+                'nome': nome_escritorio
+            }
         }), 200
 
     except Exception as e:
-
         if conexao_db:
             try:
                 conexao_db.rollback()
-            except:
+            except Exception:
                 pass
+
+        print(
+            f'Erro ao adicionar advogado ao escritório: {e}'
+        )
+
+        import traceback
+        traceback.print_exc()
 
         return jsonify({
             'sucesso': False,
-            'mensagem': f'Erro ao adicionar advogado: {str(e)}'
+            'mensagem':
+                f'Erro ao adicionar advogado: {str(e)}'
         }), 500
 
     finally:
-
         if cursor:
             cursor.close()
 
         if conexao_db:
             conexao_db.close()
-
 
 @app.route('/representante', methods=['POST'])
 def criar_representante():
@@ -2038,6 +2250,7 @@ def listar_advogados():
                 FROM ADVOGADO_ESCRITORIO
                 WHERE ID_USUARIOS = ?
                   AND ID_ESCRITORIOS = ?
+                  AND ATIVO = 1
             """, (
                 id_usuario_logado,
                 id_escritorio
@@ -2047,7 +2260,7 @@ def listar_advogados():
 
             if not pertence:
                 return jsonify({
-                    'error': 'Você não possui acesso a este escritório'
+                    'error': 'Você não possui acesso ativo a este escritório'
                 }), 403
 
         sql = """
@@ -2057,12 +2270,16 @@ def listar_advogados():
                 u.EMAIL,
                 u.NUM_OAB,
                 u.UF_OAB,
-                u.ATIVO,
+
                 e.ID_ESCRITORIOS,
                 e.NOME_FANTASIA,
                 e.RAZAO_SOCIAL,
+
                 ae.STATUS,
-                ae_logado.STATUS
+                ae.ATIVO,
+
+                ae_logado.STATUS,
+                ae_logado.ATIVO
 
             FROM ADVOGADO_ESCRITORIO ae
 
@@ -2074,7 +2291,7 @@ def listar_advogados():
 
             INNER JOIN ADVOGADO_ESCRITORIO ae_logado
                 ON ae_logado.ID_ESCRITORIOS = ae.ID_ESCRITORIOS
-                AND ae_logado.ID_USUARIOS = ?
+               AND ae_logado.ID_USUARIOS = ?
 
             WHERE
                 u.TIPO = 0
@@ -2087,11 +2304,15 @@ def listar_advogados():
         ]
 
         if id_escritorio:
-            sql += " AND ae.ID_ESCRITORIOS = ? "
+            sql += """
+                AND ae.ID_ESCRITORIOS = ?
+            """
             parametros.append(id_escritorio)
 
         if status:
-            sql += " AND UPPER(ae.STATUS) = ? "
+            sql += """
+                AND UPPER(ae.STATUS) = ?
+            """
             parametros.append(status)
 
         sql += """
@@ -2100,7 +2321,10 @@ def listar_advogados():
                 e.NOME_FANTASIA
         """
 
-        cur.execute(sql, tuple(parametros))
+        cur.execute(
+            sql,
+            tuple(parametros)
+        )
 
         rows = cur.fetchall()
 
@@ -2116,7 +2340,6 @@ def listar_advogados():
                     'email': row[2] or '--',
                     'numero_oab': row[3] or '--',
                     'uf_oab': row[4] or '--',
-                    'ativo_advogado': row[5] == 1,
                     'oab': (
                         f'{row[3]}/{row[4]}'
                         if row[3] and row[4]
@@ -2126,34 +2349,53 @@ def listar_advogados():
                 }
 
             status_logado = row[10]
+            ativo_logado = row[11]
 
             pode_gerenciar = (
                 status_logado is not None
                 and status_logado.upper() == 'PROPRIETARIO'
+                and ativo_logado == 1
             )
 
-            advogados_dict[id_advogado]['escritorios'].append({
-                'id': row[6],
+            advogados_dict[
+                id_advogado
+            ]['escritorios'].append({
+                'id': row[5],
+
                 'nome': (
-                    row[7]
-                    or row[8]
+                    row[6]
+                    or row[7]
                     or '--'
                 ),
-                'status': row[9] or '--',
-                'pode_gerenciar': pode_gerenciar
+
+                'status': (
+                    row[8]
+                    or '--'
+                ),
+
+                'ativo': (
+                    row[9] == 1
+                ),
+
+                'pode_gerenciar':
+                    pode_gerenciar
             })
 
-        advogados = list(advogados_dict.values())
+        advogados = list(
+            advogados_dict.values()
+        )
 
         return jsonify({
             'advogados': advogados,
             'quantidade': len(advogados),
+
             'filtros': {
                 'id_escritorio': (
                     int(id_escritorio)
                     if id_escritorio
                     else None
                 ),
+
                 'status': (
                     status
                     if status
@@ -2467,8 +2709,8 @@ def filtro_cargos_advogados():
         'cargos': cargos
     }), 200
 
-@app.route('/advogado/<int:id_advogado>/inativar', methods=['PUT'])
-def inativar_advogado(id_advogado):
+@app.route('/advogado/<int:id_advogado>/escritorio/<int:id_escritorio>/inativar', methods=['PUT'])
+def inativar_advogado_escritorio(id_advogado, id_escritorio):
     token_data = decodificar_token()
 
     if token_data == False:
@@ -2481,65 +2723,183 @@ def inativar_advogado(id_advogado):
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
     if id_advogado == id_usuario_logado:
-        return jsonify({'error': 'Você não pode inativar sua própria conta'}), 403
+        return jsonify({
+            'error': 'Você não pode inativar seu próprio vínculo'
+        }), 403
 
     con = conexao()
     cur = con.cursor()
 
     try:
         cur.execute("""
-            SELECT ID_USUARIOS, TIPO, ATIVO
-            FROM USUARIOS
-            WHERE ID_USUARIOS = ? AND TIPO = 0
-        """, (id_advogado,))
+            SELECT STATUS, ATIVO
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+        """, (
+            id_usuario_logado,
+            id_escritorio
+        ))
 
-        alvo = cur.fetchone()
+        vinculo_logado = cur.fetchone()
 
-        if not alvo:
-            return jsonify({'error': 'Advogado não encontrado'}), 404
-
-        if alvo[2] == 0:
-            return jsonify({'error': 'Advogado já está inativo'}), 400
-
-        cur.execute("""
-            SELECT 1
-            FROM ADVOGADO_ESCRITORIO ae_logado
-            INNER JOIN ADVOGADO_ESCRITORIO ae_alvo
-                ON ae_alvo.ID_ESCRITORIOS = ae_logado.ID_ESCRITORIOS
-            WHERE ae_logado.ID_USUARIOS = ?
-              AND ae_logado.STATUS = 'PROPRIETARIO'
-              AND ae_alvo.ID_USUARIOS = ?
-        """, (id_usuario_logado, id_advogado))
-
-        if not cur.fetchone():
+        if not vinculo_logado:
             return jsonify({
-                'error': 'Você precisa ser proprietário de um escritório onde este advogado está vinculado'
+                'error': 'Você não pertence a este escritório'
+            }), 403
+
+        status_logado = vinculo_logado[0]
+        ativo_logado = vinculo_logado[1]
+
+        if ativo_logado != 1:
+            return jsonify({
+                'error': 'Seu vínculo com este escritório está inativo'
+            }), 403
+
+        if not status_logado or status_logado.upper() != 'PROPRIETARIO':
+            return jsonify({
+                'error': 'Somente proprietários podem inativar advogados'
             }), 403
 
         cur.execute("""
-            UPDATE USUARIOS
+            SELECT
+                ae.STATUS,
+                ae.ATIVO,
+                u.NOME
+            FROM ADVOGADO_ESCRITORIO ae
+            INNER JOIN USUARIOS u
+                ON u.ID_USUARIOS = ae.ID_USUARIOS
+            WHERE ae.ID_USUARIOS = ?
+              AND ae.ID_ESCRITORIOS = ?
+        """, (
+            id_advogado,
+            id_escritorio
+        ))
+
+        vinculo_advogado = cur.fetchone()
+
+        if not vinculo_advogado:
+            return jsonify({
+                'error': 'Advogado não pertence a este escritório'
+            }), 404
+
+        status_advogado = vinculo_advogado[0]
+        ativo_advogado = vinculo_advogado[1]
+        nome_advogado = vinculo_advogado[2]
+
+        if ativo_advogado == 0:
+            return jsonify({
+                'error': 'Advogado já está inativo neste escritório'
+            }), 400
+
+        if (
+            status_advogado
+            and status_advogado.upper() == 'PROPRIETARIO'
+        ):
+            return jsonify({
+                'error': 'Não é possível inativar outro proprietário'
+            }), 403
+
+        cur.execute("""
+            SELECT
+                NOME_FANTASIA,
+                RAZAO_SOCIAL
+            FROM ESCRITORIOS
+            WHERE ID_ESCRITORIOS = ?
+        """, (
+            id_escritorio,
+        ))
+
+        escritorio = cur.fetchone()
+
+        if not escritorio:
+            return jsonify({
+                'error': 'Escritório não encontrado'
+            }), 404
+
+        nome_escritorio = (
+            escritorio[0]
+            or escritorio[1]
+            or 'Escritório'
+        )
+
+        mensagem_notificacao = (
+            f'Seu acesso ao escritório {nome_escritorio} '
+            f'foi inativado.'
+        )
+
+        cur.execute("""
+            UPDATE ADVOGADO_ESCRITORIO
             SET ATIVO = 0
             WHERE ID_USUARIOS = ?
-        """, (id_advogado,))
+              AND ID_ESCRITORIOS = ?
+        """, (
+            id_advogado,
+            id_escritorio
+        ))
+
+        cur.execute("""
+            INSERT INTO NOTIFICACOES (
+                ID_USUARIOS,
+                TIPO,
+                TITULO,
+                MENSAGEM
+            )
+            VALUES (?, ?, ?, ?)
+            RETURNING ID_NOTIFICACAO
+        """, (
+            id_advogado,
+            'ADVOGADO_INATIVADO_ESCRITORIO',
+            'Acesso ao escritório inativado',
+            mensagem_notificacao
+        ))
+
+        id_notificacao = cur.fetchone()[0]
 
         con.commit()
 
+        agora = datetime.datetime.now()
+
+        notificacao = {
+            'id': id_notificacao,
+            'tipo': 'ADVOGADO_INATIVADO_ESCRITORIO',
+            'titulo': 'Acesso ao escritório inativado',
+            'mensagem': mensagem_notificacao,
+            'lida': False,
+            'data_criacao': agora.isoformat(),
+            'data_leitura': None,
+            'id_advogado': id_advogado,
+            'nome_advogado': nome_advogado,
+            'id_escritorio': id_escritorio,
+            'nome_escritorio': nome_escritorio
+        }
+
+        socketio.emit(
+            'nova_notificacao',
+            notificacao,
+            room=f'usuario_{id_advogado}'
+        )
+
         return jsonify({
-            'mensagem': 'Advogado inativado com sucesso',
-            'id_advogado': id_advogado
+            'mensagem': 'Advogado inativado neste escritório com sucesso',
+            'id_advogado': id_advogado,
+            'id_escritorio': id_escritorio
         }), 200
 
     except Exception as e:
         con.rollback()
-        return jsonify({'error': str(e)}), 500
+
+        return jsonify({
+            'error': str(e)
+        }), 500
 
     finally:
         cur.close()
         con.close()
 
 
-@app.route('/advogado/<int:id_advogado>/ativar', methods=['PUT'])
-def ativar_advogado(id_advogado):
+@app.route('/advogado/<int:id_advogado>/escritorio/<int:id_escritorio>/ativar', methods=['PUT'])
+def ativar_advogado_escritorio(id_advogado, id_escritorio):
     token_data = decodificar_token()
 
     if token_data == False:
@@ -2556,55 +2916,160 @@ def ativar_advogado(id_advogado):
 
     try:
         cur.execute("""
-            SELECT ID_USUARIOS, TIPO, ATIVO
-            FROM USUARIOS
-            WHERE ID_USUARIOS = ? AND TIPO = 0
-        """, (id_advogado,))
+            SELECT STATUS, ATIVO
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+        """, (
+            id_usuario_logado,
+            id_escritorio
+        ))
 
-        alvo = cur.fetchone()
+        vinculo_logado = cur.fetchone()
 
-        if not alvo:
-            return jsonify({'error': 'Advogado não encontrado'}), 404
-
-        if alvo[2] == 1:
-            return jsonify({'error': 'Advogado já está ativo'}), 400
-
-        cur.execute("""
-            SELECT 1
-            FROM ADVOGADO_ESCRITORIO ae_logado
-            INNER JOIN ADVOGADO_ESCRITORIO ae_alvo
-                ON ae_alvo.ID_ESCRITORIOS = ae_logado.ID_ESCRITORIOS
-            WHERE ae_logado.ID_USUARIOS = ?
-              AND ae_logado.STATUS = 'PROPRIETARIO'
-              AND ae_alvo.ID_USUARIOS = ?
-        """, (id_usuario_logado, id_advogado))
-
-        if not cur.fetchone():
+        if not vinculo_logado:
             return jsonify({
-                'error': 'Você precisa ser proprietário de um escritório onde este advogado está vinculado'
+                'error': 'Você não pertence a este escritório'
+            }), 403
+
+        status_logado = vinculo_logado[0]
+        ativo_logado = vinculo_logado[1]
+
+        if ativo_logado != 1:
+            return jsonify({
+                'error': 'Seu vínculo com este escritório está inativo'
+            }), 403
+
+        if not status_logado or status_logado.upper() != 'PROPRIETARIO':
+            return jsonify({
+                'error': 'Somente proprietários podem reativar advogados'
             }), 403
 
         cur.execute("""
-            UPDATE USUARIOS
+            SELECT
+                ae.ATIVO,
+                u.NOME
+            FROM ADVOGADO_ESCRITORIO ae
+            INNER JOIN USUARIOS u
+                ON u.ID_USUARIOS = ae.ID_USUARIOS
+            WHERE ae.ID_USUARIOS = ?
+              AND ae.ID_ESCRITORIOS = ?
+        """, (
+            id_advogado,
+            id_escritorio
+        ))
+
+        vinculo_advogado = cur.fetchone()
+
+        if not vinculo_advogado:
+            return jsonify({
+                'error': 'Advogado não pertence a este escritório'
+            }), 404
+
+        ativo_advogado = vinculo_advogado[0]
+        nome_advogado = vinculo_advogado[1]
+
+        if ativo_advogado == 1:
+            return jsonify({
+                'error': 'Advogado já está ativo neste escritório'
+            }), 400
+
+        cur.execute("""
+            SELECT
+                NOME_FANTASIA,
+                RAZAO_SOCIAL
+            FROM ESCRITORIOS
+            WHERE ID_ESCRITORIOS = ?
+        """, (
+            id_escritorio,
+        ))
+
+        escritorio = cur.fetchone()
+
+        if not escritorio:
+            return jsonify({
+                'error': 'Escritório não encontrado'
+            }), 404
+
+        nome_escritorio = (
+            escritorio[0]
+            or escritorio[1]
+            or 'Escritório'
+        )
+
+        mensagem_notificacao = (
+            f'Seu acesso ao escritório {nome_escritorio} '
+            f'foi reativado.'
+        )
+
+        cur.execute("""
+            UPDATE ADVOGADO_ESCRITORIO
             SET ATIVO = 1
             WHERE ID_USUARIOS = ?
-        """, (id_advogado,))
+              AND ID_ESCRITORIOS = ?
+        """, (
+            id_advogado,
+            id_escritorio
+        ))
+
+        cur.execute("""
+            INSERT INTO NOTIFICACOES (
+                ID_USUARIOS,
+                TIPO,
+                TITULO,
+                MENSAGEM
+            )
+            VALUES (?, ?, ?, ?)
+            RETURNING ID_NOTIFICACAO
+        """, (
+            id_advogado,
+            'ADVOGADO_REATIVADO_ESCRITORIO',
+            'Acesso ao escritório reativado',
+            mensagem_notificacao
+        ))
+
+        id_notificacao = cur.fetchone()[0]
 
         con.commit()
 
+        agora = datetime.datetime.now()
+
+        notificacao = {
+            'id': id_notificacao,
+            'tipo': 'ADVOGADO_REATIVADO_ESCRITORIO',
+            'titulo': 'Acesso ao escritório reativado',
+            'mensagem': mensagem_notificacao,
+            'lida': False,
+            'data_criacao': agora.isoformat(),
+            'data_leitura': None,
+            'id_advogado': id_advogado,
+            'nome_advogado': nome_advogado,
+            'id_escritorio': id_escritorio,
+            'nome_escritorio': nome_escritorio
+        }
+
+        socketio.emit(
+            'nova_notificacao',
+            notificacao,
+            room=f'usuario_{id_advogado}'
+        )
+
         return jsonify({
-            'mensagem': 'Advogado ativado com sucesso',
-            'id_advogado': id_advogado
+            'mensagem': 'Advogado reativado neste escritório com sucesso',
+            'id_advogado': id_advogado,
+            'id_escritorio': id_escritorio
         }), 200
 
     except Exception as e:
         con.rollback()
-        return jsonify({'error': str(e)}), 500
+
+        return jsonify({
+            'error': str(e)
+        }), 500
 
     finally:
         cur.close()
         con.close()
-
 
 @app.route('/advogado_escritorio/<int:id_advogado>/<int:id_escritorio>', methods=['DELETE'])
 def remover_advogado_escritorio(id_advogado, id_escritorio):
@@ -2624,59 +3089,169 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
 
     try:
         cur.execute("""
-            SELECT STATUS
+            SELECT STATUS, ATIVO
             FROM ADVOGADO_ESCRITORIO
             WHERE ID_USUARIOS = ?
               AND ID_ESCRITORIOS = ?
-        """, (id_usuario_logado, id_escritorio))
+        """, (
+            id_usuario_logado,
+            id_escritorio
+        ))
 
         vinculo_logado = cur.fetchone()
 
         if not vinculo_logado:
-            return jsonify({'error': 'Você não pertence a este escritório'}), 403
+            return jsonify({
+                'error': 'Você não pertence a este escritório'
+            }), 403
 
         status_logado = vinculo_logado[0]
+        ativo_logado = vinculo_logado[1]
 
-        if not status_logado or status_logado.upper() != 'PROPRIETARIO':
-            return jsonify({'error': 'Somente proprietários podem remover advogados'}), 403
+        if ativo_logado != 1:
+            return jsonify({
+                'error': 'Seu acesso a este escritório está inativo'
+            }), 403
+
+        if (
+            not status_logado
+            or status_logado.upper() != 'PROPRIETARIO'
+        ):
+            return jsonify({
+                'error': 'Somente proprietários podem remover advogados'
+            }), 403
 
         if id_advogado == id_usuario_logado:
-            return jsonify({'error': 'Você não pode remover a si mesmo do escritório'}), 403
+            return jsonify({
+                'error': 'Você não pode remover a si mesmo do escritório'
+            }), 403
 
         cur.execute("""
-            SELECT STATUS
-            FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ?
-              AND ID_ESCRITORIOS = ?
-        """, (id_advogado, id_escritorio))
+            SELECT
+                ae.STATUS,
+                ae.ATIVO,
+                u.NOME,
+                u.EMAIL
+            FROM ADVOGADO_ESCRITORIO ae
+            INNER JOIN USUARIOS u
+                ON u.ID_USUARIOS = ae.ID_USUARIOS
+            WHERE ae.ID_USUARIOS = ?
+              AND ae.ID_ESCRITORIOS = ?
+        """, (
+            id_advogado,
+            id_escritorio
+        ))
 
         vinculo_advogado = cur.fetchone()
 
         if not vinculo_advogado:
-            return jsonify({'error': 'Advogado não pertence a este escritório'}), 404
+            return jsonify({
+                'error': 'Advogado não pertence a este escritório'
+            }), 404
 
         status_advogado = vinculo_advogado[0]
+        nome_advogado = vinculo_advogado[2]
 
-        if status_advogado and status_advogado.upper() == 'PROPRIETARIO':
+        if (
+            status_advogado
+            and status_advogado.upper() == 'PROPRIETARIO'
+        ):
             cur.execute("""
                 SELECT COUNT(*)
                 FROM ADVOGADO_ESCRITORIO
                 WHERE ID_ESCRITORIOS = ?
                   AND UPPER(STATUS) = 'PROPRIETARIO'
-            """, (id_escritorio,))
+                  AND ATIVO = 1
+            """, (
+                id_escritorio,
+            ))
 
             total_proprietarios = cur.fetchone()[0]
 
             if total_proprietarios <= 1:
-                return jsonify({'error': 'Não é possível remover o único proprietário do escritório'}), 400
+                return jsonify({
+                    'error': 'Não é possível remover o único proprietário do escritório'
+                }), 400
+
+        cur.execute("""
+            SELECT
+                NOME_FANTASIA,
+                RAZAO_SOCIAL
+            FROM ESCRITORIOS
+            WHERE ID_ESCRITORIOS = ?
+        """, (
+            id_escritorio,
+        ))
+
+        escritorio = cur.fetchone()
+
+        if not escritorio:
+            return jsonify({
+                'error': 'Escritório não encontrado'
+            }), 404
+
+        nome_escritorio = (
+            escritorio[0]
+            or escritorio[1]
+            or 'Escritório'
+        )
+
+        titulo_notificacao = 'Removido do escritório'
+
+        mensagem_notificacao = (
+            f'Você foi removido do escritório {nome_escritorio}.'
+        )
 
         cur.execute("""
             DELETE FROM ADVOGADO_ESCRITORIO
             WHERE ID_USUARIOS = ?
               AND ID_ESCRITORIOS = ?
-        """, (id_advogado, id_escritorio))
+        """, (
+            id_advogado,
+            id_escritorio
+        ))
+
+        cur.execute("""
+            INSERT INTO NOTIFICACOES (
+                ID_USUARIOS,
+                TIPO,
+                TITULO,
+                MENSAGEM
+            )
+            VALUES (?, ?, ?, ?)
+            RETURNING ID_NOTIFICACAO
+        """, (
+            id_advogado,
+            'ADVOGADO_REMOVIDO_ESCRITORIO',
+            titulo_notificacao,
+            mensagem_notificacao
+        ))
+
+        id_notificacao = cur.fetchone()[0]
 
         con.commit()
+
+        agora = datetime.datetime.now()
+
+        notificacao = {
+            'id': id_notificacao,
+            'tipo': 'ADVOGADO_REMOVIDO_ESCRITORIO',
+            'titulo': titulo_notificacao,
+            'mensagem': mensagem_notificacao,
+            'lida': False,
+            'data_criacao': agora.isoformat(),
+            'data_leitura': None,
+            'id_advogado': id_advogado,
+            'nome_advogado': nome_advogado,
+            'id_escritorio': id_escritorio,
+            'nome_escritorio': nome_escritorio
+        }
+
+        socketio.emit(
+            'nova_notificacao',
+            notificacao,
+            room=f'usuario_{id_advogado}'
+        )
 
         return jsonify({
             'mensagem': 'Advogado retirado do escritório com sucesso',
@@ -2686,7 +3261,10 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
 
     except Exception as e:
         con.rollback()
-        return jsonify({'error': str(e)}), 500
+
+        return jsonify({
+            'error': str(e)
+        }), 500
 
     finally:
         cur.close()
@@ -2710,7 +3288,7 @@ def listar_notificacoes():
 
     try:
         cur.execute("""
-            SELECT
+            SELECT FIRST 10
                 ID_NOTIFICACAO,
                 TIPO,
                 TITULO,
@@ -2737,12 +3315,17 @@ def listar_notificacoes():
                 'mensagem': row[3],
                 'lida': row[4] == 1,
                 'data_criacao': (
-                    row[5].isoformat()
+                    row[5].strftime('%d/%m/%Y')
+                    if row[5]
+                    else None
+                ),
+                'hora_criacao': (
+                    row[5].strftime('%H:%M')
                     if row[5]
                     else None
                 ),
                 'data_leitura': (
-                    row[6].isoformat()
+                    row[6].strftime('%d/%m/%Y %H:%M')
                     if row[6]
                     else None
                 )
@@ -2766,7 +3349,6 @@ def listar_notificacoes():
     finally:
         cur.close()
         con.close()
-
 
 
 @app.route('/notificacoes/marcar_todas_lidas', methods=['PUT'])
