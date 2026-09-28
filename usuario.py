@@ -544,8 +544,7 @@ def login():
     if not senha:
         return jsonify({'error': 'Senha é obrigatória'}), 400
 
-    if decodificar_token() != False:
-        return jsonify({'error': 'Você já está logado'}), 400
+
 
 
     if not validar_cpf(cpf_cnpj):
@@ -3500,3 +3499,20 @@ def marcar_todas_notificacoes_lidas():
     finally:
         cur.close()
         con.close()
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    resp = make_response(jsonify({'message': 'Logout realizado com sucesso'}))
+
+    resp.set_cookie(
+        'acess_token',
+        '',
+        httponly=True,
+        secure=False,
+        samesite='Lax',
+        path='/',
+        max_age=0,
+        expires=0
+    )
+
+    return resp
