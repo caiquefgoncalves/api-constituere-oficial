@@ -544,49 +544,61 @@ def login():
     if not senha:
         return jsonify({'error': 'Senha é obrigatória'}), 400
 
+    cpf_limpo = ''.join(filter(str.isdigit, str(cpf_cnpj)))
 
-
-
-    if not validar_cpf(cpf_cnpj):
+    if not validar_cpf(cpf_limpo):
         return jsonify({"error": "Usuário não encontrado"}), 404
 
     con = conexao()
     cur = con.cursor()
+
     try:
         cur.execute("""
-            SELECT ID_USUARIOS, TIPO, NOME, SENHA, ATIVO
+            SELECT ID_USUARIOS, TIPO, NOME, SENHA, ATIVO, PRIMEIRO_ACESSO
             FROM USUARIOS WHERE CPF = ?
-        """, (cpf_cnpj,))
+        """, (cpf_limpo,))
 
         usuario = cur.fetchone()
-
 
         if not usuario:
             return jsonify({"error": "Usuário não encontrado"}), 404
 
-        id_usuario, tipo, nome, senha_hash, ativo = usuario
+        id_usuario, tipo, nome, senha_hash, ativo, primeiro_acesso = usuario
 
         if ativo == 0:
             return jsonify({"error": "Usuário inativado"}), 400
 
-
         if not check_password_hash(senha_hash, senha):
             return jsonify({"error": "CPF/CNPJ ou senha incorretos"}), 400
 
-
         token = gerar_token(tipo, id_usuario, 1440)
+
         resp = make_response(jsonify({
             'message': f'Bem-vindo, {nome}!',
             'nome': nome,
             'token': token,
             'tipo': tipo,
             'id_usuario': id_usuario,
+            'primeiro_acesso': primeiro_acesso is None or primeiro_acesso == 1,
             'foto_perfil': f'{id_usuario}.jpeg'
         }))
-        resp.set_cookie('acess_token', token, httponly=True, secure=False, samesite='Lax', path="/", max_age=7600)
+
+        resp.set_cookie(
+            'acess_token',
+            token,
+            httponly=True,
+            secure=False,
+            samesite='Lax',
+            path="/",
+            max_age=7600
+        )
+
         return resp
 
     except Exception as e:
+        print('Erro no login:', e)
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': f'Erro: {e}'}), 500
     finally:
         cur.close()
@@ -3516,3 +3528,62 @@ def logout():
     )
 
     return resp
+
+
+@app.route('/redefinir_senha', methods=['PUT'])
+def redefinir_senha():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    id_usuario = token_data['id_usuarios']
+
+    dados = request.get_json()
+
+    if not dados:
+        return jsonify({'error': 'Dados não enviados'}), 400
+
+    senha = dados.get('senha')
+    confirmar_senha = dados.get('confirmar_senha')
+
+    if not senha:
+        return jsonify({'error': 'Senha é obrigatória'}), 400
+
+    if not confirmar_senha:
+        return jsonify({'error': 'Confirmação de senha é obrigatória'}), 400
+
+    if senha != confirmar_senha:
+        return jsonify({'error': 'Senhas não correspondem'}), 400
+
+    if not senha_forte(senha):
+        return jsonify({
+            'error': 'Senha fraca. Use 8+ caracteres, maiúsculas, minúsculas, números e especiais'
+        }), 400
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        senha_cripto = generate_password_hash(senha).decode('utf-8')
+
+        cur.execute("""
+            UPDATE USUARIOS
+            SET SENHA = ?,
+                PRIMEIRO_ACESSO = 0
+            WHERE ID_USUARIOS = ?
+        """, (senha_cripto, id_usuario))
+
+        con.commit()
+
+        return jsonify({'mensagem': 'Senha redefinida com sucesso'}), 200
+
+    except Exception as e:
+        con.rollback()
+        print('Erro ao redefinir senha:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
