@@ -1623,7 +1623,7 @@ def recusar_agendamento(id_agendamento):
         elif total_confirmados >= 1:
             novo_status = 'confirmado'
         else:
-            novo_status = 'cancelado'
+            novo_status = 'recusado'
 
         cur.execute("""
                     UPDATE AGENDAMENTOS SET STATUS = ?, MOTIVO = ?
