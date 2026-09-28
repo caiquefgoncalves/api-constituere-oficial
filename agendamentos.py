@@ -854,6 +854,41 @@ def editar_agendamento(id_agendamento):
 
     horario_min = horario_obj.hour * 60 + horario_obj.minute
 
+    inicio_expediente = 8 * 60
+    inicio_almoco = 12 * 60
+    fim_almoco = 13 * 60
+    fim_expediente = 18 * 60
+
+    horario_final_min = horario_min + duracao_min
+
+    if horario_min < inicio_expediente:
+        return jsonify({
+            'error': 'O agendamento não pode começar antes das 08:00'
+        }), 400
+
+    if horario_min >= fim_expediente:
+        return jsonify({
+            'error': 'O agendamento deve começar antes das 18:00'
+        }), 400
+
+    if inicio_almoco <= horario_min < fim_almoco:
+        return jsonify({
+            'error': 'Não é permitido agendar entre 12:00 e 13:00'
+        }), 400
+
+    if horario_final_min > fim_expediente:
+        return jsonify({
+            'error': 'O agendamento não pode ultrapassar as 18:00'
+        }), 400
+
+    if (
+            horario_min < inicio_almoco
+            and horario_final_min > inicio_almoco
+    ):
+        return jsonify({
+            'error': 'O agendamento não pode ultrapassar o horário de almoço das 12:00 às 13:00'
+        }), 400
+
     con = conexao()
     cur = con.cursor()
 
