@@ -18,8 +18,10 @@ def carregar_env_local():
         chave = chave.strip()
         valor = valor.strip().strip('"').strip("'")
 
-        if chave:
-            os.environ.setdefault(chave, valor)
+        # An empty variable inherited from the IDE must not hide the value in
+        # the local .env file. A non-empty system variable still has priority.
+        if chave and not os.environ.get(chave):
+            os.environ[chave] = valor
 
 
 carregar_env_local()

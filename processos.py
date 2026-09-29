@@ -2212,7 +2212,8 @@ def buscar_pagamento_exito_processo(id_processo):
                 pex.VALOR_ENTRADA,
                 pex.NUM_PARCELAS,
                 pex.DIA_VENCIMENTO,
-                pex.MES_INICIO
+                pex.MES_INICIO,
+                pex.FORMA_PAGAMENTO
             FROM PROCESSOS p
             INNER JOIN PAGAMENTOS pag
                 ON pag.ID_PROCESSO = p.ID_PROCESSOS
@@ -2334,7 +2335,7 @@ def buscar_pagamento_exito_processo(id_processo):
             ),
 
             'forma_pagamento': (
-                row[5]
+                row[19]
                 or ''
             ),
 
@@ -2504,6 +2505,9 @@ def atualizar_pagamento_exito_processo(id_processo):
         mes_inicio = dados.get(
             'mes_inicio_exito'
         )
+        forma_pagamento = (dados.get('forma_pagamento_exito') or '').upper()
+        if forma_pagamento and forma_pagamento not in ['CREDITO', 'DEBITO', 'PIX']:
+            return jsonify({'error': 'Forma de pagamento do êxito inválida'}), 400
 
         if (
             tipo_exito ==
@@ -2669,7 +2673,8 @@ def atualizar_pagamento_exito_processo(id_processo):
                     VALOR_ENTRADA = ?,
                     NUM_PARCELAS = ?,
                     DIA_VENCIMENTO = ?,
-                    MES_INICIO = ?
+                    MES_INICIO = ?,
+                    FORMA_PAGAMENTO = ?
                 WHERE ID_PAGAMENTO_EXITO = ?
             """, (
                 tipo_exito,
@@ -2681,6 +2686,7 @@ def atualizar_pagamento_exito_processo(id_processo):
                 numero_parcelas,
                 dia_vencimento,
                 mes_inicio,
+                forma_pagamento or None,
                 id_pagamento_exito
             ))
 
@@ -2696,11 +2702,12 @@ def atualizar_pagamento_exito_processo(id_processo):
                     VALOR_ENTRADA,
                     NUM_PARCELAS,
                     DIA_VENCIMENTO,
-                    MES_INICIO
+                    MES_INICIO,
+                    FORMA_PAGAMENTO
                 )
                 VALUES (
                     ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?
+                    ?, ?, ?, ?, ?
                 )
                 RETURNING ID_PAGAMENTO_EXITO
             """, (
@@ -2713,7 +2720,8 @@ def atualizar_pagamento_exito_processo(id_processo):
                 valor_entrada,
                 numero_parcelas,
                 dia_vencimento,
-                mes_inicio
+                mes_inicio,
+                forma_pagamento or None
             ))
 
             id_pagamento_exito = (
@@ -3104,6 +3112,13 @@ def concluir_processo(id_processo):
     mes_inicio = exito.get(
         'mes_inicio_exito'
     )
+    forma_pagamento = (
+        exito.get('forma_pagamento_exito')
+        or ''
+    ).upper()
+
+    if forma_pagamento and forma_pagamento not in ['CREDITO', 'DEBITO', 'PIX']:
+        return jsonify({'error': 'Forma de pagamento do êxito inválida'}), 400
 
     if distribuicao not in [
         'AVISTA',
@@ -3449,7 +3464,8 @@ def concluir_processo(id_processo):
                     VALOR_ENTRADA = ?,
                     NUM_PARCELAS = ?,
                     DIA_VENCIMENTO = ?,
-                    MES_INICIO = ?
+                    MES_INICIO = ?,
+                    FORMA_PAGAMENTO = ?
                 WHERE ID_PAGAMENTO_EXITO = ?
             """, (
                 tipo_exito,
@@ -3461,6 +3477,7 @@ def concluir_processo(id_processo):
                 numero_parcelas,
                 dia_vencimento,
                 mes_inicio,
+                forma_pagamento or None,
                 id_pagamento_exito
             ))
 
@@ -3476,11 +3493,12 @@ def concluir_processo(id_processo):
                     VALOR_ENTRADA,
                     NUM_PARCELAS,
                     DIA_VENCIMENTO,
-                    MES_INICIO
+                    MES_INICIO,
+                    FORMA_PAGAMENTO
                 )
                 VALUES (
                     ?, ?, ?, ?, ?, ?, 
-                    ?, ?, ?, ?
+                    ?, ?, ?, ?, ?
                 )
                 RETURNING ID_PAGAMENTO_EXITO
             """, (
@@ -3493,7 +3511,8 @@ def concluir_processo(id_processo):
                 valor_entrada,
                 numero_parcelas,
                 dia_vencimento,
-                mes_inicio
+                mes_inicio,
+                forma_pagamento or None
             ))
 
             id_pagamento_exito = (

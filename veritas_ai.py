@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import re
+import time
 import unicodedata
 
 import jwt
@@ -14,7 +15,9 @@ from main import app
 ASSISTANT_NAME = "Veritas"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
+DEFAULT_NVIDIA_MODEL = "z-ai/glm-5.3"
+DEFAULT_NVIDIA_MODELS = (DEFAULT_NVIDIA_MODEL,)
+DEFAULT_MODEL_TIMEOUT_SECONDS = 55.0
 DEFAULT_OPENROUTER_MODELS = (
   "inclusionai/ling-3.0-flash-sante:free",
   "thinkingmachines/inkling-small:free",
@@ -106,6 +109,52 @@ SCHEDULE_TOOLS = [
                 "type": "object",
                 "properties": {"id_agendamento": {"type": "integer"}, "motivo": {"type": "string"}},
                 "required": ["id_agendamento", "motivo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cadastrar_atualizacao_processo",
+            "description": "Propõe o cadastro de uma atualização em um processo do advogado logado.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id_processo": {"type": "integer"},
+                    "titulo": {"type": "string"},
+                    "descricao": {"type": "string"},
+                    "data": {"type": "string", "description": "Data opcional no formato DD/MM/AAAA"},
+                    "processo_concluido": {"type": "integer", "enum": [0, 1]},
+                },
+                "required": ["id_processo", "titulo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "concluir_processo_com_exito",
+            "description": "Propõe a conclusão do processo após revisar os honorários de êxito. Use os valores atuais e altere somente o que o usuário pediu.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id_processo": {"type": "integer"},
+                    "titulo": {"type": "string"},
+                    "descricao": {"type": "string"},
+                    "data": {"type": "string"},
+                    "tipo_exito": {"type": "string"},
+                    "valor_exito": {"type": "number"},
+                    "quantidade_exito": {"type": "number"},
+                    "valor_salario_exito": {"type": "number"},
+                    "valor_causa_exito": {"type": "number"},
+                    "distribuicao_exito": {"type": "string"},
+                    "valor_entrada_exito": {"type": "number"},
+                    "numero_parcelas_exito": {"type": "number"},
+                    "dia_vencimento_exito": {"type": "number"},
+                    "mes_inicio_exito": {"type": "number"},
+                    "forma_pagamento_exito": {"type": "string"}
+                },
+                "required": ["id_processo", "titulo", "tipo_exito", "distribuicao_exito"],
             },
         },
     },
@@ -222,6 +271,10 @@ def _is_programming_request(question):
 def _resolve_period(question):
     today = datetime.date.today()
     normalized = _normalize_text(question)
+    explicit_dates = _extract_dates_from_question(question)
+
+    if explicit_dates:
+        return explicit_dates[0], explicit_dates[0], "data_informada"
 
     if "amanha" in normalized:
         tomorrow = today + datetime.timedelta(days=1)
@@ -266,7 +319,7 @@ def _question_mentions_schedule(question):
 def _question_requests_schedule_mutation(question):
     return _contains_any_word(
         _normalize_text(question),
-        ("crie", "criar", "agende", "agendar", "marque", "editar", "edite", "reagende", "recuse", "recusar", "desmarque", "desmarcar", "cancele", "cancelar"),
+        ("crie", "criar", "cadastre", "cadastrar", "registre", "registrar", "adicione", "adicionar", "agende", "agendar", "marque", "editar", "edite", "reagende", "recuse", "recusar", "desmarque", "desmarcar", "cancele", "cancelar"),
     )
 
 
@@ -287,14 +340,40 @@ def _question_mentions_cases(question):
         "acoes",
         "causa",
         "causas",
+        "projeto",
+        "projetos",
     )
     return _contains_any_word(normalized, keywords)
+
+
+def _question_requests_process_update(question):
+    normalized = _normalize_text(question)
+    return _contains_any_word(
+        normalized,
+        ("atualizacao", "atualizacoes", "atualizar", "atualize", "cadastre", "cadastrar", "registre", "registrar"),
+    ) and _question_mentions_cases(question)
+
+
+def _question_requests_save(question):
+    return _contains_any_word(
+        _normalize_text(question),
+        ("salve", "salvar", "confirme", "confirmar", "conclua", "concluir"),
+    )
 
 
 def _question_mentions_contacts(question):
     return _contains_any_word(
         _normalize_text(question),
         ("cliente", "clientes", "advogado", "advogados", "parceiro", "parceiros"),
+    )
+
+
+def _question_requests_contact_list(question):
+    """A client named in an appointment request is not a list request."""
+    return (
+        _question_mentions_contacts(question)
+        and not _question_mentions_schedule(question)
+        and not _question_requests_schedule_mutation(question)
     )
 
 
@@ -381,6 +460,21 @@ def _extract_dates_from_question(question):
                     break
                 except ValueError:
                     continue
+
+    # "dia 30" refers to the next occurrence of that day.  It is useful in
+    # concise scheduling requests where the user omits month and year.
+    for raw_day in re.findall(r"\bdia\s+([0-3]?\d)\b", normalized):
+        day = int(raw_day)
+        today = datetime.date.today()
+        year, month = today.year, today.month
+        if day < today.day:
+            month += 1
+            if month == 13:
+                year, month = year + 1, 1
+        try:
+            dates.append(datetime.date(year, month, day))
+        except ValueError:
+            continue
 
     return list(dict.fromkeys(dates))
 
@@ -535,7 +629,9 @@ def _find_schedule_parties(question, id_lawyer):
     emails = set(re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", question))
     documents = {
         re.sub(r"\D", "", value)
-        for value in re.findall(r"\d[\d.\-/ ]{8,}\d", question)
+        # CPF/CNPJ may arrive copied from a document with non-breaking spaces
+        # or typographic dashes, so do not restrict the separators to ASCII.
+        for value in re.findall(r"\d(?:[\d\s./\-\u2010-\u2015\u2212]){8,}\d", question)
     }
     documents = {value for value in documents if len(value) in (11, 14)}
 
@@ -576,7 +672,10 @@ def _find_schedule_parties(question, id_lawyer):
                 SELECT ID_USUARIOS, COALESCE(NULLIF(NOME, ''), RAZAO_SOCIAL, NOME_FANTASIA, '--')
                 FROM USUARIOS
                 WHERE ID_USUARIO_RESPONSAVEL = ? AND TIPO IN (2, 3) AND ATIVO = 1
-                  AND (CPF = ? OR CNPJ = ?)
+                  AND (
+                    REPLACE(REPLACE(REPLACE(COALESCE(CPF, ''), '.', ''), '-', ''), '/', '') = ?
+                    OR REPLACE(REPLACE(REPLACE(COALESCE(CNPJ, ''), '.', ''), '-', ''), '/', '') = ?
+                  )
                 """,
                 (id_lawyer, document, document),
             )
@@ -668,6 +767,90 @@ def _fetch_lawyer_case_summary(id_lawyer):
         con.close()
 
 
+def _find_processes_for_update(id_lawyer, question):
+    """Returns only the logged lawyer's processes referenced in the request."""
+    normalized_question = _normalize_text(question)
+    question_digits = re.sub(r"\D", "", question)
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute(
+            """
+            SELECT FIRST 100
+                p.ID_PROCESSOS, p.NUM_PROCESSO, p.TIPO_PROCESSO, p.ASSUNTO,
+                p.AREA, p.STATUS, u.NOME, u.RAZAO_SOCIAL, u.NOME_FANTASIA
+            FROM PROCESSOS p
+            INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
+            WHERE p.ID_USUARIOS_ADVOGADO = ?
+            ORDER BY p.DATA_INICIO DESC
+            """,
+            (id_lawyer,),
+        )
+
+        matches = []
+        for row in cur.fetchall():
+            process_number = str(row[1] or "")
+            process_digits = re.sub(r"\D", "", process_number)
+            client_name = row[6] or row[7] or row[8] or ""
+            comparable_text = _normalize_text(f"{client_name} {row[3] or ''} {row[2] or ''}")
+            text_tokens = [
+                token for token in comparable_text.split()
+                if len(token) >= 4 and token in normalized_question
+            ]
+            number_matches = len(process_digits) >= 7 and process_digits in question_digits
+
+            if not number_matches and not text_tokens:
+                continue
+
+            matches.append({
+                "id": row[0],
+                "numero": process_number or "--",
+                "tipo": row[2] or "--",
+                "assunto": row[3] or "--",
+                "area": row[4] or "--",
+                "status": row[5] or "--",
+                "cliente": client_name or "--",
+            })
+        return matches
+    finally:
+        cur.close()
+        con.close()
+
+
+def _fetch_process_success_fee(id_lawyer, process_id):
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT pex.TIPO_PAGAMENTO, pag.TIPO_EXITO, pag.VALOR_EXITO,
+                   pex.QUANTIDADE, pex.VALOR_SALARIO, pex.VALOR_CAUSA,
+                   pex.DISTRIBUICAO, pex.VALOR_ENTRADA, pex.NUM_PARCELAS,
+                   pex.DIA_VENCIMENTO, pex.MES_INICIO, pex.FORMA_PAGAMENTO
+            FROM PROCESSOS p
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PROCESSO = p.ID_PROCESSOS
+            LEFT JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO = pag.ID_PAGAMENTOS
+            WHERE p.ID_PROCESSOS = ? AND p.ID_USUARIOS_ADVOGADO = ?
+            """,
+            (process_id, id_lawyer),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "tipo_exito": row[0] or row[1] or None,
+            "valor_exito": row[2], "quantidade_exito": row[3],
+            "valor_salario_exito": row[4], "valor_causa_exito": row[5],
+            "distribuicao_exito": row[6], "valor_entrada_exito": row[7],
+            "numero_parcelas_exito": row[8], "dia_vencimento_exito": row[9],
+            "mes_inicio_exito": row[10], "forma_pagamento_exito": row[11],
+        }
+    finally:
+        cur.close()
+        con.close()
+
+
 def _build_authorized_context(question, token_data, contextual_question=None):
     """Builds data for the current intent, using history only to complete it.
 
@@ -706,7 +889,7 @@ def _build_authorized_context(question, token_data, contextual_question=None):
                 "Agendamentos so podem ser consultados por advogado autenticado."
             )
 
-    if _question_mentions_contacts(question):
+    if _question_requests_contact_list(question):
         if user_type == 0:
             context["dados"]["clientes_vinculados"] = _fetch_lawyer_clients(user_id)
             context["dados"]["advogados_parceiros"] = _fetch_lawyer_partners(user_id)
@@ -715,9 +898,25 @@ def _build_authorized_context(question, token_data, contextual_question=None):
                 "Clientes e parceiros so podem ser consultados por advogado autenticado."
             )
 
-    if _question_mentions_cases(question):
+    if _question_mentions_cases(question) or _question_mentions_cases(contextual_question):
         if user_type == 0:
             context["dados"]["processos"] = _fetch_lawyer_case_summary(user_id)
+            if (
+                _question_requests_process_update(question)
+                or _question_requests_process_update(contextual_question)
+            ):
+                context["dados"]["processos_alvo"] = _find_processes_for_update(
+                    user_id,
+                    contextual_question,
+                )
+                context["dados"]["honorarios_exito"] = [
+                    {
+                        "processo": process["numero"],
+                        "cliente": process["cliente"],
+                        "dados": _fetch_process_success_fee(user_id, process["id"]),
+                    }
+                    for process in context["dados"]["processos_alvo"]
+                ]
         else:
             context["restricoes"].append(
                 "Processos internos so podem ser consultados por advogado autenticado."
@@ -830,6 +1029,16 @@ def _question_with_history(question, history):
 
 
 def _hide_internal_ids(answer):
+    if re.search(
+        r"\b(?:id_cliente|id\s+(?:do|da)\s+cliente|id\s+cadastrado)\b",
+        answer,
+        flags=re.IGNORECASE,
+    ):
+        return (
+            "O cliente foi identificado pelos dados informados. "
+            "Não é necessário fornecer nenhum dado adicional do cadastro."
+        )
+
     return re.sub(
         r"\bID(?:\s+(?:do|da)\s+\w+)?\s*[:#]?\s*\d+\b",
         "",
@@ -851,13 +1060,152 @@ def _get_openrouter_models():
     return DEFAULT_OPENROUTER_MODELS
 
 
-def _proposal_from_tool_call(tool_call, authorized_context):
+def _get_nvidia_models():
+    """Reads NVIDIA models in priority order, with legacy compatibility."""
+    configured_models = (
+        os.getenv("VERITAS_NVIDIA_MODELS", "").strip()
+        or os.getenv("VERITAS_NVIDIA_MODEL", "").strip()
+    )
+
+    if configured_models:
+        return tuple(
+            model.strip()
+            for model in configured_models.split(",")
+            if model.strip()
+        )
+
+    return DEFAULT_NVIDIA_MODELS
+
+
+def _get_model_timeout_seconds():
+    try:
+        configured_timeout = float(
+            os.getenv("VERITAS_MODEL_TIMEOUT_SECONDS", DEFAULT_MODEL_TIMEOUT_SECONDS)
+        )
+        return min(max(configured_timeout, 3.0), 60.0)
+    except (TypeError, ValueError):
+        return DEFAULT_MODEL_TIMEOUT_SECONDS
+
+
+def _proposal_from_tool_call(tool_call, authorized_context, question):
     try:
         arguments = json.loads(tool_call.function.arguments)
     except (AttributeError, TypeError, json.JSONDecodeError):
         return None
 
     name = tool_call.function.name
+
+    if name == "concluir_processo_com_exito":
+        processes = {
+            item["id"]: item
+            for item in authorized_context.get("dados", {}).get("processos_alvo", [])
+        }
+        process = processes.get(arguments.get("id_processo"))
+        title = str(arguments.get("titulo", "")).strip()
+        if not process or not title or not _question_requests_save(question):
+            return None
+
+        exito_fields = (
+            "tipo_exito", "valor_exito", "quantidade_exito", "valor_salario_exito",
+            "valor_causa_exito", "distribuicao_exito", "valor_entrada_exito",
+            "numero_parcelas_exito", "dia_vencimento_exito", "mes_inicio_exito",
+            "forma_pagamento_exito",
+        )
+        exito = {field: arguments.get(field) for field in exito_fields}
+        payment_method = _normalize_text(str(exito["forma_pagamento_exito"] or ""))
+        exito["forma_pagamento_exito"] = {
+            "credito": "CREDITO",
+            "debito": "DEBITO",
+            "pix": "PIX",
+        }.get(payment_method, str(exito["forma_pagamento_exito"] or "").upper())
+        tipo = exito["tipo_exito"]
+        distribuicao = exito["distribuicao_exito"]
+        if tipo not in ("SALARIOS_BENEFICIO", "PERCENTUAL"):
+            return None
+        if distribuicao not in ("AVISTA", "PARCELADO", "ENTRADA_PARCELAS", "RETIDO_FONTE"):
+            return None
+        if tipo == "SALARIOS_BENEFICIO" and not (
+            exito["quantidade_exito"] and exito["valor_salario_exito"]
+        ):
+            return None
+        if tipo == "PERCENTUAL" and not (
+            exito["valor_exito"] and exito["valor_causa_exito"]
+        ):
+            return None
+        if distribuicao == "ENTRADA_PARCELAS" and not exito["valor_entrada_exito"]:
+            return None
+        if distribuicao in ("PARCELADO", "ENTRADA_PARCELAS") and not exito["numero_parcelas_exito"]:
+            return None
+        if distribuicao != "RETIDO_FONTE" and not all((
+            exito["dia_vencimento_exito"],
+            exito["mes_inicio_exito"],
+            exito["forma_pagamento_exito"],
+        )):
+            return None
+        if distribuicao != "RETIDO_FONTE" and exito["forma_pagamento_exito"] not in ("CREDITO", "DEBITO", "PIX"):
+            return None
+        return {
+            "tipo": "concluir_processo",
+            "descricao": f"Concluir o processo de {process['cliente']} após revisar os honorários de êxito.",
+            "endpoint": f"/processo/{process['id']}/concluir",
+            "metodo": "POST",
+            "dados": {
+                "atualizacao": {
+                    "id_atualizacao": None,
+                    "titulo": title,
+                    "descricao": str(arguments.get("descricao", "")).strip() or None,
+                    "data": str(arguments.get("data", "")).strip() or None,
+                },
+                "exito": exito,
+            },
+        }
+
+    if name == "cadastrar_atualizacao_processo":
+        processes = {
+            item["id"]: item
+            for item in authorized_context.get("dados", {}).get("processos_alvo", [])
+        }
+        process = processes.get(arguments.get("id_processo"))
+        title = str(arguments.get("titulo", "")).strip()
+        description = str(arguments.get("descricao", "")).strip()
+        date = str(arguments.get("data", "")).strip()
+
+        if not process or not title or len(title) > 254 or len(description) > 254:
+            return None
+        if date and not re.fullmatch(r"\d{2}/\d{2}/\d{4}", date):
+            return None
+
+        concluded = 1 if arguments.get("processo_concluido") in (1, True, "1") else 0
+        data = {
+            "titulo": title,
+            "descricao": description or None,
+            "processo_concluido": concluded,
+            "data": date or None,
+        }
+        existing_success_fee = next(
+            (
+                item.get("dados")
+                for item in authorized_context.get("dados", {}).get("honorarios_exito", [])
+                if item.get("processo") == process["numero"]
+            ),
+            None,
+        )
+        if concluded and existing_success_fee and existing_success_fee.get("tipo_exito"):
+            return {
+                "tipo": "verificar_exito",
+                "descricao": f"Verificar e revisar os honorários de êxito antes de concluir o processo de {process['cliente']}.",
+                "endpoint": f"/processo/{process['id']}/pagamento/exito",
+                "metodo": "GET",
+                "dados": {"atualizacao_pendente": data},
+            }
+        return {
+            "tipo": "atualizacao_processo",
+            "descricao": f"Cadastrar a atualização {title} no processo de {process['cliente']}.",
+            "endpoint": f"/processo/{process['id']}/atualizacoes",
+            "metodo": "POST",
+            "dados": data,
+        }
+
     target_appointments = authorized_context.get("dados", {}).get(
         "agendamentos_alvo", []
     )
@@ -983,7 +1331,7 @@ def _call_openrouter(question, authorized_context, history, force_nvidia=False):
             api_key=openrouter_api_key,
             base_url=OPENROUTER_BASE_URL,
             timeout=60.0,
-            max_retries=1,
+            max_retries=0,
             default_headers={
                 "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "http://localhost:5173"),
                 "X-OpenRouter-Title": "Constituere Veritas",
@@ -995,9 +1343,9 @@ def _call_openrouter(question, authorized_context, history, force_nvidia=False):
             api_key=nvidia_api_key,
             base_url=NVIDIA_BASE_URL,
             timeout=60.0,
-            max_retries=1,
+            max_retries=0,
         )
-        models = (os.getenv("VERITAS_NVIDIA_MODEL", DEFAULT_NVIDIA_MODEL),)
+        models = _get_nvidia_models()
 
     instructions = """
 Voce e Veritas, uma assistente juridica do sistema Constituere.
@@ -1012,12 +1360,15 @@ Use os dados internos somente quando eles estiverem no CONTEXTO AUTORIZADO.
 Nunca revele, deduza ou invente dados de outro usuario, escritorio, cliente, processo ou agendamento.
 Nao diga que acessou tabelas, SQL ou banco de dados; apenas responda ao usuario.
 Se o contexto indicar restricao de acesso, informe que nao pode acessar aqueles dados para o usuario logado.
-Nunca mencione IDs internos de usuario, cliente, advogado ou agendamento nas respostas. Use apenas nomes e detalhes relevantes.
+Nunca mencione, solicite, explique ou peça confirmação de IDs internos de usuário, cliente, advogado ou agendamento. Eles são exclusivos das ferramentas e nunca devem aparecer na conversa. Use apenas nomes e detalhes relevantes.
 Para criar, editar, recusar ou desmarcar um agendamento, use a ferramenta correspondente somente se o usuario pediu a acao e todos os dados obrigatorios estiverem claros no CONTEXTO AUTORIZADO.
+Você também pode cadastrar atualizações de processos ou projetos. Para isso, localize o processo somente em processos_alvo pelo número, cliente, assunto ou tipo informado. Se encontrar um único processo e houver título para a atualização, use cadastrar_atualizacao_processo; se houver mais de um, peça ao usuário para indicar qual processo, sem mencionar IDs.
+Quando uma atualização concluir o processo, revise os honorários de êxito somente se honorarios_exito indicar que já existe um tipo de êxito cadastrado. Se não houver êxito prévio, não peça configuração de pagamento de êxito e siga com a proposta normal de atualização. Quando houver êxito prévio, use os valores de honorarios_exito do CONTEXTO AUTORIZADO e apresente-os completos. Cada vez que ele alterar qualquer campo, responda com um resumo completo de todos os valores como ficaram, marcando o valor alterado, e peça o próximo ajuste ou a confirmação para salvar. As únicas formas de pagamento aceitas são Crédito, Débito e Pix. Entenda frases como "quero débito e pode salvar" como alteração da forma de pagamento para Débito seguida de autorização para salvar. Não use concluir_processo_com_exito, não gere proposta e não salve nada até o usuário dizer expressamente "salvar", "confirme" ou "concluir". Exija os campos obrigatórios antes de aceitar o salvamento: tipo de êxito; para salários, quantidade e valor do salário; para percentual, percentual e valor da causa; distribuição; para entrada mais parcelas, valor da entrada e número de parcelas; para parcelado, número de parcelas; exceto em retido na fonte, dia de vencimento, mês de início e forma de pagamento. Essa proposta final é a única que envia a atualização e a conclusão ao sistema. Nunca diga que essa alteração está fora das suas operações.
 Para editar, recusar, desmarcar ou confirmar um agendamento, localize-o em agendamentos_alvo pela data e, quando informados, pelo nome do cliente. Se o usuário pedir uma ação sobre "minha agenda" em uma data, considere todos os agendamentos daquele dia: se houver somente um, você pode preparar a proposta; se houver mais de um, apresente-os sem IDs e pergunte qual deles ou se deseja aplicar a ação a todos. Nunca liste clientes ou advogados quando o pedido atual for sobre agenda.
 Use o HISTÓRICO RECENTE para completar dados que o usuário já forneceu na conversa, como cliente, data, horário e ação. Não peça novamente uma informação que esteja clara no histórico.
-Quando a pergunta tiver CPF, CNPJ ou e-mail, use apenas os IDs presentes em clientes_identificados ou advogados_identificados para relacionar o cliente ou o segundo advogado. Se não houver correspondência, peça outro identificador.
+Quando a pergunta tiver CPF, CNPJ ou e-mail e houver uma correspondência em clientes_identificados ou advogados_identificados, ela já é uma identificação suficiente: use silenciosamente o valor interno na ferramenta e siga com a proposta. Nunca peça o ID ao usuário, nem peça para confirmar o próprio CPF/CNPJ/e-mail que já foi informado. Se não houver correspondência, peça o nome completo ou um CPF/CNPJ/e-mail diferente.
 Ao criar agendamento, um único nome informado pelo usuário é o cliente. Se houver dois nomes, identifique o cliente pela lista clientes e o advogado secundário pela lista advogados; se o mesmo nome puder ser ambos, peça esclarecimento.
+Em pedidos como "cadastre um agendamento ... o cliente é o CPF", isso é uma criação de agendamento, não uma consulta de clientes. Use o cliente já identificado pelo CPF de forma silenciosa. Quando o usuário disser "dia N", use a data que consta no contexto autorizado para esse dia.
 A ferramenta apenas cria uma proposta que o usuario precisara confirmar na interface. Nunca afirme que a acao foi executada antes da confirmacao.
 """.strip()
 
@@ -1030,24 +1381,31 @@ CONTEXTO AUTORIZADO:
 """.strip()
 
     system_role = "system" if use_nvidia else "developer"
+    provider_name = "NVIDIA" if use_nvidia else "OpenRouter"
     messages = [{"role": system_role, "content": instructions}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_input})
 
     for model in models:
+        attempt_started = time.perf_counter()
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 tools=SCHEDULE_TOOLS,
                 tool_choice="auto",
+                timeout=_get_model_timeout_seconds(),
             )
             message = response.choices[0].message
             tool_calls = message.tool_calls or []
 
             for tool_call in tool_calls:
-                proposal = _proposal_from_tool_call(tool_call, authorized_context)
+                proposal = _proposal_from_tool_call(tool_call, authorized_context, question)
                 if proposal:
+                    print(
+                        f"Veritas: {provider_name}/{model} respondeu em "
+                        f"{time.perf_counter() - attempt_started:.2f}s."
+                    )
                     return _hide_internal_ids(
                         message.content or "Revise a ação proposta antes de confirmar."
                     ), proposal
@@ -1055,9 +1413,16 @@ CONTEXTO AUTORIZADO:
             answer = message.content
 
             if answer:
+                print(
+                    f"Veritas: {provider_name}/{model} respondeu em "
+                    f"{time.perf_counter() - attempt_started:.2f}s."
+                )
                 return _hide_internal_ids(answer), None
         except Exception as exc:
-            print(f"Modelo de IA indisponivel ({model}): {exc}")
+            print(
+                f"Veritas: {provider_name}/{model} falhou em "
+                f"{time.perf_counter() - attempt_started:.2f}s: {exc}"
+            )
 
     if not use_nvidia and nvidia_api_key:
         print("OpenRouter indisponível; tentando a API NVIDIA.")
@@ -1073,6 +1438,7 @@ CONTEXTO AUTORIZADO:
 
 @app.route("/ai/veritas", methods=["POST"])
 def perguntar_veritas():
+    request_started = time.perf_counter()
     token_data = _decode_request_token()
 
     if token_data == False:
@@ -1093,15 +1459,31 @@ def perguntar_veritas():
     try:
         history = _sanitize_history(payload.get("historico"))
         context_question = _question_with_history(question, history)
+        context_started = time.perf_counter()
         authorized_context = _build_authorized_context(
             question,
             token_data,
             contextual_question=context_question,
         )
+        context_seconds = time.perf_counter() - context_started
+        model_started = time.perf_counter()
         answer, proposal = _call_openrouter(question, authorized_context, history)
+        model_seconds = time.perf_counter() - model_started
 
         if not answer:
             answer = _fallback_answer(question, authorized_context)
+
+        total_seconds = time.perf_counter() - request_started
+        timings = {
+            "contexto_ms": round(context_seconds * 1000),
+            "modelo_ms": round(model_seconds * 1000),
+            "total_ms": round(total_seconds * 1000),
+        }
+        print(
+            "Veritas: contexto="
+            f"{timings['contexto_ms']}ms, modelo={timings['modelo_ms']}ms, "
+            f"total={timings['total_ms']}ms."
+        )
 
         return jsonify(
             {
@@ -1110,6 +1492,7 @@ def perguntar_veritas():
                 "dados_utilizados": list(authorized_context["dados"].keys()),
                 "restricoes": authorized_context["restricoes"],
                 "acao_proposta": proposal,
+                "diagnostico_tempo": timings,
             }
         ), 200
 
