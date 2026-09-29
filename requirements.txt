@@ -5,3 +5,4 @@ fdb==2.0.4
 PyJWT==2.12.1
 selenium
 flask-socketio==5.6.1
+openai

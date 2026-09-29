@@ -20,6 +20,10 @@ ALLOWED_ORIGINS = [
     "http://10.92.11.24:3000",
     "http://10.92.11.37:5173",
     "http://10.92.11.37:3000",
+    "http://10.92.11.19:5173",
+    "http://10.92.11.19:3000",
+    "http://10.92.11.25:5173",
+    "http://10.92.11.25:3000"
 ]
 
 CORS(
@@ -166,6 +170,7 @@ def sair_usuario(data):
 from usuario import *
 from processos import *
 from agendamentos import *
+from veritas_ai import *
 
 
 if __name__ == '__main__':

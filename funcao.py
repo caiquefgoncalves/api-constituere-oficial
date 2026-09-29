@@ -306,39 +306,39 @@ def decodificar_token():
 
         token = request.headers.get('X-Access-Token')
         if token:
-            print("✅ Token encontrado no header X-Access-Token")
+            print("Token encontrado no header X-Access-Token")
 
         if not token:
             token = request.cookies.get('acess_token')
             if token:
-                print("✅ Token encontrado no cookie")
+                print("Token encontrado no cookie")
 
         if not token:
             auth_header = request.headers.get('Authorization')
             if auth_header and auth_header.startswith('Bearer '):
                 token = auth_header.split(' ')[1]
                 if token:
-                    print("✅Token encontrado no header Authorization")
+                    print("Token encontrado no header Authorization")
 
         if not token:
-            print("❌ Token não encontrado em nenhuma fonte")
+            print("Token nao encontrado em nenhuma fonte")
             return False
 
         from main import app
         senha_secreta = app.config['SECRET_KEY']
         payload = jwt.decode(token, senha_secreta, algorithms=['HS256'])
 
-        print(f"✅ Token decodificado - ID: {payload['id_usuarios']}, Tipo: {payload['tipo']}")
+        print(f"Token decodificado - ID: {payload['id_usuarios']}, Tipo: {payload['tipo']}")
         return {'tipo': payload['tipo'], 'id_usuarios': payload['id_usuarios']}
 
     except jwt.ExpiredSignatureError:
-        print("❌ Token expirado")
+        print("Token expirado")
         return False
     except jwt.InvalidTokenError as e:
-        print(f"❌ Token inválido: {e}")
+        print(f"Token invalido: {e}")
         return False
     except Exception as e:
-        print(f"❌ Erro ao decodificar token: {e}")
+        print(f"Erro ao decodificar token: {e}")
         return False
 
 
