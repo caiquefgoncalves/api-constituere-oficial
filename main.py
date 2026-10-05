@@ -1,7 +1,7 @@
 from flask import Flask, send_from_directory, jsonify, request, make_response
 from flask_cors import CORS
 import os
-from flask_socketio import SocketIO, join_room, leave_room
+from flask_socketio import SocketIO, join_room, leave_room, emit
 
 app = Flask(__name__)
 
@@ -47,7 +47,8 @@ CORS(
 
 socketio = SocketIO(
     app,
-    cors_allowed_origins=ALLOWED_ORIGINS
+    cors_allowed_origins="*",
+    async_mode="threading"
 )
 
 
@@ -108,10 +109,6 @@ def uploaded_file(filename):
     )
 
 
-# =========================================================
-# SOCKET.IO
-# =========================================================
-
 @socketio.on('connect')
 def socket_connect():
     print('Cliente conectado ao Socket.IO')
@@ -134,14 +131,12 @@ def entrar_usuario(data):
 
         join_room(sala)
 
-        print(
-            f'Usuário {id_usuario} entrou na sala {sala}'
-        )
+        print(f'Usuário {id_usuario} entrou na sala {sala}')
+
+        emit('entrou_sala', {'sala': sala, 'id_usuario': id_usuario})
 
     except Exception as e:
-        print(
-            f'Erro ao colocar usuário na sala: {e}'
-        )
+        print(f'Erro ao colocar usuário na sala: {e}')
 
 
 @socketio.on('sair_usuario')
@@ -156,17 +151,12 @@ def sair_usuario(data):
 
         leave_room(sala)
 
-        print(
-            f'Usuário {id_usuario} saiu da sala {sala}'
-        )
+        print(f'Usuário {id_usuario} saiu da sala {sala}')
 
     except Exception as e:
-        print(
-            f'Erro ao remover usuário da sala: {e}'
-        )
+        print(f'Erro ao remover usuário da sala: {e}')
 
 
-# IMPORTAR ROTAS DEPOIS DE CRIAR socketio
 from usuario import *
 from processos import *
 from agendamentos import *
@@ -177,12 +167,8 @@ if __name__ == '__main__':
     print("\n=== ROTAS REGISTRADAS ===")
 
     for rule in app.url_map.iter_rules():
-
         if not rule.rule.startswith('/static'):
-
-            print(
-                f"{list(rule.methods)} {rule.rule}"
-            )
+            print(f"{list(rule.methods)} {rule.rule}")
 
     print("=========================\n")
 
