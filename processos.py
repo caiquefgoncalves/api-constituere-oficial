@@ -3,10 +3,11 @@ from main import app
 from db import conexao
 import datetime
 from io import BytesIO
+import os
+import requests
 
 from fpdf import FPDF
 from flask import jsonify, request, send_file
-
 
 
 @app.route('/cadastrar_processo', methods=['POST'])
@@ -5123,3 +5124,631 @@ def atualizar_parte_contraria(id_processo):
     finally:
         cur.close()
         con.close()
+
+@app.route('/cliente/processos', methods=['GET'])
+def listar_processos_cliente():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute(
+            "SELECT "
+            "p.ID_PROCESSOS, p.NUM_PROCESSO, p.TIPO_PROCESSO, p.ASSUNTO, "
+            "p.AREA, p.COMARCA, p.VARA, p.INSTANCIA, p.DATA_INICIO, p.STATUS, "
+            "advogado.NOME "
+            "FROM PROCESSOS p "
+            "LEFT JOIN USUARIOS advogado ON advogado.ID_USUARIOS = p.ID_USUARIOS_ADVOGADO "
+            "WHERE p.ID_USUARIOS_CLIENTE = ? "
+            "ORDER BY p.DATA_INICIO DESC, p.ID_PROCESSOS DESC",
+            (id_cliente,)
+        )
+
+        processos = []
+
+        for row in cur.fetchall():
+            data_inicio = None
+            if row[8]:
+                try:
+                    data_inicio = row[8].strftime('%d/%m/%Y')
+                except:
+                    data_inicio = str(row[8])
+
+            processos.append({
+                'id': row[0],
+                'numero': row[1] or '--',
+                'numero_processo': row[1],
+                'tipo_processo': row[2] or '--',
+                'assunto': row[3] or '--',
+                'tipo': row[4] or '--',
+                'area': row[4] or '--',
+                'comarca': row[5] or '--',
+                'vara': row[6] or '--',
+                'instancia': row[7],
+                'data_inicio': data_inicio or '--',
+                'status': row[9] or 'em_andamento',
+                'advogado_responsavel': row[10] or '--'
+            })
+
+        return jsonify({
+            'processos': processos,
+            'quantidade': len(processos)
+        }), 200
+
+    except Exception as e:
+        print('Erro ao listar processos do cliente:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/processo/<int:id_processo>', methods=['GET'])
+def detalhes_processo_cliente(id_processo):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute(
+            "SELECT "
+            "p.ID_PROCESSOS, p.NUM_PROCESSO, p.TIPO_PROCESSO, p.ASSUNTO, "
+            "p.AREA, p.COMARCA, p.VARA, p.INSTANCIA, p.DATA_INICIO, p.STATUS, "
+            "advogado.NOME "
+            "FROM PROCESSOS p "
+            "LEFT JOIN USUARIOS advogado ON advogado.ID_USUARIOS = p.ID_USUARIOS_ADVOGADO "
+            "WHERE p.ID_PROCESSOS = ? AND p.ID_USUARIOS_CLIENTE = ?",
+            (id_processo, id_cliente)
+        )
+
+        row = cur.fetchone()
+
+        if not row:
+            return jsonify({'error': 'Processo não encontrado'}), 404
+
+        data_inicio = None
+        if row[8]:
+            try:
+                data_inicio = row[8].strftime('%d/%m/%Y')
+            except:
+                data_inicio = str(row[8])
+
+        cur.execute(
+            "SELECT ID_ATUALIZACOES, \"DATA\", TITULO, DESCRICAO, PROCESSO_CONCLUIDO "
+            "FROM ATUALIZACOES WHERE ID_PROCESSOS = ? "
+            "ORDER BY \"DATA\" DESC, ID_ATUALIZACOES DESC",
+            (id_processo,)
+        )
+
+        atualizacoes = []
+
+        for a in cur.fetchall():
+            data_at = a[1]
+
+            if data_at and hasattr(data_at, 'strftime'):
+                data_fmt = data_at.strftime('%d/%m/%Y %H:%M')
+            elif data_at:
+                data_fmt = str(data_at)
+            else:
+                data_fmt = None
+
+            atualizacoes.append({
+                'id': a[0],
+                'data': data_fmt,
+                'titulo': a[2] or '--',
+                'descricao': a[3] or '',
+                'processo_concluido': bool(a[4])
+            })
+
+        return jsonify({
+            'processo': {
+                'id': row[0],
+                'numero': row[1] or '--',
+                'tipo_processo': row[2] or '--',
+                'assunto': row[3] or '--',
+                'area': row[4] or '--',
+                'comarca': row[5] or '--',
+                'vara': row[6] or '--',
+                'instancia': row[7],
+                'data_inicio': data_inicio or '--',
+                'status': row[9] or 'em_andamento',
+                'advogado_responsavel': row[10] or '--'
+            },
+            'atualizacoes': atualizacoes
+        }), 200
+
+    except Exception as e:
+        print('Erro ao buscar detalhes do processo:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/dashboard', methods=['GET'])
+def dashboard_cliente():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    meses_pt = {
+        1: 'JAN', 2: 'FEV', 3: 'MAR', 4: 'ABR',
+        5: 'MAI', 6: 'JUN', 7: 'JUL', 8: 'AGO',
+        9: 'SET', 10: 'OUT', 11: 'NOV', 12: 'DEZ'
+    }
+
+    try:
+        cur.execute(
+            "SELECT COUNT(*) FROM PROCESSOS "
+            "WHERE ID_USUARIOS_CLIENTE = ? AND UPPER(STATUS) = 'EM_ANDAMENTO'",
+            (id_cliente,)
+        )
+        total_processos = cur.fetchone()[0] or 0
+
+        hoje = datetime.date.today()
+
+        cur.execute(
+            "SELECT COUNT(*) FROM AGENDAMENTOS "
+            "WHERE ID_USUARIOS_CLIENTE = ? AND DATA >= ? "
+            "AND UPPER(STATUS) IN ('CONFIRMADO', 'A_CONFIRMAR')",
+            (id_cliente, hoje)
+        )
+        total_reunioes = cur.fetchone()[0] or 0
+
+        cur.execute(
+            "SELECT FIRST 1 "
+            "a.ASSUNTO, a.DATA, a.HORARIO, a.STATUS, adv1.NOME "
+            "FROM AGENDAMENTOS a "
+            "LEFT JOIN USUARIOS adv1 ON adv1.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1 "
+            "WHERE a.ID_USUARIOS_CLIENTE = ? AND a.DATA >= ? "
+            "AND UPPER(a.STATUS) IN ('CONFIRMADO', 'A_CONFIRMAR') "
+            "ORDER BY a.DATA ASC, a.HORARIO ASC",
+            (id_cliente, hoje)
+        )
+
+        row = cur.fetchone()
+        proxima_reuniao = None
+
+        if row:
+            data_ag = row[1]
+            horario = row[2]
+
+            if hasattr(data_ag, 'strftime'):
+                data_fmt = data_ag.strftime('%d/%m/%Y')
+                dia = data_ag.strftime('%d')
+                mes = meses_pt.get(data_ag.month, '--')
+            else:
+                data_fmt, dia, mes = str(data_ag), '--', '--'
+
+            if isinstance(horario, datetime.time):
+                horario_fmt = horario.strftime('%H:%M')
+            else:
+                horario_fmt = str(horario)[:5] if horario else '--'
+
+            status_raw = (row[3] or 'a_confirmar').lower()
+            status_map = {
+                'a_confirmar': 'A confirmar',
+                'confirmado': 'Confirmada',
+                'cancelado': 'Cancelada',
+                'recusado': 'Recusada',
+                'concluido': 'Realizada',
+                'realizado': 'Realizada'
+            }
+            status_pt = status_map.get(status_raw, status_raw)
+
+            proxima_reuniao = {
+                'assunto': row[0] or '--',
+                'data_formatada': data_fmt,
+                'dia': dia,
+                'mes': mes,
+                'horario': horario_fmt,
+                'local': row[4] or 'Escritório',
+                'status': status_pt
+            }
+
+        pagamento_pendente = None
+
+        try:
+            cur.execute(
+                "SELECT FIRST 1 "
+                "parc.VALOR_PARCELA, parc.DATA_VENCIMENTO, p.TIPO_PROCESSO "
+                "FROM PARCELAS parc "
+                "INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS "
+                "INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS "
+                "WHERE p.ID_USUARIOS_CLIENTE = ? "
+                "AND UPPER(parc.STATUS) <> 'PAGA' "
+                "ORDER BY parc.DATA_VENCIMENTO ASC",
+                (id_cliente,)
+            )
+
+            row_pg = cur.fetchone()
+
+            if row_pg:
+                valor = float(row_pg[0]) if row_pg[0] else 0
+                data_venc = row_pg[1]
+
+                if hasattr(data_venc, 'strftime'):
+                    venc_fmt = data_venc.strftime('%d/%m/%Y')
+                else:
+                    venc_fmt = str(data_venc) if data_venc else '--'
+
+                pagamento_pendente = {
+                    'nome': row_pg[2] or 'Honorários',
+                    'valor': valor,
+                    'vencimento': venc_fmt
+                }
+        except Exception as e:
+            print(f"Erro ao buscar pagamento pendente: {e}")
+
+        return jsonify({
+            'processos_ativos': total_processos,
+            'proximas_reunioes': total_reunioes,
+            'proxima_reuniao': proxima_reuniao,
+            'pagamento_pendente': pagamento_pendente
+        }), 200
+
+    except Exception as e:
+        print('Erro ao buscar dashboard do cliente:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/pagamentos', methods=['GET'])
+def listar_pagamentos_cliente():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    def converter_data(valor):
+        if valor is None:
+            return None
+        if isinstance(valor, datetime.date):
+            return valor
+        if isinstance(valor, str):
+            for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
+                try:
+                    return datetime.datetime.strptime(valor, fmt).date()
+                except:
+                    continue
+            return None
+        try:
+            return datetime.date(1900, 1, 1) + datetime.timedelta(days=int(valor))
+        except:
+            return None
+
+    try:
+        hoje = datetime.date.today()
+
+        cur.execute(
+            "SELECT "
+            "parc.ID_PARCELAS, parc.NUMERO_PARCELA, parc.VALOR_PARCELA, "
+            "parc.DATA_VENCIMENTO, parc.DATA_PAGAMENTO, parc.STATUS, "
+            "pag.FORM_PAGAMENTO, p.TIPO_PROCESSO "
+            "FROM PARCELAS parc "
+            "INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS "
+            "INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS "
+            "WHERE p.ID_USUARIOS_CLIENTE = ? "
+            "ORDER BY parc.DATA_VENCIMENTO ASC",
+            (id_cliente,)
+        )
+
+        pagamentos = []
+
+        for row in cur.fetchall():
+            valor = float(row[2]) if row[2] else 0
+            venc = converter_data(row[3])
+            pgto = converter_data(row[4])
+            status_db = (row[5] or '').upper()
+            forma = row[6] or '--'
+            tipo_processo = row[7] or 'Processo'
+            numero_parcela = row[1]
+
+            if numero_parcela == 0:
+                nome = f"{tipo_processo} - Entrada"
+            else:
+                nome = f"{tipo_processo} - {numero_parcela}ª parcela"
+
+            if status_db == 'PAGA':
+                status_pt = 'Paga'
+            elif venc and venc < hoje:
+                status_pt = 'Atrasada'
+            else:
+                status_pt = 'A pagar'
+
+            pagamentos.append({
+                'id': row[0],
+                'nome': nome,
+                'valor': valor,
+                'status': status_pt,
+                'pagamento': forma,
+                'vencimento': venc.strftime('%d/%m/%Y') if venc else '--',
+                'data_pagamento': pgto.strftime('%d/%m/%Y') if pgto else None
+            })
+
+        return jsonify({
+            'pagamentos': pagamentos,
+            'quantidade': len(pagamentos)
+        }), 200
+
+    except Exception as e:
+        print('Erro ao listar pagamentos do cliente:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+ARKHE_URL = "https://arkhe-backend.zbbquj.easypanel.host/api/v1"
+ARKHE_CLIENT_ID = os.getenv("ARKHE_CLIENT_ID", "").strip()
+ARKHE_CLIENT_SECRET = os.getenv("ARKHE_CLIENT_SECRET", "").strip()
+
+
+def headers_arkhe():
+    return {
+        "X-Client-ID": ARKHE_CLIENT_ID,
+        "X-Client-Secret": ARKHE_CLIENT_SECRET,
+        "Content-Type": "application/json"
+    }
+
+
+def converter_valor_pix(valor):
+    if valor is None:
+        return None
+
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def buscar_parcela_pix(id_parcela, id_cliente, tipo_parcela):
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        if tipo_parcela == "exito":
+            cur.execute(
+                "SELECT pe.ID_PARCELA_EXITO, pe.VALOR_PARCELA, pe.STATUS "
+                "FROM PARCELAS_EXITO pe "
+                "INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO "
+                "INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO "
+                "INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO "
+                "WHERE pe.ID_PARCELA_EXITO = ? AND p.ID_USUARIOS_CLIENTE = ?",
+                (id_parcela, id_cliente)
+            )
+        else:
+            cur.execute(
+                "SELECT parc.ID_PARCELAS, parc.VALOR_PARCELA, parc.STATUS "
+                "FROM PARCELAS parc "
+                "INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO "
+                "INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO "
+                "WHERE parc.ID_PARCELAS = ? AND p.ID_USUARIOS_CLIENTE = ?",
+                (id_parcela, id_cliente)
+            )
+
+        row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            'id': row[0],
+            'valor': converter_valor_pix(row[1]),
+            'valor_raw': row[1],
+            'tipo_raw': type(row[1]).__name__,
+            'status': row[2]
+        }
+
+    finally:
+        cur.close()
+        con.close()
+
+
+def confirmar_pagamento_pix(id_parcela, tipo_parcela):
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        data_pagamento = datetime.date.today()
+
+        if tipo_parcela == "exito":
+            cur.execute(
+                "UPDATE PARCELAS_EXITO SET STATUS = 'PAGA', DATA_PAGAMENTO = ? "
+                "WHERE ID_PARCELA_EXITO = ?",
+                (data_pagamento, id_parcela)
+            )
+        else:
+            cur.execute(
+                "UPDATE PARCELAS SET STATUS = 'PAGA', DATA_PAGAMENTO = ? "
+                "WHERE ID_PARCELAS = ?",
+                (data_pagamento, id_parcela)
+            )
+
+        con.commit()
+        return True
+
+    except Exception as e:
+        con.rollback()
+        print(f"[PIX] Erro ao confirmar pagamento: {e}")
+        return False
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/pagamento/pix', methods=['POST'])
+def criar_cobranca_pix():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    if not ARKHE_CLIENT_ID or not ARKHE_CLIENT_SECRET:
+        return jsonify({'error': 'Pagamento Pix não configurado'}), 503
+
+    id_cliente = token_data['id_usuarios']
+    dados = request.get_json() or {}
+
+    id_parcela = dados.get('id_parcela')
+    tipo_parcela = dados.get('tipo_parcela', 'prolabore')
+
+    print(f"[PIX] Requisição recebida - id_cliente={id_cliente}, id_parcela={id_parcela}, tipo={tipo_parcela}")
+
+    if not id_parcela:
+        return jsonify({'error': 'Parcela é obrigatória'}), 400
+
+    try:
+        id_parcela = int(id_parcela)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'ID de parcela inválido'}), 400
+
+    if tipo_parcela not in ['prolabore', 'exito']:
+        return jsonify({'error': 'Tipo de parcela inválido'}), 400
+
+    parcela = buscar_parcela_pix(id_parcela, id_cliente, tipo_parcela)
+
+    print(f"[PIX] Parcela encontrada: {parcela}")
+
+    if not parcela:
+        return jsonify({'error': 'Parcela não encontrada'}), 404
+
+    if parcela['status'] == 'PAGA':
+        return jsonify({'error': 'Esta parcela já foi paga'}), 400
+
+    valor = parcela['valor']
+
+    print(f"[PIX] Valor convertido: {valor} (original: {parcela['valor_raw']}, tipo: {parcela['tipo_raw']})")
+
+    if valor is None:
+        return jsonify({'error': 'Valor da parcela inválido no banco'}), 400
+
+    if valor <= 0:
+        return jsonify({'error': f'Valor da parcela é {valor}, precisa ser maior que zero'}), 400
+
+    try:
+        resposta = requests.post(
+            f"{ARKHE_URL}/cobrancas/pix",
+            headers=headers_arkhe(),
+            json={"valor": valor},
+            timeout=15
+        )
+
+        print(f"[PIX] Resposta Arkhé: status={resposta.status_code}, body={resposta.text[:500]}")
+
+        if resposta.status_code >= 400:
+            return jsonify({'error': f'Erro ao criar cobrança Pix ({resposta.status_code})'}), 400
+
+        dados_arkhe = resposta.json()
+
+        return jsonify({
+            'id_cobranca': dados_arkhe.get('id_cobranca'),
+            'codigo_pagamento': dados_arkhe.get('codigo_pagamento') or dados_arkhe.get('pix_copia_cola'),
+            'qr_code': dados_arkhe.get('qr_code') or dados_arkhe.get('qrcode'),
+            'valor': valor,
+            'id_parcela': id_parcela,
+            'tipo_parcela': tipo_parcela
+        }), 200
+
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Tempo esgotado ao conectar com a Arkhé'}), 504
+
+    except Exception as e:
+        print(f"[PIX] Erro: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Erro interno'}), 500
+
+
+@app.route('/cliente/pagamento/pix/<int:id_cobranca>', methods=['GET'])
+def consultar_cobranca_pix(id_cobranca):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    if not ARKHE_CLIENT_ID or not ARKHE_CLIENT_SECRET:
+        return jsonify({'error': 'Pagamento Pix não configurado'}), 503
+
+    id_parcela = request.args.get('id_parcela', type=int)
+    tipo_parcela = request.args.get('tipo_parcela', 'prolabore')
+
+    try:
+        resposta = requests.get(
+            f"{ARKHE_URL}/cobrancas/pix/{id_cobranca}",
+            headers=headers_arkhe(),
+            timeout=15
+        )
+
+        if resposta.status_code >= 400:
+            return jsonify({'error': 'Cobrança não encontrada'}), 404
+
+        dados = resposta.json()
+        status_pix = dados.get('status')
+        pago = status_pix == 1
+
+        if pago and id_parcela:
+            confirmar_pagamento_pix(id_parcela, tipo_parcela)
+
+        return jsonify({
+            'id_cobranca': dados.get('id_cobranca'),
+            'status': status_pix,
+            'pago': pago,
+            'valor': dados.get('valor'),
+            'pago_em': dados.get('pago_em')
+        }), 200
+
+    except Exception as e:
+        print(f"[PIX] Erro ao consultar: {e}")
+        return jsonify({'error': 'Erro interno'}), 500

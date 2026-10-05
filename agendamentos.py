@@ -1,4 +1,4 @@
-from flask import jsonify, request
+from flask import jsonify, request, send_file
 from funcao import (
     decodificar_token,
     enviar_email_agendamento_criado,
@@ -12,6 +12,9 @@ from db import conexao
 from main import app, socketio
 import datetime
 import concurrent.futures
+from io import BytesIO
+import unicodedata
+from fpdf import FPDF
 
 
 def converter_data(data_texto):
@@ -663,6 +666,78 @@ def listar_agendamentos():
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/agendamentos/relatorio', methods=['GET'])
+def gerar_relatorio_agendamentos():
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessario'}), 401
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso nao autorizado'}), 403
+
+    data_inicio = converter_data(request.args.get('data_inicio')) if request.args.get('data_inicio') else None
+    data_fim = converter_data(request.args.get('data_fim')) if request.args.get('data_fim') else None
+    status = (request.args.get('status') or '').strip()
+    con = conexao()
+    cur = con.cursor()
+    try:
+        sql = """
+            SELECT CLIENTE, ASSUNTO, DATA, HORARIO, DURACAO, STATUS, MOTIVO
+            FROM AGENDAMENTOS
+            WHERE (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
+        """
+        parametros = [token_data['id_usuarios'], token_data['id_usuarios']]
+        if data_inicio:
+            sql += ' AND DATA >= ?'
+            parametros.append(data_inicio)
+        if data_fim:
+            sql += ' AND DATA <= ?'
+            parametros.append(data_fim)
+        if status and status.lower() != 'todos':
+            sql += ' AND LOWER(STATUS) = ?'
+            parametros.append(status.lower())
+        sql += ' ORDER BY DATA, HORARIO'
+        cur.execute(sql, tuple(parametros))
+        registros = cur.fetchall()
+
+        def texto(valor, limite=36):
+            valor = '-' if valor in (None, '') else str(valor)
+            valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
+            return valor if len(valor) <= limite else valor[:limite - 3] + '...'
+
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_font('Helvetica', 'B', 16)
+        pdf.cell(0, 10, 'Relatorio de agendamentos', new_x='LMARGIN', new_y='NEXT')
+        periodo = 'Todos os agendamentos'
+        if data_inicio or data_fim:
+            periodo = f"Periodo: {(data_inicio.strftime('%d/%m/%Y') if data_inicio else 'inicio')} ate {(data_fim.strftime('%d/%m/%Y') if data_fim else 'hoje')}"
+        pdf.set_font('Helvetica', '', 9)
+        pdf.cell(0, 6, texto(periodo, 100), new_x='LMARGIN', new_y='NEXT')
+        pdf.ln(3)
+        colunas = [('Cliente', 35), ('Assunto', 42), ('Data', 23), ('Hora', 17), ('Duracao', 22), ('Status', 25), ('Motivo', 26)]
+        pdf.set_fill_color(237, 243, 252)
+        pdf.set_font('Helvetica', 'B', 7)
+        for nome, largura in colunas:
+            pdf.cell(largura, 8, nome, border=1, fill=True)
+        pdf.ln()
+        pdf.set_font('Helvetica', '', 7)
+        for cliente, assunto, data, hora, duracao, status_item, motivo in registros:
+            data_texto = data.strftime('%d/%m/%Y') if hasattr(data, 'strftime') else texto(data, 10)
+            hora_texto = hora.strftime('%H:%M') if hasattr(hora, 'strftime') else texto(hora, 5)
+            valores = [texto(cliente, 23), texto(assunto, 28), data_texto, hora_texto, texto(duracao, 14), texto(status_item, 16), texto(motivo, 18)]
+            for (_, largura), valor in zip(colunas, valores):
+                pdf.cell(largura, 7, valor, border=1)
+            pdf.ln()
+
+        return send_file(BytesIO(bytes(pdf.output())), mimetype='application/pdf', as_attachment=True, download_name='relatorio-agendamentos.pdf')
+    except Exception as erro:
+        return jsonify({'error': f'Nao foi possivel gerar o relatorio: {erro}'}), 500
     finally:
         cur.close()
         con.close()
