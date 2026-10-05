@@ -5,6 +5,7 @@ import re
 import time
 import unicodedata
 from difflib import SequenceMatcher
+from urllib.parse import urlencode
 
 import jwt
 from flask import jsonify, request
@@ -26,7 +27,6 @@ DEFAULT_OPENROUTER_MODELS = (
     "nvidia/nemotron-3.5-lightning:free",
 )
 DEFAULT_PROVIDER_PRIORITY = "OPENROUTER"
-
 PROGRAMMING_KEYWORDS = (
     "codigo", "programacao", "programar", "python", "javascript", "typescript",
     "html", "css", "sql", "script", "função", "funcao", "classe", "class ",
@@ -269,7 +269,7 @@ def _normalize_text(value):
     without_accents = "".join(
         char for char in normalized if not unicodedata.combining(char)
     )
-    return without_accents.lower()
+    return without_accents.lower().strip()
 
 
 def _contains_any_word(text, keywords):
@@ -379,6 +379,114 @@ def _question_requests_process_report(question):
             ("relatorio", "documento", "pdf", "baixar", "download", "gerar"),
         )
     )
+
+
+def _question_requests_log_pdf(question):
+    normalized = _normalize_text(question)
+    return (
+        "log" in normalized
+        and _contains_any_word(normalized, ("pdf", "relatorio", "relatorio", "gerar", "baixar", "download"))
+    )
+
+
+def _question_requests_appointment_report(question):
+    normalized = _normalize_text(question)
+    return (
+        _question_mentions_schedule(question)
+        and _contains_any_word(normalized, ("pdf", "relatorio", "gerar", "baixar", "download"))
+    )
+
+
+def _appointment_report_proposal(question, authorized_context):
+    if not _question_requests_appointment_report(question):
+        return None, None
+    if authorized_context.get("usuario_logado", {}).get("tipo") != 0:
+        return "O relatório de agendamentos está disponível apenas para advogados.", None
+    dates = _extract_dates_from_question(question)
+    filters = {}
+    if dates:
+        filters["data_inicio"] = dates[0].isoformat()
+        filters["data_fim"] = (dates[1] if len(dates) > 1 else dates[0]).isoformat()
+    normalized = _normalize_text(question)
+    for label, value in (
+        ("a confirmar", "a_confirmar"),
+        ("confirmado", "confirmado"),
+        ("cancelado", "cancelado"),
+        ("recusado", "recusado"),
+    ):
+        if label in normalized:
+            filters["status"] = value
+            break
+    query = f"?{urlencode(filters)}" if filters else ""
+    description = "Baixar o relatório em PDF dos agendamentos"
+    if dates:
+        end_date = dates[1] if len(dates) > 1 else dates[0]
+        description += f" de {dates[0].strftime('%d/%m/%Y')} até {end_date.strftime('%d/%m/%Y')}"
+    if filters.get("status"):
+        description += f" com status {filters['status'].replace('_', ' ')}"
+    return "Preparei a opção para baixar o relatório de agendamentos.", {
+        "tipo": "baixar_relatorio_agendamentos",
+        "descricao": description + ".",
+        "endpoint": f"/agendamentos/relatorio{query}",
+        "metodo": "GET",
+        "dados": {},
+    }
+
+
+def _fetch_owned_office(id_lawyer):
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT FIRST 1 ID_ESCRITORIOS
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ? AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
+            """,
+            (id_lawyer,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        cur.close()
+        con.close()
+
+
+def _log_pdf_proposal(question, authorized_context):
+    if not _question_requests_log_pdf(question):
+        return None, None
+    office_id = authorized_context.get("dados", {}).get("escritorio_proprietario")
+    if not office_id:
+        return "A geração do PDF de Log está disponível apenas para o advogado proprietário do escritório.", None
+
+    dates = _extract_dates_from_question(question)
+    filters = {}
+    if dates:
+        filters["data_inicio"] = dates[0].isoformat()
+        filters["data_fim"] = (dates[1] if len(dates) > 1 else dates[0]).isoformat()
+
+    attorney_match = re.search(
+        r"(?:advogado|advogada)\s+(.+?)(?=\s+(?:de|do|da|em|entre|ate)\b|$)",
+        question,
+        flags=re.IGNORECASE,
+    )
+    if attorney_match:
+        filters["advogado"] = attorney_match.group(1).strip()
+
+    description = "Baixar o PDF do Log do escritório"
+    if dates:
+        description += f" de {dates[0].strftime('%d/%m/%Y')} até {(dates[1] if len(dates) > 1 else dates[0]).strftime('%d/%m/%Y')}"
+    description += "."
+    if filters.get("advogado"):
+        description = description[:-1] + f" para o advogado {filters['advogado']}."
+    query = f"?{urlencode(filters)}" if filters else ""
+    return "Preparei a opção para baixar o PDF do Log.", {
+        "tipo": "baixar_pdf_log",
+        "descricao": description,
+        "endpoint": f"/escritorio/{office_id}/logs/pdf{query}",
+        "metodo": "GET",
+        "dados": {},
+    }
 
 
 def _question_requests_save(question):
@@ -626,6 +734,7 @@ def _find_appointments_by_client_and_date(question, id_lawyer):
                 FROM AGENDAMENTOS
                 WHERE DATA = ?
                   AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
+                  AND UPPER(TRIM(COALESCE(STATUS, ''))) NOT IN ('RECUSADO', 'CANCELADO', 'DESMARCADO')
                 """,
                     (appointment_date, id_lawyer, id_lawyer),
                 )
@@ -647,6 +756,7 @@ def _find_appointments_by_client_and_date(question, id_lawyer):
                 WHERE DATA >= ?
                   AND DATA <= ?
                   AND (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
+                  AND UPPER(TRIM(COALESCE(STATUS, ''))) NOT IN ('RECUSADO', 'CANCELADO', 'DESMARCADO')
                 """,
                     (
                         datetime.date.today(),
@@ -659,7 +769,7 @@ def _find_appointments_by_client_and_date(question, id_lawyer):
             for row in cur.fetchall():
                 client_name = row[3] or "--"
                 appointment_status = _normalize_text(row[8] or "")
-                if appointment_status in ("recusado", "cancelado", "desmarcado"):
+                if appointment_status.startswith(("recusado", "cancelado", "desmarcado")):
                     continue
                 name_tokens = [
                     token for token in _normalize_text(client_name).split()
@@ -1126,6 +1236,14 @@ def _build_authorized_context(question, token_data, contextual_question=None):
         "dados": {},
         "restricoes": [],
     }
+
+    if _question_requests_log_pdf(question) or _question_requests_log_pdf(contextual_question):
+        if user_type == 0:
+            context["dados"]["escritorio_proprietario"] = _fetch_owned_office(user_id)
+        else:
+            context["restricoes"].append(
+                "O PDF de Log está disponível apenas para advogado proprietário do escritório."
+            )
 
     schedule_in_progress = (
         _question_mentions_schedule(question)
@@ -1809,9 +1927,13 @@ def perguntar_veritas():
             authorized_context,
         )
         if proposal:
-            answer = "Preparei a solicitacao. Confirme a acao para enviar."
+            answer = "Preparei a solicitação. Confirme a ação para enviar."
         else:
-            answer, proposal = _call_openrouter(question, authorized_context, history)
+            answer, proposal = _log_pdf_proposal(question, authorized_context)
+            if answer is None:
+                answer, proposal = _appointment_report_proposal(question, authorized_context)
+            if answer is None:
+                answer, proposal = _call_openrouter(question, authorized_context, history)
         model_seconds = time.perf_counter() - model_started
 
         if not answer:

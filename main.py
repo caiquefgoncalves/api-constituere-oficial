@@ -1,7 +1,7 @@
 from flask import Flask, send_from_directory, jsonify, request, make_response
 from flask_cors import CORS
 import os
-from flask_socketio import SocketIO, join_room, leave_room
+from flask_socketio import SocketIO, join_room, leave_room, emit
 from funcao import decodificar_token
 from log_auditoria import preparar_requisicao, registrar_requisicao
 
@@ -49,7 +49,8 @@ CORS(
 
 socketio = SocketIO(
     app,
-    cors_allowed_origins=ALLOWED_ORIGINS
+    cors_allowed_origins="*",
+    async_mode="threading"
 )
 
 
@@ -89,9 +90,17 @@ app.config['UPLOAD_FOLDER'] = os.path.join(
 )
 
 
+@app.before_request
+def preparar_auditoria():
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        try:
+            preparar_requisicao(decodificar_token())
+        except Exception as erro:
+            app.logger.error('Erro ao preparar auditoria: %s', erro)
+
+
 @app.after_request
 def registrar_auditoria(response):
-    """Registra alterações concluídas e a geração de relatórios PDF."""
     deve_registrar = (
         request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}
         or (request.method == 'GET' and request.path.endswith('/documento'))
@@ -103,14 +112,6 @@ def registrar_auditoria(response):
             app.logger.error('Erro inesperado na auditoria: %s', erro)
     return response
 
-
-@app.before_request
-def preparar_auditoria():
-    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
-        try:
-            preparar_requisicao(decodificar_token())
-        except Exception as erro:
-            app.logger.error('Erro ao preparar auditoria: %s', erro)
 
 os.makedirs(
     app.config['UPLOAD_FOLDER'],
@@ -134,10 +135,6 @@ def uploaded_file(filename):
     )
 
 
-# =========================================================
-# SOCKET.IO
-# =========================================================
-
 @socketio.on('connect')
 def socket_connect():
     print('Cliente conectado ao Socket.IO')
@@ -160,14 +157,12 @@ def entrar_usuario(data):
 
         join_room(sala)
 
-        print(
-            f'Usuário {id_usuario} entrou na sala {sala}'
-        )
+        print(f'Usuário {id_usuario} entrou na sala {sala}')
+
+        emit('entrou_sala', {'sala': sala, 'id_usuario': id_usuario})
 
     except Exception as e:
-        print(
-            f'Erro ao colocar usuário na sala: {e}'
-        )
+        print(f'Erro ao colocar usuário na sala: {e}')
 
 
 @socketio.on('sair_usuario')
@@ -182,17 +177,12 @@ def sair_usuario(data):
 
         leave_room(sala)
 
-        print(
-            f'Usuário {id_usuario} saiu da sala {sala}'
-        )
+        print(f'Usuário {id_usuario} saiu da sala {sala}')
 
     except Exception as e:
-        print(
-            f'Erro ao remover usuário da sala: {e}'
-        )
+        print(f'Erro ao remover usuário da sala: {e}')
 
 
-# IMPORTAR ROTAS DEPOIS DE CRIAR socketio
 from usuario import *
 from processos import *
 from agendamentos import *
@@ -203,12 +193,8 @@ if __name__ == '__main__':
     print("\n=== ROTAS REGISTRADAS ===")
 
     for rule in app.url_map.iter_rules():
-
         if not rule.rule.startswith('/static'):
-
-            print(
-                f"{list(rule.methods)} {rule.rule}"
-            )
+            print(f"{list(rule.methods)} {rule.rule}")
 
     print("=========================\n")
 
