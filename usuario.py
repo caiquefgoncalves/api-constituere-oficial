@@ -9,6 +9,47 @@ import concurrent.futures
 import time
 from consulta_cnsa import consultar_cnsa
 from consulta_oab import consultar_oab
+from log_auditoria import listar_logs
+
+
+@app.route('/escritorio/<int:id_escritorio>/logs', methods=['GET'])
+def listar_logs_escritorio(id_escritorio):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT 1
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+              AND STATUS = 'PROPRIETARIO'
+              AND ATIVO = 1
+            """,
+            (token_data['id_usuarios'], id_escritorio)
+        )
+        if not cur.fetchone():
+            return jsonify({'error': 'Apenas o proprietário pode consultar os logs'}), 403
+    finally:
+        cur.close()
+        con.close()
+
+    try:
+        limite = min(max(int(request.args.get('limite', 200)), 1), 500)
+    except ValueError:
+        return jsonify({'error': 'Limite inválido'}), 400
+
+    try:
+        return jsonify({'logs': listar_logs(id_escritorio, limite)})
+    except Exception as erro:
+        return jsonify({'error': f'Não foi possível consultar os logs: {erro}'}), 500
 
 
 @app.route('/criar_usuarios', methods=['POST'])
@@ -3584,169 +3625,6 @@ def redefinir_senha():
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-    finally:
-        cur.close()
-        con.close()
-
-@app.route('/editar_perfil_cliente', methods=['PUT'])
-def editar_perfil_cliente():
-    token_data = decodificar_token()
-
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
-
-    tipo_usuario = token_data['tipo']
-    id_usuario = token_data['id_usuarios']
-
-    if tipo_usuario not in [2, 3]:
-        return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    if request.is_json:
-        dados = request.get_json() or {}
-    else:
-        dados = request.form
-
-    nome = dados.get('nome')
-    email = dados.get('email')
-    cpf = dados.get('cpf')
-    cnpj = dados.get('cnpj')
-    telefone = dados.get('telefone')
-
-    razao_social = dados.get('razao_social')
-    nome_fantasia = dados.get('nome_fantasia')
-
-    data_nascimento = dados.get('data_nascimento')
-    sexo = dados.get('sexo')
-    rg = dados.get('rg')
-    orgao_expedidor = dados.get('orgao_expedidor')
-    nacionalidade = dados.get('nacionalidade')
-    estado_civil = dados.get('estado_civil')
-
-    carteira_trabalho = dados.get('carteira_trabalho')
-    serie_carteira = dados.get('serie_carteira')
-    profissao = dados.get('profissao')
-
-    cep = dados.get('cep')
-    logradouro = dados.get('logradouro')
-    numero = dados.get('numero')
-    complemento = dados.get('complemento')
-    bairro = dados.get('bairro')
-    cidade = dados.get('cidade')
-    estado = dados.get('estado')
-
-    if not nome and not razao_social:
-        return jsonify({'error': 'Nome é obrigatório'}), 400
-
-    if not email:
-        return jsonify({'error': 'E-mail é obrigatório'}), 400
-
-    if not telefone:
-        return jsonify({'error': 'Telefone é obrigatório'}), 400
-
-    con = conexao()
-    cur = con.cursor()
-
-    try:
-        cur.execute(
-            "SELECT ID_USUARIOS FROM USUARIOS WHERE EMAIL = ? AND ID_USUARIOS != ?",
-            (email, id_usuario)
-        )
-
-        if cur.fetchone():
-            return jsonify({'error': 'E-mail já cadastrado para outro usuário'}), 400
-
-        if tipo_usuario == 2 and cpf:
-            cpf_limpo = ''.join(filter(str.isdigit, cpf))
-
-            if len(cpf_limpo) != 11:
-                return jsonify({'error': 'CPF inválido'}), 400
-
-            cur.execute(
-                "SELECT ID_USUARIOS FROM USUARIOS WHERE CPF = ? AND ID_USUARIOS != ?",
-                (cpf_limpo, id_usuario)
-            )
-
-            if cur.fetchone():
-                return jsonify({'error': 'CPF já cadastrado para outro usuário'}), 400
-
-        if tipo_usuario == 3 and cnpj:
-            cnpj_limpo = ''.join(filter(str.isdigit, cnpj))
-
-            if len(cnpj_limpo) != 14:
-                return jsonify({'error': 'CNPJ inválido'}), 400
-
-            cur.execute(
-                "SELECT ID_USUARIOS FROM USUARIOS WHERE CNPJ = ? AND ID_USUARIOS != ?",
-                (cnpj_limpo, id_usuario)
-            )
-
-            if cur.fetchone():
-                return jsonify({'error': 'CNPJ já cadastrado para outro usuário'}), 400
-
-        cur.execute(
-            "UPDATE USUARIOS SET "
-            "NOME = ?, EMAIL = ?, TELEFONE = ?, "
-            "CPF = ?, CNPJ = ?, "
-            "RAZAO_SOCIAL = ?, NOME_FANTASIA = ?, "
-            "DATA_NASCIMENTO = ?, SEXO = ?, RG = ?, "
-            "ORGAO_EXPEDIDOR = ?, NACIONALIDADE = ?, ESTADO_CIVIL = ?, "
-            "CARTERA_TRABALHO = ?, SERIE_CARTERA = ?, PROFISSAO = ?, "
-            "CEP = ?, LOGRADOURO = ?, NUMERO = ?, COMPLEMENTO = ?, "
-            "BAIRRO = ?, CIDADE = ?, ESTADO = ? "
-            "WHERE ID_USUARIOS = ?",
-            (
-                nome,
-                email,
-                telefone,
-                cpf if cpf else None,
-                cnpj if cnpj else None,
-                razao_social,
-                nome_fantasia,
-                data_nascimento if data_nascimento else None,
-                sexo,
-                rg,
-                orgao_expedidor,
-                nacionalidade,
-                estado_civil,
-                carteira_trabalho,
-                serie_carteira,
-                profissao,
-                cep,
-                logradouro,
-                numero,
-                complemento,
-                bairro,
-                cidade,
-                estado,
-                id_usuario
-            )
-        )
-
-        con.commit()
-
-        foto_perfil = request.files.get('foto_perfil')
-
-        if foto_perfil:
-            try:
-                caminho = os.path.join(app.config['UPLOAD_FOLDER'], 'Usuarios')
-                os.makedirs(caminho, exist_ok=True)
-
-                nome_arquivo = f'{id_usuario}.jpeg'
-                foto_perfil.save(os.path.join(caminho, nome_arquivo))
-
-                print(f'Foto do cliente {id_usuario} salva em {nome_arquivo}')
-            except Exception as e:
-                print(f'Erro ao salvar foto do cliente: {e}')
-
-        return jsonify({'mensagem': 'Perfil atualizado com sucesso'}), 200
-
-    except Exception as e:
-        con.rollback()
-        print(f'Erro ao editar perfil do cliente: {e}')
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
     finally:
         cur.close()
         con.close()

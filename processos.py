@@ -2,7 +2,10 @@ from funcao import decodificar_token, validar_numero_processo, limpar_documento,
 from main import app
 from db import conexao
 import datetime
-from flask import jsonify, request
+from io import BytesIO
+
+from fpdf import FPDF
+from flask import jsonify, request, send_file
 
 
 
@@ -894,6 +897,338 @@ def listar_processos():
             'error': str(e)
         }), 500
 
+    finally:
+        cur.close()
+        con.close()
+
+
+def _texto_pdf(valor):
+    """Keeps PDF text compatible with FPDF's built-in Helvetica font."""
+    return str(valor or '--').encode('cp1252', 'replace').decode('cp1252')
+
+
+def _data_pdf(valor):
+    return valor.strftime('%d/%m/%Y') if hasattr(valor, 'strftime') else valor
+
+
+def _valor_pdf(valor):
+    try:
+        return f'R$ {float(valor):,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
+    except (TypeError, ValueError):
+        return '--'
+
+
+class RelatorioProcessoPDF(FPDF):
+    def header(self):
+        self.set_fill_color(0, 71, 171)
+        self.rect(0, 0, 210, 20, 'F')
+        self.set_text_color(255, 255, 255)
+        self.set_font('Helvetica', 'B', 15)
+        self.set_xy(16, 6)
+        self.cell(0, 8, _texto_pdf('Constituere | Relatorio do Processo'))
+        self.set_text_color(35, 35, 35)
+        self.set_y(28)
+
+    def footer(self):
+        self.set_y(-12)
+        self.set_draw_color(220, 228, 238)
+        self.line(16, self.get_y(), 194, self.get_y())
+        self.set_y(-9)
+        self.set_font('Helvetica', '', 8)
+        self.set_text_color(100, 100, 100)
+        self.cell(0, 5, _texto_pdf(f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}'), align='C')
+
+    def secao(self, titulo):
+        self.ln(4)
+        self.set_fill_color(237, 244, 255)
+        self.set_text_color(0, 71, 171)
+        self.set_font('Helvetica', 'B', 11)
+        self.cell(0, 8, _texto_pdf(titulo), fill=True, new_x='LMARGIN', new_y='NEXT')
+        self.set_text_color(35, 35, 35)
+
+    def campo(self, rotulo, valor):
+        if valor is None or str(valor).strip() in ('', '--'):
+            return
+        largura_rotulo = 48
+        largura_valor = 130
+        self.set_fill_color(245, 248, 252)
+        self.set_draw_color(220, 228, 238)
+        self.set_text_color(0, 71, 171)
+        self.set_font('Helvetica', 'B', 9)
+        self.cell(largura_rotulo, 7, _texto_pdf(rotulo), border=1, fill=True)
+        self.set_text_color(35, 35, 35)
+        self.set_font('Helvetica', '', 9)
+        self.multi_cell(largura_valor, 7, _texto_pdf(valor), border=1, new_x='LMARGIN', new_y='NEXT', max_line_height=7)
+
+
+@app.route('/processo/<int:id_processo>/documento', methods=['GET'])
+def gerar_documento_processo(id_processo):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessario'}), 401
+
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso nao autorizado'}), 403
+
+    id_advogado = token_data['id_usuarios']
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT
+                p.NUM_PROCESSO,
+                p.TIPO_PROCESSO,
+                p.ASSUNTO,
+                p.AREA,
+                p.COMARCA,
+                p.VARA,
+                p.INSTANCIA,
+                p.DATA_INICIO,
+                p.STATUS,
+                COALESCE(NULLIF(cliente.NOME, ''), NULLIF(cliente.RAZAO_SOCIAL, ''), NULLIF(cliente.NOME_FANTASIA, ''), '--'),
+                COALESCE(NULLIF(advogado.NOME, ''), '--'),
+                cliente.NOME,
+                cliente.CPF,
+                cliente.CNPJ,
+                cliente.EMAIL,
+                cliente.TELEFONE,
+                cliente.RAZAO_SOCIAL,
+                cliente.NOME_FANTASIA,
+                cliente.RG,
+                cliente.ORGAO_EXPEDIDOR,
+                cliente.NACIONALIDADE,
+                cliente.ESTADO_CIVIL,
+                cliente.PROFISSAO,
+                cliente.CEP,
+                cliente.LOGRADOURO,
+                cliente.NUMERO,
+                cliente.COMPLEMENTO,
+                cliente.BAIRRO,
+                cliente.CIDADE,
+                cliente.ESTADO,
+                cliente.SEXO,
+                cliente.DATA_NASCIMENTO,
+                cliente.CARTERA_TRABALHO,
+                cliente.SERIE_CARTERA
+            FROM PROCESSOS p
+            INNER JOIN USUARIOS cliente
+                ON cliente.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
+            INNER JOIN USUARIOS advogado
+                ON advogado.ID_USUARIOS = p.ID_USUARIOS_ADVOGADO
+            WHERE p.ID_PROCESSOS = ?
+              AND p.ID_USUARIOS_ADVOGADO = ?
+        """, (id_processo, id_advogado))
+        processo = cur.fetchone()
+
+        if not processo:
+            return jsonify({'error': 'Processo nao encontrado'}), 404
+
+        cur.execute("""
+            SELECT "DATA", TITULO, DESCRICAO, PROCESSO_CONCLUIDO
+            FROM ATUALIZACOES
+            WHERE ID_PROCESSOS = ?
+            ORDER BY "DATA" DESC, ID_ATUALIZACOES DESC
+        """, (id_processo,))
+        atualizacoes = cur.fetchall()
+
+        cur.execute("""
+            SELECT
+                NOME, CPF, RG, ORGAO_EXPEDIDOR, NACIONALIDADE, ESTADO_CIVIL,
+                DATA_NASCIMENTO, SEXO, CARTEIRA_TRABALHO, SERIE_CARTEIRA,
+                PROFISSAO, CEP, LOGRADOURO, NUMERO, COMPLEMENTO, BAIRRO,
+                CIDADE, ESTADO, TELEFONE, EMAIL, CNPJ, RAZAO_SOCIAL,
+                NOME_FANTASIA
+            FROM PARTE_CONTRARIA
+            WHERE ID_PROCESSO = ?
+        """, (id_processo,))
+        parte_contraria = cur.fetchone()
+
+        cur.execute("""
+            SELECT
+                TIPO_HONORARIO, NUM_SALARIOS, VALOR_HONORARIO,
+                TIPO_PAGAMENTO, VALOR_ENTRADA, NUM_PARCELAS, DIA_VENCIMENTO,
+                MES_INICIO, FORM_PAGAMENTO, TIPO_EXITO, VALOR_EXITO,
+                PERCENTUAL_JUROS
+            FROM PAGAMENTOS
+            WHERE ID_PROCESSO = ?
+        """, (id_processo,))
+        pagamento = cur.fetchone()
+
+        cur.execute("""
+            SELECT
+                pex.TIPO_PAGAMENTO, pex.VALOR_SALARIO, pex.VALOR_CAUSA,
+                pex.QUANTIDADE, pex.DISTRIBUICAO, pex.VALOR_ENTRADA,
+                pex.NUM_PARCELAS, pex.DIA_VENCIMENTO, pex.MES_INICIO,
+                pex.FORMA_PAGAMENTO
+            FROM PAGAMENTO_EXITO pex
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
+            WHERE pag.ID_PROCESSO = ?
+        """, (id_processo,))
+        pagamento_exito = cur.fetchone()
+
+        cur.execute("""
+            SELECT tipo, numero, valor, vencimento, data_pagamento, status
+            FROM (
+                SELECT
+                    'Honorario' AS tipo,
+                    parc.NUMERO_PARCELA AS numero,
+                    parc.VALOR_PARCELA AS valor,
+                    parc.DATA_VENCIMENTO AS vencimento,
+                    parc.DATA_PAGAMENTO AS data_pagamento,
+                    parc.STATUS AS status
+                FROM PARCELAS parc
+                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+                WHERE pag.ID_PROCESSO = ?
+
+                UNION ALL
+
+                SELECT
+                    'Exito' AS tipo,
+                    pe.NUMERO_PARCELA AS numero,
+                    pe.VALOR_PARCELA AS valor,
+                    pe.DATA_VENCIMENTO AS vencimento,
+                    pe.DATA_PAGAMENTO AS data_pagamento,
+                    pe.STATUS AS status
+                FROM PARCELAS_EXITO pe
+                INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
+                WHERE pag.ID_PROCESSO = ?
+            ) AS parcelas_combinadas
+            ORDER BY vencimento, numero
+        """, (id_processo, id_processo))
+        parcelas = cur.fetchall()
+
+        pdf = RelatorioProcessoPDF(format='A4', unit='mm')
+        pdf.set_auto_page_break(auto=True, margin=16)
+        pdf.set_margins(16, 16, 16)
+        pdf.add_page()
+        pdf.set_title(_texto_pdf('Resumo do processo'))
+        pdf.set_author('Constituere')
+
+        pdf.set_title(_texto_pdf(f'Relatorio do processo {processo[0] or id_processo}'))
+        pdf.set_author('Constituere')
+        pdf.set_font('Helvetica', 'B', 16)
+        pdf.set_text_color(0, 71, 171)
+        pdf.cell(0, 9, _texto_pdf(f'Processo {processo[0] or "--"}'), new_x='LMARGIN', new_y='NEXT')
+        pdf.set_font('Helvetica', '', 10)
+        pdf.set_text_color(90, 90, 90)
+        pdf.cell(0, 6, _texto_pdf(f'Cliente: {processo[9]} | Status: {str(processo[8] or "--").replace("_", " ").title()}'), new_x='LMARGIN', new_y='NEXT')
+
+        pdf.secao('Dados do processo')
+        for rotulo, valor in (
+            ('Numero do processo', processo[0]), ('Tipo', processo[1]),
+            ('Assunto', processo[2]), ('Area', processo[3]), ('Comarca', processo[4]),
+            ('Vara', processo[5]), ('Instancia', f"{processo[6]}a instancia" if processo[6] else '--'),
+            ('Data de inicio', _data_pdf(processo[7])),
+            ('Status', str(processo[8] or '--').replace('_', ' ').title()),
+            ('Advogado responsavel', processo[10]),
+        ):
+            pdf.campo(rotulo, valor)
+
+        pdf.secao('Dados do cliente')
+        for rotulo, valor in (
+            ('Nome', processo[11]), ('Razao social', processo[16]),
+            ('Nome fantasia', processo[17]), ('CPF', processo[12]), ('CNPJ', processo[13]),
+            ('RG', processo[18]), ('Orgao expedidor', processo[19]),
+            ('Nacionalidade', processo[20]), ('Estado civil', processo[21]),
+            ('Profissao', processo[22]), ('Sexo', processo[30]),
+            ('Data de nascimento', _data_pdf(processo[31])),
+            ('Carteira de trabalho', processo[32]), ('Serie da carteira', processo[33]),
+            ('E-mail', processo[14]), ('Telefone', processo[15]), ('CEP', processo[23]),
+            ('Endereco', ' - '.join(str(item) for item in (processo[24], processo[25], processo[26]) if item)),
+            ('Bairro', processo[27]), ('Cidade/UF', ' - '.join(str(item) for item in (processo[28], processo[29]) if item)),
+        ):
+            pdf.campo(rotulo, valor)
+
+        pdf.secao('Parte contraria')
+        if parte_contraria:
+            for rotulo, valor in (
+                ('Nome', parte_contraria[0]), ('Razao social', parte_contraria[21]),
+                ('Nome fantasia', parte_contraria[22]), ('CPF', parte_contraria[1]),
+                ('CNPJ', parte_contraria[20]), ('RG', parte_contraria[2]),
+                ('Orgao expedidor', parte_contraria[3]), ('Nacionalidade', parte_contraria[4]),
+                ('Estado civil', parte_contraria[5]), ('Profissao', parte_contraria[10]),
+                ('Sexo', parte_contraria[7]), ('Data de nascimento', _data_pdf(parte_contraria[6])),
+                ('Carteira de trabalho', parte_contraria[8]), ('Serie da carteira', parte_contraria[9]),
+                ('E-mail', parte_contraria[19]), ('Telefone', parte_contraria[18]),
+                ('CEP', parte_contraria[11]),
+                ('Endereco', ' - '.join(str(item) for item in (parte_contraria[12], parte_contraria[13], parte_contraria[14]) if item)),
+                ('Bairro', parte_contraria[15]), ('Cidade/UF', ' - '.join(str(item) for item in (parte_contraria[16], parte_contraria[17]) if item)),
+            ):
+                pdf.campo(rotulo, valor)
+        else:
+            pdf.campo('Informacao', 'Nenhuma parte contraria cadastrada.')
+
+        pdf.secao('Honorarios e pagamentos')
+        if pagamento:
+            for rotulo, valor in (
+                ('Tipo de honorario', pagamento[0]), ('Quantidade de salarios', pagamento[1]),
+                ('Valor do honorario', _valor_pdf(pagamento[2])), ('Tipo de pagamento', pagamento[3]),
+                ('Valor de entrada', _valor_pdf(pagamento[4])), ('Numero de parcelas', pagamento[5]),
+                ('Dia de vencimento', pagamento[6]), ('Mes de inicio', pagamento[7]),
+                ('Forma de pagamento', pagamento[8]), ('Tipo de exito', pagamento[9]),
+                ('Valor de exito', pagamento[10]), ('Percentual de juros', pagamento[11]),
+            ):
+                pdf.campo(rotulo, valor)
+        else:
+            pdf.campo('Informacao', 'Nenhum pagamento cadastrado.')
+
+        if pagamento_exito:
+            pdf.secao('Honorarios de exito')
+            for rotulo, valor in (
+                ('Tipo', pagamento_exito[0]), ('Valor do salario', _valor_pdf(pagamento_exito[1])),
+                ('Valor da causa', _valor_pdf(pagamento_exito[2])), ('Quantidade', pagamento_exito[3]),
+                ('Distribuicao', pagamento_exito[4]), ('Valor de entrada', _valor_pdf(pagamento_exito[5])),
+                ('Numero de parcelas', pagamento_exito[6]), ('Dia de vencimento', pagamento_exito[7]),
+                ('Mes de inicio', pagamento_exito[8]), ('Forma de pagamento', pagamento_exito[9]),
+            ):
+                pdf.campo(rotulo, valor)
+
+        pdf.secao('Parcelas')
+        if not parcelas:
+            pdf.campo('Informacao', 'Nenhuma parcela cadastrada.')
+        else:
+            for tipo, numero, valor, vencimento, data_pagamento, status in parcelas:
+                identificacao = 'Entrada' if numero == 0 else f'Parcela {numero}'
+                detalhes = (
+                    f'{tipo} | {identificacao} | {_valor_pdf(valor)} | '
+                    f'Vencimento: {_data_pdf(vencimento)} | '
+                    f'Status: {status or "--"}'
+                )
+                if data_pagamento:
+                    detalhes += f' | Pago em: {_data_pdf(data_pagamento)}'
+                pdf.campo('Parcela', detalhes)
+
+        pdf.secao('Atualizacoes')
+        if not atualizacoes:
+            pdf.campo('Informacao', 'Nenhuma atualizacao registrada.')
+        else:
+            for data, titulo, descricao, processo_concluido in atualizacoes:
+                status_atualizacao = ' | Processo concluido' if processo_concluido else ''
+                pdf.set_font('Helvetica', 'B', 10)
+                pdf.multi_cell(0, 6, _texto_pdf(f'{_data_pdf(data)} | {titulo or "--"}{status_atualizacao}'), new_x='LMARGIN', new_y='NEXT')
+                if descricao:
+                    pdf.set_font('Helvetica', '', 9)
+                    pdf.multi_cell(0, 5, _texto_pdf(descricao), new_x='LMARGIN', new_y='NEXT')
+                pdf.ln(2)
+
+        numero_seguro = ''.join(
+            caractere if caractere.isalnum() or caractere in ('-', '_') else '_'
+            for caractere in str(processo[0] or id_processo)
+        )
+        arquivo = BytesIO(bytes(pdf.output()))
+        arquivo.seek(0)
+        return send_file(
+            arquivo,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f'processo_{numero_seguro}.pdf',
+        )
+    except Exception as erro:
+        print('Erro ao gerar documento do processo:', erro)
+        return jsonify({'error': 'Erro ao gerar o PDF do processo'}), 500
     finally:
         cur.close()
         con.close()
@@ -4782,519 +5117,6 @@ def atualizar_parte_contraria(id_processo):
     except Exception as e:
         con.rollback()
         print('Erro ao atualizar parte contrária:', e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cur.close()
-        con.close()
-
-
-
-
-@app.route('/cliente/processos', methods=['GET'])
-def listar_processos_cliente():
-    token_data = decodificar_token()
-
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] not in [2, 3]:
-        return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_cliente = token_data['id_usuarios']
-
-    con = conexao()
-    cur = con.cursor()
-
-    try:
-        cur.execute(
-            "SELECT "
-            "p.ID_PROCESSOS, p.NUM_PROCESSO, p.TIPO_PROCESSO, p.ASSUNTO, "
-            "p.AREA, p.COMARCA, p.VARA, p.INSTANCIA, p.DATA_INICIO, p.STATUS, "
-            "advogado.NOME "
-            "FROM PROCESSOS p "
-            "LEFT JOIN USUARIOS advogado ON advogado.ID_USUARIOS = p.ID_USUARIOS_ADVOGADO "
-            "WHERE p.ID_USUARIOS_CLIENTE = ? "
-            "ORDER BY p.DATA_INICIO DESC, p.ID_PROCESSOS DESC",
-            (id_cliente,)
-        )
-
-        processos = []
-
-        for row in cur.fetchall():
-            data_inicio = None
-            if row[8]:
-                try:
-                    data_inicio = row[8].strftime('%d/%m/%Y')
-                except:
-                    data_inicio = str(row[8])
-
-            processos.append({
-                'id': row[0],
-                'numero': row[1] or '--',
-                'numero_processo': row[1],
-                'tipo_processo': row[2] or '--',
-                'assunto': row[3] or '--',
-                'tipo': row[4] or '--',
-                'area': row[4] or '--',
-                'comarca': row[5] or '--',
-                'vara': row[6] or '--',
-                'instancia': row[7],
-                'data_inicio': data_inicio or '--',
-                'status': row[9] or 'em_andamento',
-                'advogado_responsavel': row[10] or '--'
-            })
-
-        return jsonify({
-            'processos': processos,
-            'quantidade': len(processos)
-        }), 200
-
-    except Exception as e:
-        print('Erro ao listar processos do cliente:', e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cur.close()
-        con.close()
-
-
-@app.route('/cliente/processo/<int:id_processo>', methods=['GET'])
-def detalhes_processo_cliente(id_processo):
-    """Detalhes de um processo específico do cliente"""
-    token_data = decodificar_token()
-
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] not in [2, 3]:
-        return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_cliente = token_data['id_usuarios']
-
-    con = conexao()
-    cur = con.cursor()
-
-    try:
-        cur.execute("""
-            SELECT
-                p.ID_PROCESSOS,
-                p.NUM_PROCESSO,
-                p.TIPO_PROCESSO,
-                p.ASSUNTO,
-                p.AREA,
-                p.COMARCA,
-                p.VARA,
-                p.INSTANCIA,
-                p.DATA_INICIO,
-                p.STATUS,
-                advogado.NOME AS nome_advogado
-            FROM PROCESSOS p
-            LEFT JOIN USUARIOS advogado
-                ON advogado.ID_USUARIOS = p.ID_USUARIOS_ADVOGADO
-            WHERE p.ID_PROCESSOS = ? AND p.ID_USUARIOS_CLIENTE = ?
-        """, (id_processo, id_cliente))
-
-        row = cur.fetchone()
-
-        if not row:
-            return jsonify({'error': 'Processo não encontrado'}), 404
-
-        data_inicio = None
-        if row[8]:
-            try:
-                data_inicio = row[8].strftime('%d/%m/%Y')
-            except:
-                data_inicio = str(row[8])
-
-        cur.execute("""
-            SELECT ID_ATUALIZACOES, "DATA", TITULO, DESCRICAO, PROCESSO_CONCLUIDO
-            FROM ATUALIZACOES
-            WHERE ID_PROCESSOS = ?
-            ORDER BY "DATA" DESC, ID_ATUALIZACOES DESC
-        """, (id_processo,))
-
-        atualizacoes = []
-        for a in cur.fetchall():
-            data_at = a[1]
-            atualizacoes.append({
-                'id': a[0],
-                'data': (
-                    data_at.strftime('%d/%m/%Y %H:%M')
-                    if data_at and hasattr(data_at, 'strftime')
-                    else (str(data_at) if data_at else None)
-                ),
-                'titulo': a[2] or '--',
-                'descricao': a[3] or '',
-                'processo_concluido': bool(a[4])
-            })
-
-        return jsonify({
-            'processo': {
-                'id': row[0],
-                'numero': row[1] or '--',
-                'tipo_processo': row[2] or '--',
-                'assunto': row[3] or '--',
-                'area': row[4] or '--',
-                'comarca': row[5] or '--',
-                'vara': row[6] or '--',
-                'instancia': row[7],
-                'data_inicio': data_inicio or '--',
-                'status': row[9] or 'em_andamento',
-                'advogado_responsavel': row[10] or '--'
-            },
-            'atualizacoes': atualizacoes
-        }), 200
-
-    except Exception as e:
-        print('Erro ao buscar detalhes do processo:', e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cur.close()
-        con.close()
-
-
-@app.route('/cliente/dashboard', methods=['GET'])
-def dashboard_cliente():
-    """Retorna dados do dashboard do cliente"""
-    token_data = decodificar_token()
-
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] not in [2, 3]:
-        return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_cliente = token_data['id_usuarios']
-
-    con = conexao()
-    cur = con.cursor()
-
-    meses_pt = {
-        1: 'JAN', 2: 'FEV', 3: 'MAR', 4: 'ABR',
-        5: 'MAI', 6: 'JUN', 7: 'JUL', 8: 'AGO',
-        9: 'SET', 10: 'OUT', 11: 'NOV', 12: 'DEZ'
-    }
-
-    try:
-        # Processos ativos
-        cur.execute("""
-            SELECT COUNT(*) FROM PROCESSOS
-            WHERE ID_USUARIOS_CLIENTE = ?
-              AND UPPER(STATUS) = 'EM_ANDAMENTO'
-        """, (id_cliente,))
-        total_processos = cur.fetchone()[0] or 0
-
-        # Próximas reuniões
-        hoje = datetime.date.today()
-        cur.execute("""
-            SELECT COUNT(*) FROM AGENDAMENTOS
-            WHERE ID_USUARIOS_CLIENTE = ?
-              AND DATA >= ?
-              AND UPPER(STATUS) IN ('CONFIRMADO', 'A_CONFIRMAR')
-        """, (id_cliente, hoje))
-        total_reunioes = cur.fetchone()[0] or 0
-
-        # Próxima reunião (com nome do advogado)
-        cur.execute("""
-            SELECT FIRST 1
-                a.ASSUNTO,
-                a.DATA,
-                a.HORARIO,
-                a.STATUS,
-                adv1.NOME
-            FROM AGENDAMENTOS a
-            LEFT JOIN USUARIOS adv1 ON adv1.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1
-            WHERE a.ID_USUARIOS_CLIENTE = ?
-              AND a.DATA >= ?
-              AND UPPER(a.STATUS) IN ('CONFIRMADO', 'A_CONFIRMAR')
-            ORDER BY a.DATA ASC, a.HORARIO ASC
-        """, (id_cliente, hoje))
-
-        row = cur.fetchone()
-        proxima_reuniao = None
-
-        if row:
-            data_ag = row[1]
-            horario = row[2]
-
-            if hasattr(data_ag, 'strftime'):
-                data_fmt = data_ag.strftime('%d/%m/%Y')
-                dia = data_ag.strftime('%d')
-                mes = meses_pt.get(data_ag.month, '--')
-            else:
-                data_fmt, dia, mes = str(data_ag), '--', '--'
-
-            if isinstance(horario, datetime.time):
-                horario_fmt = horario.strftime('%H:%M')
-            else:
-                horario_fmt = str(horario)[:5] if horario else '--'
-
-            # Normalizar status
-            status_raw = (row[3] or 'a_confirmar').lower()
-            status_map = {
-                'a_confirmar': 'A confirmar',
-                'confirmado': 'Confirmada',
-                'cancelado': 'Cancelada',
-                'recusado': 'Recusada',
-                'concluido': 'Realizada',
-                'realizado': 'Realizada'
-            }
-            status_pt = status_map.get(status_raw, status_raw)
-
-            proxima_reuniao = {
-                'assunto': row[0] or '--',
-                'data_formatada': data_fmt,
-                'dia': dia,
-                'mes': mes,
-                'horario': horario_fmt,
-                'local': row[4] or 'Escritório',
-                'status': status_pt
-            }
-
-        # Pagamento pendente
-        pagamento_pendente = None
-        try:
-            cur.execute("""
-                SELECT FIRST 1
-                    parc.VALOR_PARCELA,
-                    parc.DATA_VENCIMENTO,
-                    p.TIPO_PROCESSO
-                FROM PARCELAS parc
-                INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
-                INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
-                WHERE p.ID_USUARIOS_CLIENTE = ?
-                  AND UPPER(parc.STATUS) <> 'PAGA'
-                ORDER BY parc.DATA_VENCIMENTO ASC
-            """, (id_cliente,))
-
-            row_pg = cur.fetchone()
-
-            if row_pg:
-                valor = float(row_pg[0]) if row_pg[0] else 0
-                data_venc = row_pg[1]
-
-                if hasattr(data_venc, 'strftime'):
-                    venc_fmt = data_venc.strftime('%d/%m/%Y')
-                else:
-                    venc_fmt = str(data_venc) if data_venc else '--'
-
-                pagamento_pendente = {
-                    'nome': row_pg[2] or 'Honorários',
-                    'valor': valor,
-                    'vencimento': venc_fmt
-                }
-        except Exception as e:
-            print(f"Erro ao buscar pagamento pendente: {e}")
-
-        return jsonify({
-            'processos_ativos': total_processos,
-            'proximas_reunioes': total_reunioes,
-            'proxima_reuniao': proxima_reuniao,
-            'pagamento_pendente': pagamento_pendente
-        }), 200
-
-    except Exception as e:
-        print('Erro ao buscar dashboard do cliente:', e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cur.close()
-        con.close()
-
-
-@app.route('/cliente/pagamentos', methods=['GET'])
-def listar_pagamentos_cliente():
-    """Lista pagamentos do cliente logado"""
-    token_data = decodificar_token()
-
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] not in [2, 3]:
-        return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_cliente = token_data['id_usuarios']
-
-    con = conexao()
-    cur = con.cursor()
-
-    def converter_data(valor):
-        if valor is None:
-            return None
-        if isinstance(valor, datetime.date):
-            return valor
-        if isinstance(valor, str):
-            for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
-                try:
-                    return datetime.datetime.strptime(valor, fmt).date()
-                except:
-                    continue
-            return None
-        try:
-            return datetime.date(1900, 1, 1) + datetime.timedelta(days=int(valor))
-        except:
-            return None
-
-    try:
-        hoje = datetime.date.today()
-
-        cur.execute("""
-            SELECT
-                parc.ID_PARCELAS,
-                parc.NUMERO_PARCELA,
-                parc.VALOR_PARCELA,
-                parc.DATA_VENCIMENTO,
-                parc.DATA_PAGAMENTO,
-                parc.STATUS,
-                pag.FORM_PAGAMENTO,
-                p.TIPO_PROCESSO
-            FROM PARCELAS parc
-            INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
-            INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
-            WHERE p.ID_USUARIOS_CLIENTE = ?
-            ORDER BY parc.DATA_VENCIMENTO ASC
-        """, (id_cliente,))
-
-        pagamentos = []
-
-        for row in cur.fetchall():
-            valor = float(row[2]) if row[2] else 0
-            venc = converter_data(row[3])
-            pgto = converter_data(row[4])
-            status_db = (row[5] or '').upper()
-            forma = row[6] or '--'
-            tipo_processo = row[7] or 'Processo'
-            numero_parcela = row[1]
-
-            if numero_parcela == 0:
-                nome = f"{tipo_processo} - Entrada"
-            else:
-                nome = f"{tipo_processo} - {numero_parcela}ª parcela"
-
-            if status_db == 'PAGA':
-                status_pt = 'Paga'
-            elif venc and venc < hoje:
-                status_pt = 'Atrasada'
-            else:
-                status_pt = 'A pagar'
-
-            pagamentos.append({
-                'id': row[0],
-                'nome': nome,
-                'valor': valor,
-                'status': status_pt,
-                'pagamento': forma,
-                'vencimento': venc.strftime('%d/%m/%Y') if venc else '--',
-                'data_pagamento': pgto.strftime('%d/%m/%Y') if pgto else None
-            })
-
-        return jsonify({
-            'pagamentos': pagamentos,
-            'quantidade': len(pagamentos)
-        }), 200
-
-    except Exception as e:
-        print('Erro ao listar pagamentos do cliente:', e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cur.close()
-        con.close()
-
-
-
-@app.route('/cliente/processo/<int:id_processo>', methods=['GET'])
-def detalhes_processo_cliente(id_processo):
-    token_data = decodificar_token()
-
-    if token_data == False:
-        return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] not in [2, 3]:
-        return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_cliente = token_data['id_usuarios']
-
-    con = conexao()
-    cur = con.cursor()
-
-    try:
-        cur.execute(
-            "SELECT "
-            "p.ID_PROCESSOS, p.NUM_PROCESSO, p.TIPO_PROCESSO, p.ASSUNTO, "
-            "p.AREA, p.COMARCA, p.VARA, p.INSTANCIA, p.DATA_INICIO, p.STATUS, "
-            "advogado.NOME "
-            "FROM PROCESSOS p "
-            "LEFT JOIN USUARIOS advogado ON advogado.ID_USUARIOS = p.ID_USUARIOS_ADVOGADO "
-            "WHERE p.ID_PROCESSOS = ? AND p.ID_USUARIOS_CLIENTE = ?",
-            (id_processo, id_cliente)
-        )
-
-        row = cur.fetchone()
-
-        if not row:
-            return jsonify({'error': 'Processo não encontrado'}), 404
-
-        data_inicio = None
-        if row[8]:
-            try:
-                data_inicio = row[8].strftime('%d/%m/%Y')
-            except:
-                data_inicio = str(row[8])
-
-        cur.execute(
-            "SELECT ID_ATUALIZACOES, \"DATA\", TITULO, DESCRICAO, PROCESSO_CONCLUIDO "
-            "FROM ATUALIZACOES WHERE ID_PROCESSOS = ? "
-            "ORDER BY \"DATA\" DESC, ID_ATUALIZACOES DESC",
-            (id_processo,)
-        )
-
-        atualizacoes = []
-
-        for a in cur.fetchall():
-            data_at = a[1]
-
-            if data_at and hasattr(data_at, 'strftime'):
-                data_fmt = data_at.strftime('%d/%m/%Y %H:%M')
-            elif data_at:
-                data_fmt = str(data_at)
-            else:
-                data_fmt = None
-
-            atualizacoes.append({
-                'id': a[0],
-                'data': data_fmt,
-                'titulo': a[2] or '--',
-                'descricao': a[3] or '',
-                'processo_concluido': bool(a[4])
-            })
-
-        return jsonify({
-            'processo': {
-                'id': row[0],
-                'numero': row[1] or '--',
-                'tipo_processo': row[2] or '--',
-                'assunto': row[3] or '--',
-                'area': row[4] or '--',
-                'comarca': row[5] or '--',
-                'vara': row[6] or '--',
-                'instancia': row[7],
-                'data_inicio': data_inicio or '--',
-                'status': row[9] or 'em_andamento',
-                'advogado_responsavel': row[10] or '--'
-            },
-            'atualizacoes': atualizacoes
-        }), 200
-
-    except Exception as e:
-        print('Erro ao buscar detalhes do processo:', e)
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
