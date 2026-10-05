@@ -3,9 +3,11 @@
 import json
 import os
 import socket
+import unicodedata
 from datetime import date, datetime, time
 
 import fdb
+from fpdf import FPDF
 from flask import current_app, g, request
 
 from db import conexao
@@ -271,7 +273,7 @@ def registrar_requisicao(token_data):
             con.close()
 
 
-def listar_logs(id_escritorio, limite=200):
+def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advogado=None):
     con = conexao_log()
     cur = con.cursor()
     try:
@@ -304,7 +306,53 @@ def listar_logs(id_escritorio, limite=200):
                 'data_hora': linha[10].isoformat() if linha[10] else None,
                 'maquina': linha[11], 'ip_origem': linha[12],
             })
+        if data_inicio:
+            resultado = [log for log in resultado if (log['data_hora'] or '')[:10] >= data_inicio]
+        if data_fim:
+            resultado = [log for log in resultado if (log['data_hora'] or '')[:10] <= data_fim]
+        if advogado:
+            resultado = [log for log in resultado if log['nome_usuario'] == advogado]
         return resultado
     finally:
         cur.close()
         con.close()
+
+
+def gerar_pdf_logs(logs, titulo='Log do escritorio'):
+    def texto(valor, tamanho=32):
+        valor = '-' if valor in (None, '') else str(valor)
+        valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
+        return valor if len(valor) <= tamanho else f'{valor[:tamanho - 3]}...'
+
+    pdf = FPDF(orientation='L', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font('Helvetica', 'B', 16)
+    pdf.cell(0, 10, texto(titulo, 90), new_x='LMARGIN', new_y='NEXT')
+    pdf.set_font('Helvetica', '', 9)
+    pdf.cell(0, 6, f'Registros encontrados: {len(logs)}', new_x='LMARGIN', new_y='NEXT')
+    pdf.ln(3)
+
+    colunas = [
+        ('Nome', 28), ('Acao', 18), ('Data', 21), ('Hora', 14), ('Tabela', 30),
+        ('Campo', 25), ('Antigo', 33), ('Novo', 33), ('Maquina', 32)
+    ]
+    pdf.set_fill_color(237, 243, 252)
+    pdf.set_font('Helvetica', 'B', 7)
+    for nome, largura in colunas:
+        pdf.cell(largura, 8, nome, border=1, fill=True)
+    pdf.ln()
+
+    pdf.set_font('Helvetica', '', 6.5)
+    for log in logs:
+        data_hora = log.get('data_hora') or ''
+        valores = [
+            texto(log.get('nome_usuario'), 20), texto(log.get('acao'), 14), texto(data_hora[8:10] + '/' + data_hora[5:7] + '/' + data_hora[:4] if len(data_hora) >= 10 else '-', 12),
+            texto(data_hora[11:16] if len(data_hora) >= 16 else '-', 8), texto(log.get('tabela_afetada'), 22),
+            texto(log.get('campo'), 18), texto(log.get('valor_antigo'), 24), texto(log.get('valor_novo'), 24), texto(log.get('maquina'), 22)
+        ]
+        for (_, largura), valor in zip(colunas, valores):
+            pdf.cell(largura, 7, valor, border=1)
+        pdf.ln()
+
+    return bytes(pdf.output())

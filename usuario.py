@@ -1,15 +1,16 @@
-from flask import jsonify, request, make_response
+from flask import jsonify, request, make_response, send_file
 from funcao import *
 from flask_bcrypt import generate_password_hash, check_password_hash
 from main import app, socketio
 from db import conexao
 import os
 import datetime
+from io import BytesIO
 import concurrent.futures
 import time
 from consulta_cnsa import consultar_cnsa
 from consulta_oab import consultar_oab
-from log_auditoria import listar_logs
+from log_auditoria import gerar_pdf_logs, listar_logs
 
 
 @app.route('/escritorio/<int:id_escritorio>/logs', methods=['GET'])
@@ -47,9 +48,53 @@ def listar_logs_escritorio(id_escritorio):
         return jsonify({'error': 'Limite inválido'}), 400
 
     try:
-        return jsonify({'logs': listar_logs(id_escritorio, limite)})
+        return jsonify({'logs': listar_logs(
+            id_escritorio, limite,
+            request.args.get('data_inicio'), request.args.get('data_fim'),
+            request.args.get('advogado')
+        )})
     except Exception as erro:
         return jsonify({'error': f'Não foi possível consultar os logs: {erro}'}), 500
+
+
+@app.route('/escritorio/<int:id_escritorio>/logs/pdf', methods=['GET'])
+def gerar_pdf_logs_escritorio(id_escritorio):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessario'}), 401
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso nao autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT 1 FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
+              AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
+            """,
+            (token_data['id_usuarios'], id_escritorio)
+        )
+        if not cur.fetchone():
+            return jsonify({'error': 'Apenas o proprietario pode baixar o Log'}), 403
+    finally:
+        cur.close()
+        con.close()
+
+    try:
+        logs = listar_logs(
+            id_escritorio, 500,
+            request.args.get('data_inicio'), request.args.get('data_fim'),
+            request.args.get('advogado')
+        )
+        return send_file(
+            BytesIO(gerar_pdf_logs(logs, 'Log do escritorio')),
+            mimetype='application/pdf', as_attachment=True,
+            download_name='log-escritorio.pdf'
+        )
+    except Exception as erro:
+        return jsonify({'error': f'Nao foi possivel gerar o PDF do Log: {erro}'}), 500
 
 
 @app.route('/criar_usuarios', methods=['POST'])
@@ -2219,7 +2264,7 @@ def editar_escritorio():
         cur.execute("""
             SELECT ID_ESCRITORIOS
             FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ? AND STATUS = 'PROPRIETARIO'
+            WHERE ID_USUARIOS = ? AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
         """, (id_usuario,))
         escritorio = cur.fetchone()
         if not escritorio:
