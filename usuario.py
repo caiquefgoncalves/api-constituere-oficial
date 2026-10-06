@@ -10,8 +10,7 @@ import concurrent.futures
 import time
 from consulta_cnsa import consultar_cnsa
 from consulta_oab import consultar_oab
-from log_auditoria import excluir_log, gerar_pdf_logs, listar_logs
-
+from log_auditoria import gerar_pdf_logs, listar_logs
 
 @app.route('/escritorio/<int:id_escritorio>/logs', methods=['GET'])
 def listar_logs_escritorio(id_escritorio):
@@ -48,11 +47,26 @@ def listar_logs_escritorio(id_escritorio):
         return jsonify({'error': 'Limite inválido'}), 400
 
     try:
-        return jsonify({'logs': listar_logs(
-            id_escritorio, limite,
-            request.args.get('data_inicio'), request.args.get('data_fim'),
-            request.args.get('advogado')
-        )})
+        pagina = max(int(request.args.get('page', 1)), 1)
+    except ValueError:
+        pagina = 1
+
+    try:
+        por_pagina = max(int(request.args.get('por_pagina', 6)), 1)
+    except ValueError:
+        por_pagina = 6
+
+    try:
+        resultado = listar_logs(
+            id_escritorio,
+            limite=limite,
+            data_inicio=request.args.get('data_inicio'),
+            data_fim=request.args.get('data_fim'),
+            advogado=request.args.get('advogado'),
+            pagina=pagina,
+            por_pagina=por_pagina,
+        )
+        return jsonify(resultado), 200
     except Exception as erro:
         return jsonify({'error': f'Não foi possível consultar os logs: {erro}'}), 500
 

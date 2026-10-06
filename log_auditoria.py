@@ -1,6 +1,5 @@
-"""Registro e consulta da trilha de auditoria em um banco Firebird separado."""
-
 import json
+import math
 import os
 import socket
 import unicodedata
@@ -16,14 +15,35 @@ from db import conexao
 _CAMPOS_SIGILOSOS = {'senha', 'confirmar_senha', 'token', 'authorization', 'acess_token'}
 _ROTAS_CONVERSA_IA = {'/ai/veritas'}
 
+_ARTIGOS = {
+    'AGENDAMENTOS': ('um', 'agendamento'),
+    'PROCESSOS': ('um', 'processo'),
+    'USUARIOS': ('um', 'cliente'),
+    'ADVOGADO_ESCRITORIO': ('um', 'advogado do escritório'),
+    'ESCRITORIOS': ('um', 'escritório'),
+    'SISTEMA': ('uma', 'ação no sistema'),
+}
+
+_ACOES_HUMANAS = {
+    'CRIAR': 'criou',
+    'EDITAR': 'editou',
+    'EXCLUIR': 'removeu',
+    'CONFIRMAR': 'confirmou',
+    'RECUSAR': 'recusou',
+    'CANCELAR': 'cancelou',
+    'CONCLUIR': 'concluiu',
+    'INATIVAR': 'inativou',
+    'ATIVAR': 'ativou',
+    'GERAR_PDF': 'gerou o PDF de',
+    'LOGIN': 'entrou no sistema',
+}
+
 
 def _eh_conversa_ia():
-    """A conversa e somente leitura e nao deve entrar no Log."""
     return request.path.rstrip('/').lower() in _ROTAS_CONVERSA_IA
 
 
 def _eh_rota_log():
-    """Operações no próprio Log não devem gerar um novo registro de auditoria."""
     return '/logs/' in request.path.rstrip('/').lower()
 
 
@@ -34,8 +54,6 @@ def conexao_log():
         'password': current_app.config['LOG_DB_PASSWORD'],
     }
 
-    # A auditoria possui uma configuração própria para não herdar uma DLL de
-    # arquitetura incompatível usada por outra conexão do sistema.
     cliente_firebird = os.getenv('LOG_FIREBIRD_CLIENT_DLL')
     if cliente_firebird:
         parametros['fb_library_name'] = cliente_firebird
@@ -174,7 +192,6 @@ def _id_registro(view_args):
 
 
 def _alvo_snapshot():
-    """Retorna a tabela e a condição do registro alterado pela rota atual."""
     argumentos = request.view_args or {}
     caminho = request.path.lower()
     if 'id_agendamento' in argumentos:
@@ -217,7 +234,6 @@ def _buscar_snapshot(alvo):
 
 
 def preparar_requisicao(token_data):
-    """Guarda o estado anterior para que UPDATEs tenham antigo e novo no Log."""
     if _eh_conversa_ia() or _eh_rota_log():
         return
     g.auditoria_token = token_data or {}
@@ -252,7 +268,6 @@ def _alteracoes_registradas():
 
 
 def registrar_requisicao(token_data):
-    """Grava uma ação concluída. Falhas no log não alteram a resposta da API."""
     if request.path.startswith('/logs') or _eh_conversa_ia() or _eh_rota_log():
         return
 
@@ -304,7 +319,91 @@ def registrar_requisicao(token_data):
             con.close()
 
 
-def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advogado=None):
+def _texto_blob(valor):
+    if valor is None:
+        return None
+    return valor.read() if hasattr(valor, 'read') else str(valor)
+
+
+def _buscar_cargo_advogado(id_usuario, id_escritorio):
+    if not id_usuario or not id_escritorio:
+        return None
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT STATUS
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
+            """,
+            (id_usuario, id_escritorio)
+        )
+        linha = cur.fetchone()
+        return linha[0] if linha else None
+    finally:
+        cur.close()
+        con.close()
+
+
+def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo):
+    nome = nome or 'O sistema'
+    acao_txt = _ACOES_HUMANAS.get((acao or '').upper(), f'{(acao or "").lower()}')
+
+    if acao == 'LOGIN':
+        return f'{nome} entrou no sistema.'
+
+    if tabela not in _ARTIGOS:
+        sufixo = f' #{id_registro}' if id_registro else ''
+        return f'{nome} {acao_txt} {tabela or "um registro"}{sufixo}.'
+
+    artigo, substantivo = _ARTIGOS[tabela]
+    alvo = f'{artigo} {substantivo}'
+    if id_registro:
+        alvo += f' #{id_registro}'
+
+    if acao == 'GERAR_PDF':
+        return f'{nome} {acao_txt} {alvo}.'
+
+    if acao == 'EDITAR' and campo and campo.upper() != 'REGISTRO':
+        campo_legivel = campo.replace('_', ' ').lower()
+        return f'{nome} {acao_txt} {alvo} (alterou o campo {campo_legivel}).'
+
+    return f'{nome} {acao_txt} {alvo}.'
+
+
+def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advogado=None,
+                pagina=1, por_pagina=6):
+    """
+    Retorna os logs do escritório já paginados.
+
+    Parâmetros:
+        id_escritorio: ID do escritório
+        limite: teto máximo de registros buscados no banco (para evitar consultas gigantes)
+        data_inicio, data_fim, advogado: filtros opcionais aplicados em Python
+        pagina: número da página (1-based)
+        por_pagina: itens por página (default 6)
+
+    Retorno:
+        dict com chaves:
+            'logs': lista paginada
+            'pagina': número da página atual
+            'por_pagina': itens por página
+            'total': total de registros após filtros
+            'total_paginas': total de páginas
+            'tem_mais': bool indicando se existe próxima página
+    """
+    try:
+        pagina = max(1, int(pagina))
+    except (TypeError, ValueError):
+        pagina = 1
+
+    try:
+        por_pagina = max(1, int(por_pagina))
+    except (TypeError, ValueError):
+        por_pagina = 6
+
     con = conexao_log()
     cur = con.cursor()
     try:
@@ -320,49 +419,62 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
             """,
             (limite, id_escritorio)
         )
-        def texto_blob(valor):
-            if valor is None:
-                return None
-            return valor.read() if hasattr(valor, 'read') else str(valor)
 
-        resultado = []
+        todos = []
         for linha in cur.fetchall():
-            resultado.append({
-                'id_log': linha[0], 'id_usuario': linha[1], 'nome_usuario': linha[2],
-                'acao': linha[3], 'tabela_afetada': linha[4],
-                'id_registro_afetado': linha[5], 'campo': linha[6],
-                'valor_antigo': texto_blob(linha[7]),
-                'valor_novo': texto_blob(linha[8]),
-                'detalhes': texto_blob(linha[9]),
+            nome_usuario = linha[2]
+            acao = linha[3]
+            tabela_afetada = linha[4]
+            id_registro_afetado = linha[5]
+            campo = linha[6]
+            valor_novo = _texto_blob(linha[8])
+
+            todos.append({
+                'id_log': linha[0],
+                'id_usuario': linha[1],
+                'nome_usuario': nome_usuario,
+                'acao': acao,
+                'tabela_afetada': tabela_afetada,
+                'id_registro_afetado': id_registro_afetado,
+                'campo': campo,
+                'valor_antigo': _texto_blob(linha[7]),
+                'valor_novo': valor_novo,
+                'detalhes': _texto_blob(linha[9]),
                 'data_hora': linha[10].isoformat() if linha[10] else None,
-                'maquina': linha[11], 'ip_origem': linha[12],
+                'maquina': linha[11],
+                'ip_origem': linha[12],
+                'cargo': _buscar_cargo_advogado(linha[1], id_escritorio),
+                'descricao_humana': _descricao_humana(
+                    nome_usuario, acao, tabela_afetada,
+                    id_registro_afetado, campo, valor_novo
+                ),
             })
+
         if data_inicio:
-            resultado = [log for log in resultado if (log['data_hora'] or '')[:10] >= data_inicio]
+            todos = [log for log in todos if (log['data_hora'] or '')[:10] >= data_inicio]
         if data_fim:
-            resultado = [log for log in resultado if (log['data_hora'] or '')[:10] <= data_fim]
+            todos = [log for log in todos if (log['data_hora'] or '')[:10] <= data_fim]
         if advogado:
-            resultado = [log for log in resultado if log['nome_usuario'] == advogado]
-        return resultado
-    finally:
-        cur.close()
-        con.close()
+            todos = [log for log in todos if log['nome_usuario'] == advogado]
 
+        total = len(todos)
+        total_paginas = max(1, math.ceil(total / por_pagina)) if total > 0 else 1
 
-def excluir_log(id_escritorio, id_log):
-    """Exclui um registro somente quando ele pertence ao escritório informado."""
-    con = conexao_log()
-    cur = con.cursor()
-    try:
-        cur.execute(
-            'DELETE FROM LOG_AUDITORIA WHERE ID_LOG = ? AND ID_ESCRITORIO = ?',
-            (id_log, id_escritorio),
-        )
-        if cur.rowcount != 1:
-            con.rollback()
-            return False
-        con.commit()
-        return True
+        if pagina > total_paginas:
+            pagina = total_paginas
+
+        inicio = (pagina - 1) * por_pagina
+        fim = inicio + por_pagina
+        logs_paginados = todos[inicio:fim]
+
+        return {
+            'logs': logs_paginados,
+            'pagina': pagina,
+            'por_pagina': por_pagina,
+            'total': total,
+            'total_paginas': total_paginas,
+            'tem_mais': pagina < total_paginas,
+        }
     finally:
         cur.close()
         con.close()
@@ -377,7 +489,6 @@ def _texto_pdf_log(valor, tamanho=None):
 
 
 class RelatorioLogPDF(FPDF):
-    """Mantém a identidade visual usada nos relatórios do Constituere."""
     def header(self):
         self.set_fill_color(0, 71, 171)
         self.rect(0, 0, 297, 20, 'F')
@@ -421,9 +532,8 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
     pdf.ln(5)
 
     colunas = [
-        ('Nome', 28, 20), ('Acao', 20, 14), ('Data', 20, 12), ('Hora', 15, 8),
-        ('Tabela', 31, 22), ('Campo', 27, 18), ('Valor antigo', 39, 27),
-        ('Valor novo', 39, 27), ('Maquina', 30, 20)
+        ('Nome', 30, 22), ('Acao', 22, 16), ('Data', 20, 12), ('Hora', 15, 8),
+        ('Descricao', 120, 100), ('Maquina', 30, 20)
     ]
 
     def cabecalho_tabela():
@@ -446,7 +556,14 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
         data_hora = log.get('data_hora') or ''
         data = f'{data_hora[8:10]}/{data_hora[5:7]}/{data_hora[:4]}' if len(data_hora) >= 10 else '-'
         hora = data_hora[11:16] if len(data_hora) >= 16 else '-'
-        valores = [log.get('nome_usuario'), log.get('acao'), data, hora, log.get('tabela_afetada'), log.get('campo'), log.get('valor_antigo'), log.get('valor_novo'), log.get('maquina')]
+        valores = [
+            log.get('nome_usuario'),
+            log.get('acao'),
+            data,
+            hora,
+            log.get('descricao_humana'),
+            log.get('maquina'),
+        ]
         if indice % 2:
             pdf.set_fill_color(250, 252, 255)
         else:

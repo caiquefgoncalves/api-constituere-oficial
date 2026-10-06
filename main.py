@@ -51,8 +51,6 @@ socketio = SocketIO(
     app,
     cors_allowed_origins="*",
     async_mode="threading",
-    # O servidor WSGI atual atende o Socket.IO por long-polling.
-    # Impede tentativas de upgrade WebSocket que geravam ConnectionError.
     transports=["polling"]
 )
 
@@ -191,6 +189,7 @@ from processos import *
 from agendamentos import *
 from documentos import *
 from veritas_ai import *
+from financeiro import *
 
 
 if __name__ == '__main__':
