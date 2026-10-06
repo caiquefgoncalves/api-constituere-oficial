@@ -50,7 +50,10 @@ CORS(
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
-    async_mode="threading"
+    async_mode="threading",
+    # O servidor WSGI atual atende o Socket.IO por long-polling.
+    # Impede tentativas de upgrade WebSocket que geravam ConnectionError.
+    transports=["polling"]
 )
 
 
@@ -186,6 +189,7 @@ def sair_usuario(data):
 from usuario import *
 from processos import *
 from agendamentos import *
+from documentos import *
 from veritas_ai import *
 
 

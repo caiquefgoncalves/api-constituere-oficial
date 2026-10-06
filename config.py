@@ -31,7 +31,11 @@ DEBUG = True
 
 
 DB_HOST = 'localhost'
-DB_NAME = r'C:\Users\Aluno\Downloads\api-constituere-oficial-main (1)\api-constituere-oficial-main\BANCO_CONSTITUERE.FDB'
+DB_NAME = str(
+    Path(__file__).with_name(
+        'BANCO_CONSTITUERE.FDB'
+    )
+)
 DB_USER = 'sysdba'
 DB_PASSWORD = 'sysdba'
 

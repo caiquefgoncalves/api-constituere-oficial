@@ -14,6 +14,17 @@ from db import conexao
 
 
 _CAMPOS_SIGILOSOS = {'senha', 'confirmar_senha', 'token', 'authorization', 'acess_token'}
+_ROTAS_CONVERSA_IA = {'/ai/veritas'}
+
+
+def _eh_conversa_ia():
+    """A conversa e somente leitura e nao deve entrar no Log."""
+    return request.path.rstrip('/').lower() in _ROTAS_CONVERSA_IA
+
+
+def _eh_rota_log():
+    """Operações no próprio Log não devem gerar um novo registro de auditoria."""
+    return '/logs/' in request.path.rstrip('/').lower()
 
 
 def conexao_log():
@@ -75,6 +86,24 @@ def _identificar_escritorio(id_usuario, dados, view_args):
             FROM ADVOGADO_ESCRITORIO
             WHERE ID_USUARIOS = ? AND ATIVO = 1
             ORDER BY CASE WHEN STATUS = 'PROPRIETARIO' THEN 0 ELSE 1 END
+            """,
+            (id_usuario,)
+        )
+        linha = cur.fetchone()
+        if linha:
+            return linha[0]
+
+        cur.execute(
+            """
+            SELECT FIRST 1 vinculo.ID_ESCRITORIOS
+            FROM USUARIOS cliente
+            INNER JOIN ADVOGADO_ESCRITORIO vinculo
+                ON vinculo.ID_USUARIOS = cliente.ID_USUARIO_RESPONSAVEL
+            WHERE cliente.ID_USUARIOS = ?
+              AND cliente.TIPO IN (2, 3)
+              AND cliente.ATIVO = 1
+              AND vinculo.ATIVO = 1
+            ORDER BY CASE WHEN vinculo.STATUS = 'PROPRIETARIO' THEN 0 ELSE 1 END
             """,
             (id_usuario,)
         )
@@ -189,6 +218,8 @@ def _buscar_snapshot(alvo):
 
 def preparar_requisicao(token_data):
     """Guarda o estado anterior para que UPDATEs tenham antigo e novo no Log."""
+    if _eh_conversa_ia() or _eh_rota_log():
+        return
     g.auditoria_token = token_data or {}
     if request.method not in {'PUT', 'PATCH', 'DELETE'}:
         return
@@ -222,7 +253,7 @@ def _alteracoes_registradas():
 
 def registrar_requisicao(token_data):
     """Grava uma ação concluída. Falhas no log não alteram a resposta da API."""
-    if request.path.startswith('/logs'):
+    if request.path.startswith('/logs') or _eh_conversa_ia() or _eh_rota_log():
         return
 
     dados = _dados_requisicao()
@@ -318,41 +349,110 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
         con.close()
 
 
-def gerar_pdf_logs(logs, titulo='Log do escritorio'):
-    def texto(valor, tamanho=32):
-        valor = '-' if valor in (None, '') else str(valor)
-        valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
-        return valor if len(valor) <= tamanho else f'{valor[:tamanho - 3]}...'
+def excluir_log(id_escritorio, id_log):
+    """Exclui um registro somente quando ele pertence ao escritório informado."""
+    con = conexao_log()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            'DELETE FROM LOG_AUDITORIA WHERE ID_LOG = ? AND ID_ESCRITORIO = ?',
+            (id_log, id_escritorio),
+        )
+        if cur.rowcount != 1:
+            con.rollback()
+            return False
+        con.commit()
+        return True
+    finally:
+        cur.close()
+        con.close()
 
-    pdf = FPDF(orientation='L', unit='mm', format='A4')
-    pdf.set_auto_page_break(auto=True, margin=15)
+
+def _texto_pdf_log(valor, tamanho=None):
+    texto = '-' if valor in (None, '') else str(valor)
+    texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('ascii')
+    if tamanho and len(texto) > tamanho:
+        return f'{texto[:tamanho - 3]}...'
+    return texto
+
+
+class RelatorioLogPDF(FPDF):
+    """Mantém a identidade visual usada nos relatórios do Constituere."""
+    def header(self):
+        self.set_fill_color(0, 71, 171)
+        self.rect(0, 0, 297, 20, 'F')
+        self.set_text_color(255, 255, 255)
+        self.set_font('Helvetica', 'B', 15)
+        self.set_xy(16, 6)
+        self.cell(0, 8, 'Constituere | Relatorio de Log')
+        self.set_text_color(35, 35, 35)
+        self.set_y(28)
+
+    def footer(self):
+        self.set_y(-12)
+        self.set_draw_color(220, 228, 238)
+        self.line(16, self.get_y(), 281, self.get_y())
+        self.set_y(-9)
+        self.set_font('Helvetica', '', 8)
+        self.set_text_color(100, 100, 100)
+        self.cell(0, 5, f'Gerado em {datetime.now().strftime("%d/%m/%Y")} | Pagina {self.page_no()}', align='C')
+
+
+def gerar_pdf_logs(logs, titulo='Log do escritorio'):
+    pdf = RelatorioLogPDF(orientation='L', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
-    pdf.set_font('Helvetica', 'B', 16)
-    pdf.cell(0, 10, texto(titulo, 90), new_x='LMARGIN', new_y='NEXT')
-    pdf.set_font('Helvetica', '', 9)
-    pdf.cell(0, 6, f'Registros encontrados: {len(logs)}', new_x='LMARGIN', new_y='NEXT')
-    pdf.ln(3)
+
+    pdf.set_fill_color(237, 244, 255)
+    pdf.set_text_color(0, 71, 171)
+    pdf.set_font('Helvetica', 'B', 11)
+    pdf.cell(0, 8, _texto_pdf_log(titulo, 80), fill=True, new_x='LMARGIN', new_y='NEXT')
+    pdf.set_text_color(35, 35, 35)
+    pdf.ln(4)
+
+    pdf.set_fill_color(245, 248, 252)
+    pdf.set_draw_color(220, 228, 238)
+    pdf.set_font('Helvetica', 'B', 10)
+    pdf.set_text_color(0, 71, 171)
+    pdf.cell(64, 9, 'REGISTROS ENCONTRADOS', border=1, fill=True)
+    pdf.set_font('Helvetica', 'B', 14)
+    pdf.cell(35, 9, str(len(logs)), border=1, fill=True, new_x='LMARGIN', new_y='NEXT')
+    pdf.set_text_color(35, 35, 35)
+    pdf.ln(5)
 
     colunas = [
-        ('Nome', 28), ('Acao', 18), ('Data', 21), ('Hora', 14), ('Tabela', 30),
-        ('Campo', 25), ('Antigo', 33), ('Novo', 33), ('Maquina', 32)
+        ('Nome', 28, 20), ('Acao', 20, 14), ('Data', 20, 12), ('Hora', 15, 8),
+        ('Tabela', 31, 22), ('Campo', 27, 18), ('Valor antigo', 39, 27),
+        ('Valor novo', 39, 27), ('Maquina', 30, 20)
     ]
-    pdf.set_fill_color(237, 243, 252)
-    pdf.set_font('Helvetica', 'B', 7)
-    for nome, largura in colunas:
-        pdf.cell(largura, 8, nome, border=1, fill=True)
-    pdf.ln()
 
+    def cabecalho_tabela():
+        pdf.set_fill_color(237, 244, 255)
+        pdf.set_draw_color(220, 228, 238)
+        pdf.set_text_color(0, 71, 171)
+        pdf.set_font('Helvetica', 'B', 7)
+        for nome, largura, _ in colunas:
+            pdf.cell(largura, 8, nome, border=1, fill=True)
+        pdf.ln()
+        pdf.set_text_color(35, 35, 35)
+
+    cabecalho_tabela()
     pdf.set_font('Helvetica', '', 6.5)
-    for log in logs:
+    for indice, log in enumerate(logs):
+        if pdf.get_y() + 8 > 190:
+            pdf.add_page()
+            cabecalho_tabela()
+            pdf.set_font('Helvetica', '', 6.5)
         data_hora = log.get('data_hora') or ''
-        valores = [
-            texto(log.get('nome_usuario'), 20), texto(log.get('acao'), 14), texto(data_hora[8:10] + '/' + data_hora[5:7] + '/' + data_hora[:4] if len(data_hora) >= 10 else '-', 12),
-            texto(data_hora[11:16] if len(data_hora) >= 16 else '-', 8), texto(log.get('tabela_afetada'), 22),
-            texto(log.get('campo'), 18), texto(log.get('valor_antigo'), 24), texto(log.get('valor_novo'), 24), texto(log.get('maquina'), 22)
-        ]
-        for (_, largura), valor in zip(colunas, valores):
-            pdf.cell(largura, 7, valor, border=1)
+        data = f'{data_hora[8:10]}/{data_hora[5:7]}/{data_hora[:4]}' if len(data_hora) >= 10 else '-'
+        hora = data_hora[11:16] if len(data_hora) >= 16 else '-'
+        valores = [log.get('nome_usuario'), log.get('acao'), data, hora, log.get('tabela_afetada'), log.get('campo'), log.get('valor_antigo'), log.get('valor_novo'), log.get('maquina')]
+        if indice % 2:
+            pdf.set_fill_color(250, 252, 255)
+        else:
+            pdf.set_fill_color(255, 255, 255)
+        for (_, largura, limite), valor in zip(colunas, valores):
+            pdf.cell(largura, 7, _texto_pdf_log(valor, limite), border=1, fill=True)
         pdf.ln()
 
     return bytes(pdf.output())

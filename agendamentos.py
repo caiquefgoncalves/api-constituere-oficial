@@ -499,6 +499,142 @@ def cadastrar_agendamento():
         con.close()
 
 
+@app.route('/agendamentos/solicitar', methods=['POST'])
+def solicitar_agendamento_cliente():
+    """Creates a client's meeting request with an attorney from its own office."""
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessÃ¡rio'}), 401
+
+    if token_data['tipo'] not in (2, 3):
+        return jsonify({'error': 'Acesso nÃ£o autorizado'}), 403
+
+    dados = request.get_json() or {}
+    id_cliente = token_data['id_usuarios']
+    id_advogado = dados.get('id_advogado')
+    assunto = (dados.get('assunto') or '').strip()
+    data_agendamento = converter_data(dados.get('data'))
+    horario_obj = converter_horario(dados.get('horario'))
+    duracao_min = converter_duracao(dados.get('duracao'))
+
+    if not id_advogado or not assunto or not data_agendamento or not horario_obj or not duracao_min:
+        return jsonify({'error': 'Informe advogado, assunto, data, horÃ¡rio e duraÃ§Ã£o.'}), 400
+    if data_agendamento < datetime.date.today() or duracao_min <= 0 or duracao_min > 480:
+        return jsonify({'error': 'Data ou duraÃ§Ã£o invÃ¡lida para o agendamento.'}), 400
+
+    horario_min = horario_obj.hour * 60 + horario_obj.minute
+    horario_final_min = horario_min + duracao_min
+    if (
+        horario_min < 8 * 60 or horario_min >= 18 * 60
+        or horario_final_min > 18 * 60
+        or 12 * 60 <= horario_min < 13 * 60
+        or (horario_min < 12 * 60 and horario_final_min > 12 * 60)
+    ):
+        return jsonify({'error': 'Escolha um horÃ¡rio entre 08:00 e 18:00, fora do intervalo de almoÃ§o.'}), 400
+
+    try:
+        id_advogado = int(id_advogado)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Advogado invÃ¡lido.'}), 400
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT COALESCE(NULLIF(NOME, ''), RAZAO_SOCIAL, NOME_FANTASIA, '--'),
+                   ID_USUARIO_RESPONSAVEL
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ? AND TIPO IN (2, 3) AND ATIVO = 1
+            """,
+            (id_cliente,),
+        )
+        cliente = cur.fetchone()
+        if not cliente or not cliente[1]:
+            return jsonify({'error': 'Cliente sem advogado responsÃ¡vel para agendamento.'}), 403
+
+        nome_cliente, id_responsavel = cliente
+        cur.execute(
+            """
+            SELECT FIRST 1 u.NOME
+            FROM USUARIOS u
+            WHERE u.ID_USUARIOS = ? AND u.TIPO = 0 AND u.ATIVO = 1
+              AND (
+                    u.ID_USUARIOS = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM ADVOGADO_ESCRITORIO responsavel
+                        INNER JOIN ADVOGADO_ESCRITORIO advogado
+                            ON advogado.ID_ESCRITORIOS = responsavel.ID_ESCRITORIOS
+                        WHERE responsavel.ID_USUARIOS = ?
+                          AND responsavel.ATIVO = 1
+                          AND advogado.ID_USUARIOS = u.ID_USUARIOS
+                          AND advogado.ATIVO = 1
+                    )
+              )
+            """,
+            (id_advogado, id_responsavel, id_responsavel),
+        )
+        advogado = cur.fetchone()
+        if not advogado:
+            return jsonify({'error': 'Escolha um advogado do seu escritÃ³rio.'}), 403
+
+        conflito = buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min)
+        if conflito:
+            return jsonify({
+                'error': (
+                    f'O advogado jÃ¡ possui agendamento em {conflito["data"]} '
+                    f'Ã s {conflito["horario"]}. Escolha outro horÃ¡rio.'
+                )
+            }), 409
+
+        cur.execute(
+            """
+            INSERT INTO AGENDAMENTOS (
+                ID_USUARIOS_ADVOGADO_1, ID_USUARIOS_ADVOGADO_2,
+                ID_USUARIOS_CLIENTE, CLIENTE, ASSUNTO, DATA, HORARIO,
+                DURACAO, STATUS, DATA_CADASTRO, CONFIRMADO_ADVOGADO_1,
+                CONFIRMADO_ADVOGADO_2, RECUSADO_ADVOGADO_1, RECUSADO_ADVOGADO_2
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING ID_AGENDAMENTOS
+            """,
+            (
+                id_advogado, id_cliente, nome_cliente, assunto, data_agendamento,
+                horario_obj, duracao_min, 'a_confirmar', datetime.datetime.now(),
+                0, 0, 0, 0,
+            ),
+        )
+        id_agendamento = cur.fetchone()[0]
+        data_fmt = data_agendamento.strftime('%d/%m/%Y')
+        hora_fmt = horario_obj.strftime('%H:%M')
+        titulo = 'SolicitaÃ§Ã£o de agendamento'
+        mensagem = f'{nome_cliente} solicitou uma reuniÃ£o para {data_fmt} Ã s {hora_fmt}.'
+        cur.execute(
+            """
+            INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
+            VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO
+            """,
+            (id_advogado, 'NOVO_AGENDAMENTO', titulo, mensagem),
+        )
+        id_notificacao = cur.fetchone()[0]
+        con.commit()
+
+        socketio.emit('nova_notificacao', {
+            'id': id_notificacao, 'tipo': 'NOVO_AGENDAMENTO', 'titulo': titulo,
+            'mensagem': mensagem, 'lida': False, 'data_criacao': data_fmt,
+            'hora_criacao': hora_fmt, 'data_leitura': None,
+            'id_agendamento': id_agendamento,
+        }, room=f'usuario_{id_advogado}')
+        return jsonify({'mensagem': 'SolicitaÃ§Ã£o de agendamento enviada ao advogado.', 'id_agendamento': id_agendamento}), 201
+    except Exception as e:
+        con.rollback()
+        print('Erro ao solicitar agendamento do cliente:', e)
+        return jsonify({'error': 'NÃ£o foi possÃ­vel enviar a solicitaÃ§Ã£o de agendamento.'}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
 @app.route('/agendamentos', methods=['GET'])
 def listar_agendamentos():
     token_data = decodificar_token()
@@ -704,35 +840,115 @@ def gerar_relatorio_agendamentos():
         cur.execute(sql, tuple(parametros))
         registros = cur.fetchall()
 
-        def texto(valor, limite=36):
+        def texto(valor, limite=None):
             valor = '-' if valor in (None, '') else str(valor)
             valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
-            return valor if len(valor) <= limite else valor[:limite - 3] + '...'
+            if limite and len(valor) > limite:
+                return valor[:limite - 3] + '...'
+            return valor
 
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
+        def duracao_legivel(valor):
+            if valor in (None, ''):
+                return '-'
+            try:
+                minutos = int(valor)
+                horas, minutos_restantes = divmod(minutos, 60)
+                if horas and minutos_restantes:
+                    return f'{horas}h {minutos_restantes}min'
+                if horas:
+                    return f'{horas}h'
+                return f'{minutos}min'
+            except (TypeError, ValueError):
+                return texto(valor, 16)
+
+        class RelatorioAgendamentosPDF(FPDF):
+            def header(self):
+                self.set_fill_color(0, 71, 171)
+                self.rect(0, 0, 297, 20, 'F')
+                self.set_text_color(255, 255, 255)
+                self.set_font('Helvetica', 'B', 15)
+                self.set_xy(16, 6)
+                self.cell(0, 8, 'Constituere | Relatorio de Agendamentos')
+                self.set_text_color(35, 35, 35)
+                self.set_y(28)
+
+            def footer(self):
+                self.set_y(-12)
+                self.set_draw_color(220, 228, 238)
+                self.line(16, self.get_y(), 281, self.get_y())
+                self.set_y(-9)
+                self.set_font('Helvetica', '', 8)
+                self.set_text_color(100, 100, 100)
+                self.cell(0, 5, f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}', align='C')
+
+        pdf = RelatorioAgendamentosPDF(orientation='L', unit='mm', format='A4')
+        pdf.set_auto_page_break(auto=True, margin=18)
+        pdf.set_margins(16, 16, 16)
         pdf.add_page()
-        pdf.set_font('Helvetica', 'B', 16)
-        pdf.cell(0, 10, 'Relatorio de agendamentos', new_x='LMARGIN', new_y='NEXT')
+
         periodo = 'Todos os agendamentos'
         if data_inicio or data_fim:
             periodo = f"Periodo: {(data_inicio.strftime('%d/%m/%Y') if data_inicio else 'inicio')} ate {(data_fim.strftime('%d/%m/%Y') if data_fim else 'hoje')}"
+
+        pdf.set_fill_color(237, 244, 255)
+        pdf.set_text_color(0, 71, 171)
+        pdf.set_font('Helvetica', 'B', 11)
+        pdf.cell(0, 8, 'Agenda do advogado', fill=True, new_x='LMARGIN', new_y='NEXT')
+        pdf.set_text_color(90, 90, 90)
         pdf.set_font('Helvetica', '', 9)
-        pdf.cell(0, 6, texto(periodo, 100), new_x='LMARGIN', new_y='NEXT')
-        pdf.ln(3)
-        colunas = [('Cliente', 35), ('Assunto', 42), ('Data', 23), ('Hora', 17), ('Duracao', 22), ('Status', 25), ('Motivo', 26)]
-        pdf.set_fill_color(237, 243, 252)
-        pdf.set_font('Helvetica', 'B', 7)
-        for nome, largura in colunas:
-            pdf.cell(largura, 8, nome, border=1, fill=True)
-        pdf.ln()
+        pdf.cell(0, 6, texto(periodo, 120), new_x='LMARGIN', new_y='NEXT')
+        if status and status.lower() != 'todos':
+            pdf.cell(0, 5, f'Filtro de status: {texto(status, 30).title()}', new_x='LMARGIN', new_y='NEXT')
+        pdf.ln(4)
+
+        total_confirmados = sum(1 for registro in registros if str(registro[5] or '').upper() == 'CONFIRMADO')
+        total_pendentes = sum(1 for registro in registros if str(registro[5] or '').upper() in ('A_CONFIRMAR', 'PENDENTE'))
+        indicadores = [
+            ('AGENDAMENTOS', len(registros)),
+            ('CONFIRMADOS', total_confirmados),
+            ('PENDENTES', total_pendentes)
+        ]
+        for indice, (rotulo, valor) in enumerate(indicadores):
+            pdf.set_fill_color(245, 248, 252)
+            pdf.set_draw_color(220, 228, 238)
+            pdf.set_text_color(0, 71, 171)
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.cell(43, 7, rotulo, border=1, fill=True)
+            pdf.set_font('Helvetica', 'B', 13)
+            pdf.cell(20, 7, str(valor), border=1, fill=True)
+            if indice < len(indicadores) - 1:
+                pdf.cell(5, 7, '')
+        pdf.ln(12)
+
+        colunas = [('Cliente', 40, 28), ('Assunto', 52, 37), ('Data', 23, 12), ('Hora', 16, 8), ('Duracao', 20, 14), ('Status', 27, 18), ('Motivo', 87, 62)]
+
+        def cabecalho_tabela():
+            pdf.set_fill_color(237, 244, 255)
+            pdf.set_draw_color(220, 228, 238)
+            pdf.set_text_color(0, 71, 171)
+            pdf.set_font('Helvetica', 'B', 7)
+            for nome, largura, _ in colunas:
+                pdf.cell(largura, 8, nome, border=1, fill=True)
+            pdf.ln()
+            pdf.set_text_color(35, 35, 35)
+
+        cabecalho_tabela()
         pdf.set_font('Helvetica', '', 7)
-        for cliente, assunto, data, hora, duracao, status_item, motivo in registros:
+        if not registros:
+            pdf.set_fill_color(250, 252, 255)
+            pdf.cell(265, 9, 'Nenhum agendamento encontrado para os filtros informados.', border=1, fill=True, align='C', new_x='LMARGIN', new_y='NEXT')
+
+        for indice, (cliente, assunto, data, hora, duracao, status_item, motivo) in enumerate(registros):
+            if pdf.get_y() + 8 > 190:
+                pdf.add_page()
+                cabecalho_tabela()
+                pdf.set_font('Helvetica', '', 7)
             data_texto = data.strftime('%d/%m/%Y') if hasattr(data, 'strftime') else texto(data, 10)
             hora_texto = hora.strftime('%H:%M') if hasattr(hora, 'strftime') else texto(hora, 5)
-            valores = [texto(cliente, 23), texto(assunto, 28), data_texto, hora_texto, texto(duracao, 14), texto(status_item, 16), texto(motivo, 18)]
-            for (_, largura), valor in zip(colunas, valores):
-                pdf.cell(largura, 7, valor, border=1)
+            valores = [texto(cliente, 28), texto(assunto, 37), data_texto, hora_texto, duracao_legivel(duracao), texto(status_item, 18).replace('_', ' ').title(), texto(motivo, 62)]
+            pdf.set_fill_color(250, 252, 255) if indice % 2 else pdf.set_fill_color(255, 255, 255)
+            for (_, largura, _), valor in zip(colunas, valores):
+                pdf.cell(largura, 7, valor, border=1, fill=True)
             pdf.ln()
 
         return send_file(BytesIO(bytes(pdf.output())), mimetype='application/pdf', as_attachment=True, download_name='relatorio-agendamentos.pdf')
@@ -1961,6 +2177,731 @@ def recusar_agendamento(id_agendamento):
     except Exception as e:
         con.rollback()
         print('Erro ao recusar agendamento:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+
+
+@app.route('/cliente/agendamentos', methods=['GET'])
+def listar_agendamentos_cliente():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    meses_pt = {
+        1: 'JAN', 2: 'FEV', 3: 'MAR', 4: 'ABR',
+        5: 'MAI', 6: 'JUN', 7: 'JUL', 8: 'AGO',
+        9: 'SET', 10: 'OUT', 11: 'NOV', 12: 'DEZ'
+    }
+
+    try:
+        cur.execute(
+            "SELECT "
+            "a.ID_AGENDAMENTOS, a.ASSUNTO, a.DATA, a.HORARIO, a.DURACAO, a.STATUS, a.MOTIVO, "
+            "adv1.NOME, adv2.NOME "
+            "FROM AGENDAMENTOS a "
+            "LEFT JOIN USUARIOS adv1 ON adv1.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1 "
+            "LEFT JOIN USUARIOS adv2 ON adv2.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_2 "
+            "WHERE a.ID_USUARIOS_CLIENTE = ? "
+            "ORDER BY a.DATA DESC, a.HORARIO DESC",
+            (id_cliente,)
+        )
+
+        agendamentos = []
+
+        for row in cur.fetchall():
+            data_ag, horario, duracao = row[2], row[3], row[4]
+
+            if hasattr(data_ag, 'strftime'):
+                data_formatada = data_ag.strftime('%d/%m/%Y')
+                data_iso = data_ag.strftime('%Y-%m-%d')
+                dia = data_ag.strftime('%d')
+                mes = meses_pt.get(data_ag.month, '--')
+            else:
+                data_formatada = str(data_ag)
+                data_iso = str(data_ag)
+                dia = '--'
+                mes = '--'
+
+            if isinstance(horario, datetime.time):
+                horario_formatado = horario.strftime('%H:%M')
+            else:
+                horario_formatado = str(horario)[:5] if horario else '--'
+
+            if isinstance(duracao, int):
+                duracao_formatada = f"{duracao // 60:02d}:{duracao % 60:02d}"
+            else:
+                duracao_formatada = str(duracao)
+
+            if row[8]:
+                advogado_nome = f"{row[7]} e {row[8]}"
+            else:
+                advogado_nome = row[7] or '--'
+
+            agendamentos.append({
+                'id': row[0],
+                'assunto': row[1] or '--',
+                'data': data_formatada,
+                'data_iso': data_iso,
+                'dia': dia,
+                'mes': mes,
+                'horario': horario_formatado,
+                'duracao': duracao_formatada,
+                'status': (row[5] or 'a_confirmar').lower(),
+                'motivo': row[6] or '',
+                'advogado': advogado_nome
+            })
+
+        return jsonify({'agendamentos': agendamentos, 'quantidade': len(agendamentos)}), 200
+
+    except Exception as e:
+        print('Erro ao listar agendamentos do cliente:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/advogados', methods=['GET'])
+def listar_advogados_para_cliente():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute("""
+            SELECT ID_USUARIO_RESPONSAVEL
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ?
+        """, (id_cliente,))
+
+        row_cliente = cur.fetchone()
+
+        if not row_cliente or not row_cliente[0]:
+            return jsonify({'advogados': []}), 200
+
+        id_advogado_responsavel = row_cliente[0]
+
+        cur.execute("""
+            SELECT DISTINCT
+                u.ID_USUARIOS,
+                u.NOME,
+                u.NUM_OAB,
+                u.UF_OAB
+            FROM ADVOGADO_ESCRITORIO ae_resp
+            INNER JOIN ADVOGADO_ESCRITORIO ae_alvo
+                ON ae_alvo.ID_ESCRITORIOS = ae_resp.ID_ESCRITORIOS
+               AND ae_alvo.ATIVO = 1
+               AND UPPER(ae_alvo.STATUS) IN ('PROPRIETARIO', 'PARCEIRO')
+            INNER JOIN USUARIOS u
+                ON u.ID_USUARIOS = ae_alvo.ID_USUARIOS
+               AND u.TIPO = 0
+               AND u.ATIVO = 1
+            WHERE ae_resp.ID_USUARIOS = ?
+              AND ae_resp.ATIVO = 1
+            ORDER BY u.NOME
+        """, (id_advogado_responsavel,))
+
+        advogados = []
+        ids_adicionados = set()
+
+        for row in cur.fetchall():
+            if row[0] in ids_adicionados:
+                continue
+
+            ids_adicionados.add(row[0])
+
+            oab = '--'
+            if row[2] and row[3]:
+                oab = f"OAB/{row[3]} {row[2]}"
+            elif row[2]:
+                oab = f"OAB {row[2]}"
+
+            advogados.append({
+                'id': row[0],
+                'nome': row[1] or '--',
+                'oab': oab
+            })
+
+        if not advogados:
+            cur.execute("""
+                SELECT ID_USUARIOS, NOME, NUM_OAB, UF_OAB
+                FROM USUARIOS
+                WHERE ID_USUARIOS = ?
+                  AND TIPO = 0
+                  AND ATIVO = 1
+            """, (id_advogado_responsavel,))
+
+            row = cur.fetchone()
+
+            if row:
+                oab = '--'
+                if row[2] and row[3]:
+                    oab = f"OAB/{row[3]} {row[2]}"
+                elif row[2]:
+                    oab = f"OAB {row[2]}"
+
+                advogados.append({
+                    'id': row[0],
+                    'nome': row[1] or '--',
+                    'oab': oab
+                })
+
+        return jsonify({'advogados': advogados}), 200
+
+    except Exception as e:
+        print(f'Erro ao listar advogados para cliente: {e}')
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/datas_disponiveis', methods=['GET'])
+def datas_disponiveis_cliente():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_advogado = request.args.get('id_advogado')
+
+    dias_semana = {
+        0: 'Segunda-feira', 1: 'Terça-feira', 2: 'Quarta-feira',
+        3: 'Quinta-feira', 4: 'Sexta-feira'
+    }
+
+    horarios_base = [
+        (8 * 60, "08:00"),
+        (9 * 60, "09:00"),
+        (10 * 60 + 30, "10:30"),
+        (13 * 60, "13:00"),
+        (14 * 60 + 30, "14:30"),
+        (16 * 60, "16:00"),
+        (17 * 60, "17:00")
+    ]
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        hoje = datetime.date.today()
+        data_limite = hoje + datetime.timedelta(days=30)
+
+        ocupados_por_dia = {}
+
+        if id_advogado:
+            cur.execute(
+                "SELECT DATA, HORARIO, DURACAO FROM AGENDAMENTOS "
+                "WHERE (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?) "
+                "AND DATA BETWEEN ? AND ? "
+                "AND UPPER(STATUS) NOT IN ('CANCELADO', 'RECUSADO')",
+                (id_advogado, id_advogado, hoje, data_limite)
+            )
+
+            for row in cur.fetchall():
+                data_ag = row[0]
+                data_key = (
+                    data_ag.strftime('%Y-%m-%d')
+                    if hasattr(data_ag, 'strftime') else str(data_ag)[:10]
+                )
+
+                horario = row[1]
+                duracao = row[2] or 60
+
+                if isinstance(horario, datetime.time):
+                    inicio = horario.hour * 60 + horario.minute
+                else:
+                    p = str(horario).split(':')
+                    inicio = int(p[0]) * 60 + int(p[1])
+
+                ocupados_por_dia.setdefault(data_key, []).append({
+                    'inicio': inicio,
+                    'fim': inicio + duracao
+                })
+
+        datas = []
+        data_atual = hoje + datetime.timedelta(days=1)
+        tentativas = 0
+
+        while len(datas) < 10 and tentativas < 45:
+            tentativas += 1
+
+            if data_atual.weekday() < 5:
+                data_key = data_atual.strftime('%Y-%m-%d')
+                ocupados = ocupados_por_dia.get(data_key, [])
+
+                livres = []
+                for inicio, label in horarios_base:
+                    fim = inicio + 60
+                    conflito = any(
+                        inicio < o['fim'] and fim > o['inicio']
+                        for o in ocupados
+                    )
+                    if not conflito:
+                        livres.append(label)
+
+                if livres:
+                    datas.append({
+                        'id': len(datas) + 1,
+                        'data': data_atual.strftime('%d/%m/%Y'),
+                        'data_iso': data_key,
+                        'semana': dias_semana.get(data_atual.weekday(), '--'),
+                        'horarios': livres
+                    })
+
+            data_atual += datetime.timedelta(days=1)
+
+        return jsonify({'datas': datas}), 200
+
+    except Exception as e:
+        print('Erro ao listar datas:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/agendar', methods=['POST'])
+def agendar_reuniao_cliente():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Apenas clientes podem agendar'}), 403
+
+    id_cliente = token_data['id_usuarios']
+    dados = request.get_json()
+
+    if not dados:
+        return jsonify({'error': 'Dados não enviados'}), 400
+
+    id_advogado = dados.get('id_advogado')
+    assunto = (dados.get('assunto') or '').strip()
+    data_recebida = dados.get('data')
+    horario_recebido = dados.get('horario')
+    duracao = dados.get('duracao')
+    observacoes = (dados.get('observacoes') or '').strip()
+
+    if not all([id_advogado, assunto, data_recebida, horario_recebido, duracao]):
+        return jsonify({'error': 'Preencha todos os campos obrigatórios'}), 400
+
+    try:
+        duracao = int(duracao)
+    except:
+        return jsonify({'error': 'Duração inválida'}), 400
+
+    if duracao < 30 or duracao > 480:
+        return jsonify({'error': 'Duração deve ser entre 30 e 480 minutos'}), 400
+
+    data_agendamento = converter_data(data_recebida)
+    if data_agendamento is None:
+        return jsonify({'error': 'Data inválida'}), 400
+
+    if data_agendamento < datetime.date.today():
+        return jsonify({'error': 'A data não pode ser anterior a hoje'}), 400
+
+    horario_obj = converter_horario(horario_recebido)
+    if horario_obj is None:
+        return jsonify({'error': 'Horário inválido'}), 400
+
+    horario_min = horario_obj.hour * 60 + horario_obj.minute
+    horario_final = horario_min + duracao
+
+    if horario_min < 8 * 60:
+        return jsonify({'error': 'Não pode começar antes das 08:00'}), 400
+    if horario_final > 18 * 60:
+        return jsonify({'error': 'Não pode ultrapassar as 18:00'}), 400
+    if 12 * 60 <= horario_min < 13 * 60:
+        return jsonify({'error': 'Não é permitido agendar entre 12:00 e 13:00'}), 400
+    if horario_min < 12 * 60 and horario_final > 12 * 60:
+        return jsonify({'error': 'Não pode ultrapassar o horário de almoço'}), 400
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute(
+            "SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ? AND TIPO = 0 AND ATIVO = 1",
+            (id_advogado,)
+        )
+
+        adv = cur.fetchone()
+        if not adv:
+            return jsonify({'error': 'Advogado não encontrado ou inativo'}), 404
+
+        nome_advogado = adv[0]
+
+        cur.execute("SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
+        rc = cur.fetchone()
+        nome_cliente = rc[0] if rc else 'Cliente'
+
+        conflito = buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao)
+
+        if conflito:
+            return jsonify({
+                'error': f'Já existe agendamento em {conflito["data"]} às {conflito["horario"]}.',
+                'conflito': conflito
+            }), 409
+
+        assunto_final = assunto
+        if observacoes:
+            assunto_final = f"{assunto} | Obs: {observacoes}"
+
+        cur.execute(
+            "INSERT INTO AGENDAMENTOS ("
+            "ID_USUARIOS_ADVOGADO_1, ID_USUARIOS_CLIENTE, CLIENTE, ASSUNTO, "
+            "DATA, HORARIO, DURACAO, STATUS, DATA_CADASTRO, "
+            "CONFIRMADO_ADVOGADO_1, CONFIRMADO_ADVOGADO_2, RECUSADO_ADVOGADO_1, RECUSADO_ADVOGADO_2"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID_AGENDAMENTOS",
+            (
+                id_advogado, id_cliente, nome_cliente, assunto_final,
+                data_agendamento, horario_obj, duracao, 'a_confirmar',
+                datetime.datetime.now(), 0, 0, 0, 0
+            )
+        )
+
+        id_agendamento = cur.fetchone()[0]
+
+        data_fmt = data_agendamento.strftime('%d/%m/%Y')
+        horario_fmt = horario_obj.strftime('%H:%M')
+
+        titulo = 'Nova solicitação de agendamento'
+        msg = f'{nome_cliente} solicitou reunião para {data_fmt} às {horario_fmt}. Assunto: {assunto}'
+
+        cur.execute(
+            "INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM) "
+            "VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO",
+            (id_advogado, 'NOVO_AGENDAMENTO', titulo, msg)
+        )
+
+        id_notif = cur.fetchone()[0]
+        con.commit()
+
+        agora = datetime.datetime.now()
+        socketio.emit(
+            'nova_notificacao',
+            {
+                'id': id_notif,
+                'tipo': 'NOVO_AGENDAMENTO',
+                'titulo': titulo,
+                'mensagem': msg,
+                'lida': False,
+                'data_criacao': agora.strftime('%d/%m/%Y'),
+                'hora_criacao': agora.strftime('%H:%M'),
+                'data_leitura': None,
+                'id_agendamento': id_agendamento
+            },
+            room=f'usuario_{id_advogado}'
+        )
+
+        socketio.emit(
+            'atualizar_dados',
+            {'entidade': 'agendamento', 'acao': 'criado', 'id_agendamento': id_agendamento},
+            room=f'usuario_{id_advogado}'
+        )
+
+        try:
+            cur.execute("SELECT EMAIL FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
+            r = cur.fetchone()
+            if r and r[0]:
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    executor.submit(
+                        enviar_email_agendamento_criado,
+                        r[0], nome_cliente, nome_advogado,
+                        data_fmt, horario_fmt, assunto
+                    )
+        except Exception as e:
+            print(f"Erro ao agendar e-mail: {e}")
+
+        return jsonify({
+            'mensagem': 'Solicitação enviada com sucesso',
+            'id_agendamento': id_agendamento,
+            'status': 'a_confirmar'
+        }), 201
+
+    except Exception as e:
+        con.rollback()
+        print('Erro ao agendar:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/agendamento/<int:id_agendamento>/reagendar', methods=['PUT'])
+def reagendar_reuniao_cliente(id_agendamento):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+    dados = request.get_json()
+
+    if not dados:
+        return jsonify({'error': 'Dados não enviados'}), 400
+
+    data_recebida = dados.get('data')
+    horario_recebido = dados.get('horario')
+    duracao = dados.get('duracao')
+
+    if not all([data_recebida, horario_recebido, duracao]):
+        return jsonify({'error': 'Preencha todos os campos obrigatórios'}), 400
+
+    try:
+        duracao = int(duracao)
+    except:
+        return jsonify({'error': 'Duração inválida'}), 400
+
+    data_agendamento = converter_data(data_recebida)
+    if data_agendamento is None:
+        return jsonify({'error': 'Data inválida'}), 400
+
+    if data_agendamento < datetime.date.today():
+        return jsonify({'error': 'A data não pode ser anterior a hoje'}), 400
+
+    horario_obj = converter_horario(horario_recebido)
+    if horario_obj is None:
+        return jsonify({'error': 'Horário inválido'}), 400
+
+    horario_min = horario_obj.hour * 60 + horario_obj.minute
+    horario_final = horario_min + duracao
+
+    if horario_min < 8 * 60:
+        return jsonify({'error': 'Não pode começar antes das 08:00'}), 400
+    if horario_final > 18 * 60:
+        return jsonify({'error': 'Não pode ultrapassar as 18:00'}), 400
+    if 12 * 60 <= horario_min < 13 * 60:
+        return jsonify({'error': 'Não é permitido agendar entre 12:00 e 13:00'}), 400
+    if horario_min < 12 * 60 and horario_final > 12 * 60:
+        return jsonify({'error': 'Não pode ultrapassar o horário de almoço'}), 400
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute(
+            "SELECT ID_USUARIOS_ADVOGADO_1, ID_USUARIOS_ADVOGADO_2, STATUS "
+            "FROM AGENDAMENTOS WHERE ID_AGENDAMENTOS = ? AND ID_USUARIOS_CLIENTE = ?",
+            (id_agendamento, id_cliente)
+        )
+
+        ag = cur.fetchone()
+        if not ag:
+            return jsonify({'error': 'Agendamento não encontrado'}), 404
+
+        if ag[2] == 'cancelado':
+            return jsonify({'error': 'Este agendamento está cancelado'}), 400
+
+        id_adv_1, id_adv_2 = ag[0], ag[1]
+
+        conflito = buscar_conflito(
+            cur, id_adv_1, data_agendamento, horario_min, duracao,
+            ignorar_id=id_agendamento
+        )
+        if conflito:
+            return jsonify({
+                'error': f'O advogado já possui agendamento em {conflito["data"]} às {conflito["horario"]}.',
+                'conflito': conflito
+            }), 409
+
+        if id_adv_2:
+            conflito_2 = buscar_conflito(
+                cur, id_adv_2, data_agendamento, horario_min, duracao,
+                ignorar_id=id_agendamento
+            )
+            if conflito_2:
+                return jsonify({
+                    'error': 'O segundo advogado já possui agendamento neste período.',
+                    'conflito': conflito_2
+                }), 409
+
+        cur.execute(
+            "UPDATE AGENDAMENTOS SET DATA = ?, HORARIO = ?, DURACAO = ?, "
+            "STATUS = 'a_confirmar', CONFIRMADO_ADVOGADO_1 = 0, CONFIRMADO_ADVOGADO_2 = 0, "
+            "RECUSADO_ADVOGADO_1 = 0, RECUSADO_ADVOGADO_2 = 0 "
+            "WHERE ID_AGENDAMENTOS = ?",
+            (data_agendamento, horario_obj, duracao, id_agendamento)
+        )
+
+        data_fmt = data_agendamento.strftime('%d/%m/%Y')
+        horario_fmt = horario_obj.strftime('%H:%M')
+
+        cur.execute("SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
+        rc = cur.fetchone()
+        nome_cliente = rc[0] if rc else 'Cliente'
+
+        titulo = 'Reagendamento solicitado'
+        msg = f'{nome_cliente} solicitou reagendamento para {data_fmt} às {horario_fmt}.'
+
+        cur.execute(
+            "INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM) "
+            "VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO",
+            (id_adv_1, 'AGENDAMENTO_REAGENDADO', titulo, msg)
+        )
+
+        id_notif = cur.fetchone()[0]
+        con.commit()
+
+        agora = datetime.datetime.now()
+        socketio.emit(
+            'nova_notificacao',
+            {
+                'id': id_notif,
+                'tipo': 'AGENDAMENTO_REAGENDADO',
+                'titulo': titulo,
+                'mensagem': msg,
+                'lida': False,
+                'data_criacao': agora.strftime('%d/%m/%Y'),
+                'hora_criacao': agora.strftime('%H:%M'),
+                'data_leitura': None,
+                'id_agendamento': id_agendamento
+            },
+            room=f'usuario_{id_adv_1}'
+        )
+
+        socketio.emit(
+            'atualizar_dados',
+            {'entidade': 'agendamento', 'acao': 'reagendado', 'id_agendamento': id_agendamento},
+            room=f'usuario_{id_adv_1}'
+        )
+
+        return jsonify({
+            'mensagem': 'Reagendamento solicitado com sucesso',
+            'id_agendamento': id_agendamento,
+            'status': 'a_confirmar'
+        }), 200
+
+    except Exception as e:
+        con.rollback()
+        print('Erro ao reagendar:', e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/cliente/agendamento/<int:id_agendamento>/cancelar', methods=['PUT'])
+def cancelar_reuniao_cliente(id_agendamento):
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_cliente = token_data['id_usuarios']
+    dados = request.get_json() or {}
+    motivo = (dados.get('motivo') or 'Cancelado pelo cliente').strip()
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute(
+            "SELECT ID_USUARIOS_ADVOGADO_1, ID_USUARIOS_ADVOGADO_2, STATUS "
+            "FROM AGENDAMENTOS WHERE ID_AGENDAMENTOS = ? AND ID_USUARIOS_CLIENTE = ?",
+            (id_agendamento, id_cliente)
+        )
+
+        ag = cur.fetchone()
+        if not ag:
+            return jsonify({'error': 'Agendamento não encontrado'}), 404
+
+        if ag[2] == 'cancelado':
+            return jsonify({'error': 'Este agendamento já está cancelado'}), 400
+
+        id_adv_1 = ag[0]
+
+        cur.execute(
+            "UPDATE AGENDAMENTOS SET STATUS = 'cancelado', MOTIVO = ? WHERE ID_AGENDAMENTOS = ?",
+            (motivo, id_agendamento)
+        )
+
+        titulo = 'Reunião cancelada pelo cliente'
+        msg = f'O cliente cancelou a reunião. Motivo: {motivo}'
+
+        cur.execute(
+            "INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM) "
+            "VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO",
+            (id_adv_1, 'AGENDAMENTO_CANCELADO', titulo, msg)
+        )
+
+        id_notif = cur.fetchone()[0]
+        con.commit()
+
+        agora = datetime.datetime.now()
+        socketio.emit(
+            'nova_notificacao',
+            {
+                'id': id_notif,
+                'tipo': 'AGENDAMENTO_CANCELADO',
+                'titulo': titulo,
+                'mensagem': msg,
+                'lida': False,
+                'data_criacao': agora.strftime('%d/%m/%Y'),
+                'hora_criacao': agora.strftime('%H:%M'),
+                'data_leitura': None,
+                'id_agendamento': id_agendamento
+            },
+            room=f'usuario_{id_adv_1}'
+        )
+
+        socketio.emit(
+            'atualizar_dados',
+            {'entidade': 'agendamento', 'acao': 'cancelado', 'id_agendamento': id_agendamento},
+            room=f'usuario_{id_adv_1}'
+        )
+
+        return jsonify({'mensagem': 'Reunião cancelada com sucesso'}), 200
+
+    except Exception as e:
+        con.rollback()
+        print('Erro ao cancelar:', e)
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500

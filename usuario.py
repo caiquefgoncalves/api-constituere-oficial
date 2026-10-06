@@ -10,7 +10,7 @@ import concurrent.futures
 import time
 from consulta_cnsa import consultar_cnsa
 from consulta_oab import consultar_oab
-from log_auditoria import gerar_pdf_logs, listar_logs
+from log_auditoria import excluir_log, gerar_pdf_logs, listar_logs
 
 
 @app.route('/escritorio/<int:id_escritorio>/logs', methods=['GET'])
@@ -97,6 +97,85 @@ def gerar_pdf_logs_escritorio(id_escritorio):
         return jsonify({'error': f'Nao foi possivel gerar o PDF do Log: {erro}'}), 500
 
 
+@app.route('/escritorio/<int:id_escritorio>/logs/<int:id_log>', methods=['DELETE'])
+def excluir_log_escritorio(id_escritorio, id_log):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessario'}), 401
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso nao autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT 1 FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
+              AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
+            """,
+            (token_data['id_usuarios'], id_escritorio),
+        )
+        if not cur.fetchone():
+            return jsonify({'error': 'Apenas o proprietario pode excluir registros do Log'}), 403
+    finally:
+        cur.close()
+        con.close()
+
+    try:
+        if not excluir_log(id_escritorio, id_log):
+            return jsonify({'error': 'Registro de Log nao encontrado'}), 404
+        return jsonify({'message': 'Registro de Log excluido com sucesso'}), 200
+    except Exception as erro:
+        return jsonify({'error': f'Nao foi possivel excluir o registro do Log: {erro}'}), 500
+
+
+@app.route('/escritorio/<int:id_escritorio>/informacoes', methods=['PUT'])
+def editar_informacao_escritorio_ia(id_escritorio):
+    """Atualiza um campo do escritório, exclusivamente para seu proprietário."""
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessario'}), 401
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso nao autorizado'}), 403
+
+    dados = request.get_json(silent=True) or {}
+    campo = str(dados.get('campo') or '').strip().lower()
+    valor = str(dados.get('valor') or '').strip()
+    campos = {
+        'razao_social': 'RAZAO_SOCIAL', 'nome_fantasia': 'NOME_FANTASIA',
+        'registro_oab': 'REGISTRO_OAB', 'uf_oab': 'UF_OAB', 'telefone': 'TELEFONE',
+        'email': 'EMAIL', 'cep': 'CEP', 'logradouro': 'LOGRADOURO', 'numero': 'NUMERO',
+        'complemento': 'COMPLEMENTO', 'bairro': 'BAIRRO', 'cidade': 'CIDADE', 'estado': 'ESTADO',
+    }
+    if campo not in campos or not valor:
+        return jsonify({'error': 'Campo ou valor invalido'}), 400
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """SELECT 1 FROM ADVOGADO_ESCRITORIO
+               WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
+                 AND STATUS = 'PROPRIETARIO' AND ATIVO = 1""",
+            (token_data['id_usuarios'], id_escritorio),
+        )
+        if not cur.fetchone():
+            return jsonify({'error': 'Apenas o proprietario pode editar o escritório'}), 403
+        cur.execute(
+            f'UPDATE ESCRITORIOS SET {campos[campo]} = ? WHERE ID_ESCRITORIOS = ?',
+            (valor.upper() if campo in {'uf_oab', 'estado'} else valor, id_escritorio),
+        )
+        con.commit()
+        return jsonify({'message': 'Informação do escritório atualizada com sucesso'}), 200
+    except Exception as erro:
+        con.rollback()
+        return jsonify({'error': f'Não foi possível atualizar a informação: {erro}'}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
 @app.route('/criar_usuarios', methods=['POST'])
 def criar_usuarios():
     tipo = request.form.get('tipo')
@@ -152,6 +231,7 @@ def criar_usuarios():
 
     num_oab = request.form.get('num_oab')
     uf_oab = request.form.get('uf_oab')
+    area_atuacao = request.form.get('area_atuacao')
 
     razao_social = request.form.get('razao_social')
     nome_fantasia = request.form.get('nome_fantasia')
@@ -184,6 +264,8 @@ def criar_usuarios():
             return jsonify({"error": "Número da OAB é obrigatório"}), 400
         if not uf_oab:
             return jsonify({"error": "UF da OAB é obrigatória"}), 400
+        if not area_atuacao:
+            return jsonify({"error": "Área de atuação é obrigatória"}), 400
         if verificar_existente(num_oab, "NUM_OAB"):
             return jsonify({"error": "Número da OAB já cadastrado"}), 400
 
@@ -295,18 +377,18 @@ def criar_usuarios():
         cur.execute("""
                     INSERT INTO USUARIOS (
                         NOME, EMAIL, SENHA, CPF, TELEFONE, TIPO,
-                        RG, ORGAO_EXPEDIDOR, NUM_OAB, UF_OAB,
+                        RG, ORGAO_EXPEDIDOR, NUM_OAB, UF_OAB, AREA_ATUACAO,
                         NACIONALIDADE, ESTADO_CIVIL, DATA_NASCIMENTO,
                         SEXO, PROFISSAO, CNPJ, RAZAO_SOCIAL, NOME_FANTASIA,
                         CEP, LOGRADOURO, NUMERO, COMPLEMENTO, BAIRRO,
                         CIDADE, ESTADO, CARTERA_TRABALHO, SERIE_CARTERA,
                         DATA_CADASTRO, ATIVO, ID_USUARIO_RESPONSAVEL
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         RETURNING ID_USUARIOS
                     """, (
                         nome, email, senha_cripto, cpf, telefone, tipo,
-                        rg, orgao_expedidor, num_oab, uf_oab,
+                        rg, orgao_expedidor, num_oab, uf_oab, area_atuacao,
                         nacionalidade, estado_civil, data_nascimento_salvar,
                         sexo, profissao, cnpj, razao_social, nome_fantasia,
                         cep, logradouro, numero, complemento, bairro,
@@ -376,6 +458,7 @@ def editar_perfil():
     orgao_expedidor = request.form.get('orgao_expedidor')
     num_oab = request.form.get('num_oab')
     uf_oab = request.form.get('uf_oab')
+    area_atuacao = request.form.get('area_atuacao')
     nacionalidade = request.form.get('nacionalidade')
     estado_civil = request.form.get('estado_civil')
 
@@ -398,6 +481,8 @@ def editar_perfil():
         return jsonify({"error": "Número da OAB é obrigatório"}), 400
     if not uf_oab:
         return jsonify({"error": "UF da OAB é obrigatória"}), 400
+    if not area_atuacao:
+        return jsonify({"error": "Área de atuação é obrigatória"}), 400
     if not nacionalidade:
         return jsonify({"error": "Nacionalidade é obrigatória"}), 400
     if not estado_civil:
@@ -553,6 +638,7 @@ def editar_perfil():
                     ORGAO_EXPEDIDOR = ?,
                     NUM_OAB         = ?,
                     UF_OAB          = ?,
+                    AREA_ATUACAO    = ?,
                     NACIONALIDADE   = ?,
                     ESTADO_CIVIL    = ?,
                     SENHA           = ?
@@ -566,6 +652,7 @@ def editar_perfil():
                 orgao_expedidor,
                 num_oab,
                 uf_oab,
+                area_atuacao,
                 nacionalidade,
                 estado_civil,
                 senha_cripto,
@@ -582,6 +669,7 @@ def editar_perfil():
                     ORGAO_EXPEDIDOR = ?,
                     NUM_OAB         = ?,
                     UF_OAB          = ?,
+                    AREA_ATUACAO    = ?,
                     NACIONALIDADE   = ?,
                     ESTADO_CIVIL    = ?
                 WHERE ID_USUARIOS = ?
@@ -594,6 +682,7 @@ def editar_perfil():
                 orgao_expedidor,
                 num_oab,
                 uf_oab,
+                area_atuacao,
                 nacionalidade,
                 estado_civil,
                 id_usuario
@@ -619,6 +708,7 @@ def editar_perfil():
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -1584,9 +1674,7 @@ def adicionar_advogado_escritorio():
 
 @app.route('/representante', methods=['POST'])
 def criar_representante():
-    """
-    Rota para cadastrar um representante de um cliente jurídico
-    """
+
     token_data = decodificar_token()
     if token_data == False:
         return jsonify({'error': 'Token necessário'}), 401
@@ -2483,7 +2571,8 @@ def listar_advogados():
                 ae.ATIVO,
 
                 ae_logado.STATUS,
-                ae_logado.ATIVO
+                ae_logado.ATIVO,
+                u.AREA_ATUACAO
 
             FROM ADVOGADO_ESCRITORIO ae
 
@@ -2544,6 +2633,7 @@ def listar_advogados():
                     'email': row[2] or '--',
                     'numero_oab': row[3] or '--',
                     'uf_oab': row[4] or '--',
+                    'area_atuacao': row[12] or '--',
                     'oab': (
                         f'{row[3]}/{row[4]}'
                         if row[3] and row[4]
@@ -3825,7 +3915,28 @@ def editar_perfil_cliente():
             except Exception as e:
                 print(f'Erro ao salvar foto do cliente: {e}')
 
-        return jsonify({'mensagem': 'Perfil atualizado com sucesso'}), 200
+        nome_exibicao = nome or razao_social or nome_fantasia or ''
+
+        try:
+            from main import socketio
+            socketio.emit(
+                'atualizar_dados',
+                {
+                    'entidade': 'usuario',
+                    'acao': 'atualizado',
+                    'id_usuario': id_usuario,
+                    'nome': nome_exibicao
+                },
+                room=f'usuario_{id_usuario}'
+            )
+            print(f'[REFRESH] usuario/atualizado emitido para usuario_{id_usuario}')
+        except Exception as e:
+            print(f'[REFRESH] Erro ao emitir socket: {e}')
+
+        return jsonify({
+            'mensagem': 'Perfil atualizado com sucesso',
+            'nome': nome_exibicao
+        }), 200
 
     except Exception as e:
         con.rollback()

@@ -1,4 +1,8 @@
-from funcao import decodificar_token, validar_numero_processo, limpar_documento, converter_decimal, criar_data_vencimento, adicionar_meses, dividir_valor
+from funcao import (
+    decodificar_token, validar_numero_processo, limpar_documento,
+    converter_decimal, criar_data_vencimento, adicionar_meses, dividir_valor,
+    criar_notificacao, formatar_valor_br, converter_data_pagamento
+)
 from main import app
 from db import conexao
 import datetime
@@ -41,9 +45,15 @@ def cadastrar_processo():
     instancia = processo.get('instancia')
     data_inicio_recebida = processo.get('data_inicio')
     id_cliente = processo.get('id_cliente')
+    id_escritorio = processo.get('id_escritorio')
 
     if not id_cliente:
         return jsonify({'error': 'Cliente é obrigatório'}), 400
+
+    try:
+        id_escritorio = int(id_escritorio)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Escritório é obrigatório'}), 400
 
     if not tipo_processo:
         return jsonify({'error': 'Tipo do processo é obrigatório'}), 400
@@ -366,9 +376,20 @@ def cadastrar_processo():
             return jsonify({'error': 'Cliente não encontrado ou não pertence a este advogado'}), 403
 
         cur.execute("""
+            SELECT 1
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+              AND ATIVO = 1
+        """, (id_advogado, id_escritorio))
+        if not cur.fetchone():
+            return jsonify({'error': 'Você não possui vínculo ativo com o escritório selecionado'}), 403
+
+        cur.execute("""
             INSERT INTO PROCESSOS (
                 ID_USUARIOS_ADVOGADO,
                 ID_USUARIOS_CLIENTE,
+                ID_ESCRITORIOS,
                 NUM_PROCESSO,
                 TIPO_PROCESSO,
                 ASSUNTO,
@@ -379,11 +400,12 @@ def cadastrar_processo():
                 DATA_INICIO,
                 STATUS
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING ID_PROCESSOS
         """, (
             id_advogado,
             id_cliente,
+            id_escritorio,
             numero_processo if numero_processo else None,
             tipo_processo,
             assunto,
@@ -406,7 +428,7 @@ def cadastrar_processo():
                 CNPJ, RAZAO_SOCIAL, NOME_FANTASIA
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         """, (
@@ -587,6 +609,35 @@ def cadastrar_processo():
                         ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (id_pagamento_exito, indice+1, valores_exito[indice], vencimento, None, None, 'PENDENTE'))
 
+        criar_notificacao(
+            cur,
+            id_cliente,
+            'PROCESSO_CRIADO',
+            'Novo processo cadastrado',
+            f'Foi cadastrado um novo processo para você: {tipo_processo} - {assunto}.',
+            {
+                'id_processo': id_processo,
+                'numero_processo': numero_processo if numero_processo else '--'
+            }
+        )
+
+        if tipo_honorario != 'NAO_HA' and quantidade_parcelas_criadas > 0:
+            valor_total_formatado = formatar_valor_br(valor_total)
+
+            criar_notificacao(
+                cur,
+                id_cliente,
+                'PAGAMENTO_CRIADO',
+                'Nova cobrança',
+                f'Você tem uma nova cobrança de {valor_total_formatado} '
+                f'({quantidade_parcelas_criadas} parcela(s)) referente ao processo de {tipo_processo}.',
+                {
+                    'id_processo': id_processo,
+                    'valor': float(valor_total) if valor_total else 0,
+                    'qtd_parcelas': quantidade_parcelas_criadas
+                }
+            )
+
         con.commit()
 
         return jsonify({
@@ -607,6 +658,7 @@ def cadastrar_processo():
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/processos', methods=['GET'])
 def listar_processos():
@@ -904,7 +956,6 @@ def listar_processos():
 
 
 def _texto_pdf(valor):
-    """Keeps PDF text compatible with FPDF's built-in Helvetica font."""
     return str(valor or '--').encode('cp1252', 'replace').decode('cp1252')
 
 
@@ -1571,7 +1622,8 @@ def baixar_parcela(id_parcela):
 
     try:
         cur.execute("""
-            SELECT parc.ID_PARCELAS, parc.STATUS
+            SELECT parc.ID_PARCELAS, parc.STATUS, parc.VALOR_PARCELA,
+                   parc.NUMERO_PARCELA, p.ID_USUARIOS_CLIENTE, p.TIPO_PROCESSO
             FROM PARCELAS parc
             INNER JOIN PAGAMENTOS pag ON parc.ID_PAGAMENTO = pag.ID_PAGAMENTOS
             INNER JOIN PROCESSOS p ON pag.ID_PROCESSO = p.ID_PROCESSOS
@@ -1582,7 +1634,8 @@ def baixar_parcela(id_parcela):
 
         if not parcela:
             cur.execute("""
-                SELECT pe.ID_PARCELA_EXITO, pe.STATUS
+                SELECT pe.ID_PARCELA_EXITO, pe.STATUS, pe.VALOR_PARCELA,
+                       pe.NUMERO_PARCELA, p.ID_USUARIOS_CLIENTE, p.TIPO_PROCESSO
                 FROM PARCELAS_EXITO pe
                 INNER JOIN PAGAMENTO_EXITO pex ON pe.ID_PAGAMENTO_EXITO = pex.ID_PAGAMENTO_EXITO
                 INNER JOIN PAGAMENTOS pag ON pex.ID_PAGAMENTO = pag.ID_PAGAMENTOS
@@ -1598,12 +1651,33 @@ def baixar_parcela(id_parcela):
             if parcela[1] == 'PAGA':
                 return jsonify({'error': 'Esta parcela já foi paga'}), 400
 
+            id_cliente = parcela[4]
+            tipo_processo = parcela[5] or 'Processo'
+            numero_parcela = parcela[3]
+            valor_parcela = parcela[2]
+
             data_pagamento = datetime.date.today()
             cur.execute("""
                 UPDATE PARCELAS_EXITO
                 SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
                 WHERE ID_PARCELA_EXITO = ?
             """, (data_pagamento, id_parcela))
+
+            identificacao = 'Entrada' if numero_parcela == 0 else f'{numero_parcela}ª parcela'
+
+            criar_notificacao(
+                cur,
+                id_cliente,
+                'PAGAMENTO_CONFIRMADO',
+                'Pagamento registrado',
+                f'O pagamento de {formatar_valor_br(valor_parcela)} '
+                f'({tipo_processo} - Êxito - {identificacao}) foi registrado.',
+                {
+                    'id_parcela': id_parcela,
+                    'valor': float(valor_parcela) if valor_parcela else 0,
+                    'tipo_parcela': 'exito'
+                }
+            )
 
             con.commit()
 
@@ -1615,12 +1689,33 @@ def baixar_parcela(id_parcela):
         if parcela[1] == 'PAGA':
             return jsonify({'error': 'Esta parcela já foi paga'}), 400
 
+        id_cliente = parcela[4]
+        tipo_processo = parcela[5] or 'Processo'
+        numero_parcela = parcela[3]
+        valor_parcela = parcela[2]
+
         data_pagamento = datetime.date.today()
         cur.execute("""
             UPDATE PARCELAS
             SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
             WHERE ID_PARCELAS = ?
         """, (data_pagamento, id_parcela))
+
+        identificacao = 'Entrada' if numero_parcela == 0 else f'{numero_parcela}ª parcela'
+
+        criar_notificacao(
+            cur,
+            id_cliente,
+            'PAGAMENTO_CONFIRMADO',
+            'Pagamento registrado',
+            f'O pagamento de {formatar_valor_br(valor_parcela)} '
+            f'({tipo_processo} - {identificacao}) foi registrado.',
+            {
+                'id_parcela': id_parcela,
+                'valor': float(valor_parcela) if valor_parcela else 0,
+                'tipo_parcela': 'prolabore'
+            }
+        )
 
         con.commit()
 
@@ -1632,13 +1727,12 @@ def baixar_parcela(id_parcela):
     except Exception as e:
         con.rollback()
         print("Erro ao dar baixa na parcela:", e)
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
         con.close()
-
-
-
 
 
 @app.route('/processo/<int:id_processo>/pagamento', methods=['PUT'])
@@ -1901,7 +1995,6 @@ def atualizar_pagamento_processo(id_processo):
         con.close()
 
 
-
 @app.route('/dashboard/rendimentos', methods=['GET'])
 def dashboard_rendimentos():
     token_data = decodificar_token()
@@ -2132,6 +2225,37 @@ def cadastrar_atualizacao_processo(id_processo):
                   AND ID_USUARIOS_ADVOGADO = ?
             """, (id_processo, id_advogado))
 
+        cur.execute("""
+            SELECT ID_USUARIOS_CLIENTE, TIPO_PROCESSO
+            FROM PROCESSOS
+            WHERE ID_PROCESSOS = ?
+        """, (id_processo,))
+
+        row_proc = cur.fetchone()
+
+        if row_proc:
+            id_cliente = row_proc[0]
+            tipo_proc = row_proc[1] or 'Processo'
+
+            if processo_concluido == 1:
+                criar_notificacao(
+                    cur,
+                    id_cliente,
+                    'PROCESSO_CONCLUIDO',
+                    'Processo concluído',
+                    f'Seu processo {tipo_proc} foi concluído: {titulo}.',
+                    {'id_processo': id_processo}
+                )
+            else:
+                criar_notificacao(
+                    cur,
+                    id_cliente,
+                    'PROCESSO_ATUALIZADO',
+                    'Atualização no processo',
+                    f'Seu processo {tipo_proc} teve uma nova atualização: {titulo}.',
+                    {'id_processo': id_processo}
+                )
+
         con.commit()
 
         return jsonify({
@@ -2149,6 +2273,8 @@ def cadastrar_atualizacao_processo(id_processo):
     except Exception as e:
         con.rollback()
         print('Erro ao cadastrar atualização:', e)
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
@@ -2707,6 +2833,7 @@ def buscar_pagamento_exito_processo(id_processo):
         cur.close()
         con.close()
 
+
 @app.route('/processo/<int:id_processo>/pagamento/exito', methods=['PUT'])
 def atualizar_pagamento_exito_processo(id_processo):
     token_data = decodificar_token()
@@ -3042,7 +3169,7 @@ def atualizar_pagamento_exito_processo(id_processo):
                     FORMA_PAGAMENTO
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, 
                     ?, ?, ?, ?, ?
                 )
                 RETURNING ID_PAGAMENTO_EXITO
@@ -4182,6 +4309,24 @@ def concluir_processo(id_processo):
             id_advogado
         ))
 
+        cur.execute("""
+            SELECT ID_USUARIOS_CLIENTE, TIPO_PROCESSO
+            FROM PROCESSOS
+            WHERE ID_PROCESSOS = ?
+        """, (id_processo,))
+
+        row_proc = cur.fetchone()
+
+        if row_proc:
+            criar_notificacao(
+                cur,
+                row_proc[0],
+                'PROCESSO_CONCLUIDO',
+                'Processo concluído',
+                f'Seu processo {row_proc[1] or "Processo"} foi concluído: {titulo}.',
+                {'id_processo': id_processo}
+            )
+
         con.commit()
 
         return jsonify({
@@ -4449,6 +4594,7 @@ def ativar_processo(id_processo):
         cur.close()
         con.close()
 
+
 @app.route('/escritorio/<int:id_escritorio>/rendimentos', methods=['GET'])
 def dashboard_rendimentos_escritorio(id_escritorio):
     token_data = decodificar_token()
@@ -4642,23 +4788,7 @@ def listar_processos_escritorio(id_escritorio):
                 'error': 'Você não possui acesso a este escritório'
             }), 403
 
-        cur.execute("""
-            SELECT ID_USUARIOS
-            FROM ADVOGADO_ESCRITORIO
-            WHERE ID_ESCRITORIOS = ?
-        """, (id_escritorio,))
-
-        ids_advogados = [row[0] for row in cur.fetchall()]
-
-        if not ids_advogados:
-            return jsonify({
-                'processos': [],
-                'quantidade': 0
-            }), 200
-
-        placeholders = ','.join(['?'] * len(ids_advogados))
-
-        sql = f"""
+        sql = """
             SELECT
                 p.ID_PROCESSOS,
                 p.NUM_PROCESSO,
@@ -4671,11 +4801,20 @@ def listar_processos_escritorio(id_escritorio):
             FROM PROCESSOS p
             INNER JOIN USUARIOS cliente
                 ON cliente.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
-            WHERE p.ID_USUARIOS_ADVOGADO IN ({placeholders})
+            WHERE p.ID_ESCRITORIOS = ?
+               OR (
+                    p.ID_ESCRITORIOS IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM ADVOGADO_ESCRITORIO ae_processo
+                        WHERE ae_processo.ID_ESCRITORIOS = ?
+                          AND ae_processo.ID_USUARIOS = p.ID_USUARIOS_ADVOGADO
+                    )
+               )
             ORDER BY p.DATA_INICIO DESC, p.ID_PROCESSOS DESC
         """
 
-        cur.execute(sql, tuple(ids_advogados))
+        cur.execute(sql, (id_escritorio, id_escritorio))
         rows = cur.fetchall()
 
         processos = []
@@ -4752,6 +4891,7 @@ def verificar_numero_processo():
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/processo/<int:id_processo>/atualizacoes/<int:id_atualizacao>', methods=['DELETE'])
 def excluir_atualizacao_processo(id_processo, id_atualizacao):
@@ -4875,6 +5015,7 @@ def excluir_atualizacao_processo(id_processo, id_atualizacao):
         cur.close()
         con.close()
 
+
 @app.route('/processo/<int:id_processo>/parte_contraria', methods=['GET'])
 def buscar_parte_contraria(id_processo):
     token_data = decodificar_token()
@@ -4981,6 +5122,7 @@ def buscar_parte_contraria(id_processo):
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/processo/<int:id_processo>/parte_contraria', methods=['PUT'])
 def atualizar_parte_contraria(id_processo):
@@ -5124,6 +5266,7 @@ def atualizar_parte_contraria(id_processo):
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/cliente/processos', methods=['GET'])
 def listar_processos_cliente():
@@ -5506,8 +5649,63 @@ def listar_pagamentos_cliente():
                 'status': status_pt,
                 'pagamento': forma,
                 'vencimento': venc.strftime('%d/%m/%Y') if venc else '--',
-                'data_pagamento': pgto.strftime('%d/%m/%Y') if pgto else None
+                'data_pagamento': pgto.strftime('%d/%m/%Y') if pgto else None,
+                'numero_parcela': numero_parcela,
+                'tipo': 'prolabore'
             })
+
+        cur.execute(
+            "SELECT "
+            "pe.ID_PARCELA_EXITO, pe.NUMERO_PARCELA, pe.VALOR_PARCELA, "
+            "pe.DATA_VENCIMENTO, pe.DATA_PAGAMENTO, pe.STATUS, "
+            "pag.FORM_PAGAMENTO, p.TIPO_PROCESSO "
+            "FROM PARCELAS_EXITO pe "
+            "INNER JOIN PAGAMENTO_EXITO pex ON pe.ID_PAGAMENTO_EXITO = pex.ID_PAGAMENTO_EXITO "
+            "INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO "
+            "INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO "
+            "WHERE p.ID_USUARIOS_CLIENTE = ? "
+            "ORDER BY pe.DATA_VENCIMENTO ASC",
+            (id_cliente,)
+        )
+
+        for row in cur.fetchall():
+            valor = float(row[2]) if row[2] else 0
+            venc = converter_data(row[3])
+            pgto = converter_data(row[4])
+            status_db = (row[5] or '').upper()
+            forma = row[6] or '--'
+            tipo_processo = row[7] or 'Processo'
+            numero_parcela = row[1]
+
+            if numero_parcela == 0:
+                nome = f"{tipo_processo} - Êxito - Entrada"
+            else:
+                nome = f"{tipo_processo} - Êxito - {numero_parcela}ª parcela"
+
+            if status_db == 'PAGA':
+                status_pt = 'Paga'
+            elif venc and venc < hoje:
+                status_pt = 'Atrasada'
+            else:
+                status_pt = 'A pagar'
+
+            pagamentos.append({
+                'id': row[0],
+                'nome': nome,
+                'valor': valor,
+                'status': status_pt,
+                'pagamento': forma,
+                'vencimento': venc.strftime('%d/%m/%Y') if venc else '--',
+                'data_pagamento': pgto.strftime('%d/%m/%Y') if pgto else None,
+                'numero_parcela': numero_parcela,
+                'tipo': 'exito'
+            })
+
+        pagamentos.sort(key=lambda x: (
+            datetime.datetime.strptime(x['vencimento'], '%d/%m/%Y')
+            if x['vencimento'] and x['vencimento'] != '--'
+            else datetime.date.max
+        ))
 
         return jsonify({
             'pagamentos': pagamentos,
@@ -5534,6 +5732,22 @@ def headers_arkhe():
         "X-Client-ID": ARKHE_CLIENT_ID,
         "X-Client-Secret": ARKHE_CLIENT_SECRET,
         "Content-Type": "application/json"
+    }
+
+
+def cobranca_pix_esta_paga(status):
+    """Normaliza os formatos de status retornados pela provedora Pix."""
+    if isinstance(status, bool):
+        return status
+
+    if isinstance(status, (int, float)):
+        return int(status) == 1
+
+    status_normalizado = str(status or '').strip().upper()
+    return status_normalizado in {
+        '1', 'PAGO', 'PAGA', 'PAID', 'APPROVED', 'APROVADO',
+        'CONFIRMADO', 'CONFIRMED', 'CONCLUIDO', 'CONCLUIDA',
+        'COMPLETED', 'RECEBIDO', 'LIQUIDADO'
     }
 
 
@@ -5597,18 +5811,112 @@ def confirmar_pagamento_pix(id_parcela, tipo_parcela):
     try:
         data_pagamento = datetime.date.today()
 
+        id_cliente = None
+        id_advogado = None
+        valor_parcela = None
+        numero_parcela = None
+        tipo_processo = None
+        nome_cliente = 'Cliente'
+
         if tipo_parcela == "exito":
-            cur.execute(
-                "UPDATE PARCELAS_EXITO SET STATUS = 'PAGA', DATA_PAGAMENTO = ? "
-                "WHERE ID_PARCELA_EXITO = ?",
-                (data_pagamento, id_parcela)
-            )
+            cur.execute("""
+                SELECT pe.VALOR_PARCELA, pe.NUMERO_PARCELA,
+                       p.ID_USUARIOS_CLIENTE, p.ID_USUARIOS_ADVOGADO,
+                       p.TIPO_PROCESSO, u.NOME, pe.STATUS
+                FROM PARCELAS_EXITO pe
+                INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
+                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+                INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
+                WHERE pe.ID_PARCELA_EXITO = ?
+            """, (id_parcela,))
+
+            row = cur.fetchone()
+
+            if not row:
+                return False
+
+            if str(row[6] or '').upper() == 'PAGA':
+                return True
+            valor_parcela = row[0]
+            numero_parcela = row[1]
+            id_cliente = row[2]
+            id_advogado = row[3]
+            tipo_processo = row[4] or 'Processo'
+            nome_cliente = row[5] or 'Cliente'
+
+            cur.execute("""
+                UPDATE PARCELAS_EXITO SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
+                WHERE ID_PARCELA_EXITO = ?
+            """, (data_pagamento, id_parcela))
+
         else:
-            cur.execute(
-                "UPDATE PARCELAS SET STATUS = 'PAGA', DATA_PAGAMENTO = ? "
-                "WHERE ID_PARCELAS = ?",
-                (data_pagamento, id_parcela)
-            )
+            cur.execute("""
+                SELECT parc.VALOR_PARCELA, parc.NUMERO_PARCELA,
+                       p.ID_USUARIOS_CLIENTE, p.ID_USUARIOS_ADVOGADO,
+                       p.TIPO_PROCESSO, u.NOME, parc.STATUS
+                FROM PARCELAS parc
+                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+                INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
+                WHERE parc.ID_PARCELAS = ?
+            """, (id_parcela,))
+
+            row = cur.fetchone()
+
+            if not row:
+                return False
+
+            if str(row[6] or '').upper() == 'PAGA':
+                return True
+            valor_parcela = row[0]
+            numero_parcela = row[1]
+            id_cliente = row[2]
+            id_advogado = row[3]
+            tipo_processo = row[4] or 'Processo'
+            nome_cliente = row[5] or 'Cliente'
+
+            cur.execute("""
+                UPDATE PARCELAS SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
+                WHERE ID_PARCELAS = ?
+            """, (data_pagamento, id_parcela))
+
+        if valor_parcela is not None:
+            valor_fmt = formatar_valor_br(valor_parcela)
+            identificacao = 'Entrada' if numero_parcela == 0 else f'{numero_parcela}ª parcela'
+            sufixo_exito = ' - Êxito' if tipo_parcela == 'exito' else ''
+
+            if id_advogado:
+                criar_notificacao(
+                    cur,
+                    id_advogado,
+                    'PAGAMENTO_REALIZADO_CLIENTE',
+                    'Pagamento recebido',
+                    f'{nome_cliente} pagou {valor_fmt} '
+                    f'({tipo_processo}{sufixo_exito} - {identificacao}).',
+                    {
+                        'id_parcela': id_parcela,
+                        'id_cliente': id_cliente,
+                        'nome_cliente': nome_cliente,
+                        'valor': float(valor_parcela) if valor_parcela else 0,
+                        'tipo_parcela': tipo_parcela
+                    }
+                )
+
+            if id_cliente:
+                criar_notificacao(
+                    cur,
+                    id_cliente,
+                    'PAGAMENTO_CONFIRMADO',
+                    'Pagamento confirmado',
+                    f'Recebemos seu pagamento de {valor_fmt} '
+                    f'({tipo_processo}{sufixo_exito} - {identificacao}).',
+                    {
+                        'id_parcela': id_parcela,
+                        'valor': float(valor_parcela) if valor_parcela else 0,
+                        'tipo_parcela': tipo_parcela
+                    }
+                )
 
         con.commit()
         return True
@@ -5616,6 +5924,8 @@ def confirmar_pagamento_pix(id_parcela, tipo_parcela):
     except Exception as e:
         con.rollback()
         print(f"[PIX] Erro ao confirmar pagamento: {e}")
+        import traceback
+        traceback.print_exc()
         return False
     finally:
         cur.close()
@@ -5734,12 +6044,23 @@ def consultar_cobranca_pix(id_cobranca):
         if resposta.status_code >= 400:
             return jsonify({'error': 'Cobrança não encontrada'}), 404
 
-        dados = resposta.json()
-        status_pix = dados.get('status')
-        pago = status_pix == 1
+        dados_resposta = resposta.json()
+        if not isinstance(dados_resposta, dict):
+            return jsonify({'error': 'Resposta inválida da cobrança Pix'}), 502
+        dados = dados_resposta.get('data', dados_resposta)
+        if not isinstance(dados, dict):
+            return jsonify({'error': 'Resposta inválida da cobrança Pix'}), 502
+
+        status_pix = dados.get('status') or dados.get('situacao') or dados.get('estado')
+        pago = (
+            cobranca_pix_esta_paga(status_pix)
+            or dados.get('pago') is True
+            or dados.get('paid') is True
+        )
 
         if pago and id_parcela:
-            confirmar_pagamento_pix(id_parcela, tipo_parcela)
+            if not confirmar_pagamento_pix(id_parcela, tipo_parcela):
+                return jsonify({'error': 'Não foi possível registrar o pagamento'}), 500
 
         return jsonify({
             'id_cobranca': dados.get('id_cobranca'),

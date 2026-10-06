@@ -721,3 +721,53 @@ def enviar_email_agendamento_reagendado(
         import traceback
         traceback.print_exc()
         return False
+
+
+def criar_notificacao(cur, id_usuario, tipo, titulo, mensagem, dados_extras=None):
+    cur.execute("""
+        INSERT INTO NOTIFICACOES (
+            ID_USUARIOS,
+            TIPO,
+            TITULO,
+            MENSAGEM
+        )
+        VALUES (?, ?, ?, ?)
+        RETURNING ID_NOTIFICACAO
+    """, (id_usuario, tipo, titulo, mensagem))
+
+    id_notificacao = cur.fetchone()[0]
+
+    agora = datetime.datetime.now()
+
+    notificacao = {
+        'id': id_notificacao,
+        'tipo': tipo,
+        'titulo': titulo,
+        'mensagem': mensagem,
+        'lida': False,
+        'data_criacao': agora.isoformat(),
+        'data_leitura': None,
+    }
+
+    if dados_extras:
+        notificacao.update(dados_extras)
+
+    try:
+        from main import socketio
+        socketio.emit(
+            'nova_notificacao',
+            notificacao,
+            room=f'usuario_{id_usuario}'
+        )
+        print(f'[NOTIFICACAO] Emitida para usuario_{id_usuario}: {tipo}')
+    except Exception as e:
+        print(f'[NOTIFICACAO] Erro ao emitir socket: {e}')
+
+    return id_notificacao
+
+
+def formatar_valor_br(valor):
+    try:
+        return f'R$ {float(valor):,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
+    except (TypeError, ValueError):
+        return 'R$ 0,00'
