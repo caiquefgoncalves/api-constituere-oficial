@@ -25,7 +25,10 @@ ALLOWED_ORIGINS = [
     "http://10.92.11.19:5173",
     "http://10.92.11.19:3000",
     "http://10.92.11.25:5173",
-    "http://10.92.11.25:3000"
+    "http://10.92.11.25:3000",
+    "http://192.168.0.134:5000",
+    "http://192.168.0.134:5173",
+    "http://192.168.0.134:3000",
 ]
 
 CORS(
@@ -190,6 +193,7 @@ from agendamentos import *
 from documentos import *
 from veritas_ai import *
 from financeiro import *
+from dm import *
 
 
 if __name__ == '__main__':
