@@ -17,14 +17,14 @@ from main import app
 ASSISTANT_NAME = "Veritas"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
+DEFAULT_NVIDIA_MODEL = "moonshotai/kimi-k3"
 DEFAULT_NVIDIA_MODELS = (DEFAULT_NVIDIA_MODEL,)
 DEFAULT_MODEL_TIMEOUT_SECONDS = 30.0
 DEFAULT_OPENROUTER_MODELS = (
-  "nvidia/nemotron-3.5-lightning:free",
-  "minimax/minimax-m3.1-flash:free",
-  "nvidia/nemotron-3.5-super-vl:free",
-  "dots-studio/dots-3-note-preview:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "minimax/minimax-m3.1-flash:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "thinkingmachines/inkling-small:free",
 )
 DEFAULT_PROVIDER_PRIORITY = "OPENROUTER"
 
@@ -2045,7 +2045,9 @@ def _get_model_timeout_seconds():
         configured_timeout = float(
             os.getenv("VERITAS_MODEL_TIMEOUT_SECONDS", DEFAULT_MODEL_TIMEOUT_SECONDS)
         )
-        return min(max(configured_timeout, 3.0), 60.0)
+        # A interface aguarda a resposta desta chamada. Limitar cada provedor
+        # evita que várias tentativas indisponíveis deixem o chat travado.
+        return min(max(configured_timeout, 3.0), 15.0)
     except (TypeError, ValueError):
         return DEFAULT_MODEL_TIMEOUT_SECONDS
 
@@ -2457,6 +2459,7 @@ def _call_openrouter(question, authorized_context, history, force_provider=None)
     from openai import OpenAI
 
     preferred_provider = force_provider or _get_provider_priority()
+    timeout_modelo = _get_model_timeout_seconds()
     use_nvidia = preferred_provider == "NVIDIA"
 
     if use_nvidia and not nvidia_api_key:
@@ -2467,7 +2470,7 @@ def _call_openrouter(question, authorized_context, history, force_provider=None)
         client = OpenAI(
             api_key=openrouter_api_key,
             base_url=OPENROUTER_BASE_URL,
-            timeout=60.0,
+            timeout=timeout_modelo,
             max_retries=0,
             default_headers={
                 "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "http://localhost:5173"),
@@ -2479,7 +2482,7 @@ def _call_openrouter(question, authorized_context, history, force_provider=None)
         client = OpenAI(
             api_key=nvidia_api_key,
             base_url=NVIDIA_BASE_URL,
-            timeout=60.0,
+            timeout=timeout_modelo,
             max_retries=0,
         )
         models = _get_nvidia_models()
@@ -2541,7 +2544,9 @@ CONTEXTO AUTORIZADO:
     messages.extend(history)
     messages.append({"role": "user", "content": user_input})
 
-    for model in models:
+    # O primeiro modelo de cada provedor é a prioridade configurada. Caso ele
+    # falhe, troca-se de provedor em vez de acumular várias esperas longas.
+    for model in models[:1]:
         attempt_started = time.perf_counter()
         try:
             response = client.chat.completions.create(
@@ -2549,7 +2554,7 @@ CONTEXTO AUTORIZADO:
                 messages=messages,
                 tools=SCHEDULE_TOOLS,
                 tool_choice="auto",
-                timeout=_get_model_timeout_seconds(),
+                timeout=timeout_modelo,
             )
             message = response.choices[0].message
             tool_calls = message.tool_calls or []

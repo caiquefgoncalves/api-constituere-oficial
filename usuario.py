@@ -103,7 +103,7 @@ def gerar_pdf_logs_escritorio(id_escritorio):
             request.args.get('advogado')
         )
         return send_file(
-            BytesIO(gerar_pdf_logs(logs, 'Log do escritorio')),
+            BytesIO(gerar_pdf_logs(logs['logs'], 'Log do escritorio')),
             mimetype='application/pdf', as_attachment=True,
             download_name='log-escritorio.pdf'
         )
@@ -2049,7 +2049,12 @@ def atualizar_cliente(id_cliente):
 
     try:
         cur.execute("""
-            SELECT ID_USUARIOS, TIPO
+            SELECT ID_USUARIOS, TIPO,
+                   NOME, RAZAO_SOCIAL, NOME_FANTASIA, CPF, CNPJ,
+                   EMAIL, TELEFONE, DATA_NASCIMENTO, SEXO, RG,
+                   ORGAO_EXPEDIDOR, CARTERA_TRABALHO, SERIE_CARTERA,
+                   PROFISSAO, ESTADO_CIVIL, NACIONALIDADE, CEP,
+                   LOGRADOURO, NUMERO, COMPLEMENTO, BAIRRO, CIDADE, ESTADO
             FROM USUARIOS
             WHERE ID_USUARIOS = ?
               AND TIPO IN (2, 3)
@@ -2061,6 +2066,19 @@ def atualizar_cliente(id_cliente):
             return jsonify({'error': 'Cliente não encontrado ou não pertence a você'}), 404
 
         tipo_cliente = row[1]
+        valores_atuais = dict(zip((
+            'nome', 'razao_social', 'nome_fantasia', 'cpf', 'cnpj',
+            'email', 'telefone', 'data_nascimento', 'sexo', 'rg',
+            'orgao_expedidor', 'carteira_trabalho', 'serie_carteira',
+            'profissao', 'estado_civil', 'nacionalidade', 'cep',
+            'logradouro', 'numero', 'complemento', 'bairro', 'cidade', 'estado'
+        ), row[2:]))
+
+        def valor_atualizado(campo):
+            """Preserva o dado existente quando o cliente não o enviou."""
+            if campo not in dados or dados.get(campo) in (None, ''):
+                return valores_atuais[campo]
+            return dados.get(campo)
 
 
         if tipo_cliente == 2:
@@ -2098,7 +2116,7 @@ def atualizar_cliente(id_cliente):
             if cur.fetchone():
                 return jsonify({'error': 'E-mail já cadastrado para outro usuário'}), 400
 
-        data_nasc = dados.get('data_nascimento') or None
+        data_nasc = valor_atualizado('data_nascimento')
 
         cur.execute("""
             UPDATE USUARIOS SET
@@ -2127,29 +2145,29 @@ def atualizar_cliente(id_cliente):
                 ESTADO = ?
             WHERE ID_USUARIOS = ?
         """, (
-            dados.get('nome'),
-            dados.get('razao_social'),
-            dados.get('nome_fantasia'),
-            dados.get('cpf') or None,
-            dados.get('cnpj') or None,
-            dados.get('email'),
-            dados.get('telefone'),
+            valor_atualizado('nome'),
+            valor_atualizado('razao_social'),
+            valor_atualizado('nome_fantasia'),
+            valor_atualizado('cpf'),
+            valor_atualizado('cnpj'),
+            valor_atualizado('email'),
+            valor_atualizado('telefone'),
             data_nasc,
-            dados.get('sexo') or None,
-            dados.get('rg') or None,
-            dados.get('orgao_expedidor') or None,
-            dados.get('carteira_trabalho') or None,
-            dados.get('serie_carteira') or None,
-            dados.get('profissao') or None,
-            dados.get('estado_civil') or None,
-            dados.get('nacionalidade') or None,
-            dados.get('cep') or None,
-            dados.get('logradouro') or None,
-            dados.get('numero') or None,
-            dados.get('complemento') or None,
-            dados.get('bairro') or None,
-            dados.get('cidade') or None,
-            dados.get('estado') or None,
+            valor_atualizado('sexo'),
+            valor_atualizado('rg'),
+            valor_atualizado('orgao_expedidor'),
+            valor_atualizado('carteira_trabalho'),
+            valor_atualizado('serie_carteira'),
+            valor_atualizado('profissao'),
+            valor_atualizado('estado_civil'),
+            valor_atualizado('nacionalidade'),
+            valor_atualizado('cep'),
+            valor_atualizado('logradouro'),
+            valor_atualizado('numero'),
+            valor_atualizado('complemento'),
+            valor_atualizado('bairro'),
+            valor_atualizado('cidade'),
+            valor_atualizado('estado'),
             id_cliente
         ))
 

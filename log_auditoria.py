@@ -1,15 +1,17 @@
 import json
 import math
 import os
+import re
 import socket
 import unicodedata
+import uuid
 from datetime import date, datetime, time
 
 import fdb
 from fpdf import FPDF
 from flask import current_app, g, request
 
-from db import conexao
+from db import _cliente_firebird, conexao
 
 
 _CAMPOS_SIGILOSOS = {'senha', 'confirmar_senha', 'token', 'authorization', 'acess_token'}
@@ -17,6 +19,8 @@ _ROTAS_CONVERSA_IA = {'/ai/veritas'}
 
 _ARTIGOS = {
     'AGENDAMENTOS': ('um', 'agendamento'),
+    'ATUALIZACOES': ('uma', 'atualização'),
+    'MODELOS_DOCUMENTOS': ('um', 'modelo de documento'),
     'PROCESSOS': ('um', 'processo'),
     'USUARIOS': ('um', 'cliente'),
     'ADVOGADO_ESCRITORIO': ('um', 'advogado do escritório'),
@@ -54,7 +58,7 @@ def conexao_log():
         'password': current_app.config['LOG_DB_PASSWORD'],
     }
 
-    cliente_firebird = os.getenv('LOG_FIREBIRD_CLIENT_DLL')
+    cliente_firebird = os.getenv('LOG_FIREBIRD_CLIENT_DLL') or _cliente_firebird()
     if cliente_firebird:
         parametros['fb_library_name'] = cliente_firebird
 
@@ -149,6 +153,7 @@ def _nome_usuario(id_usuario):
 
 def _descricao_evento():
     caminho = request.path.lower()
+    argumentos = request.view_args or {}
     if caminho.endswith('/documento'):
         return 'GERAR_PDF', 'PROCESSOS'
     if caminho.endswith('/confirmar'):
@@ -163,6 +168,17 @@ def _descricao_evento():
         return 'INATIVAR', caminho.split('/')[1].upper()
     if caminho.endswith('/ativar'):
         return 'ATIVAR', caminho.split('/')[1].upper()
+
+    # Rotas filhas devem registrar a tabela do registro efetivamente alterado,
+    # e não a tabela do recurso pai presente no início da URL.
+    if 'id_atualizacao' in argumentos:
+        return ('EXCLUIR' if request.method == 'DELETE' else 'EDITAR'), 'ATUALIZACOES'
+    if 'id_modelo' in argumentos:
+        return 'EDITAR', 'MODELOS_DOCUMENTOS'
+    if caminho in {'/editar_perfil', '/editar_perfil_cliente'}:
+        return 'EDITAR', 'USUARIOS'
+    if caminho == '/editar_escritorio':
+        return 'EDITAR', 'ESCRITORIOS'
 
     tabela_por_rota = {
         '/agendamento': 'AGENDAMENTOS',
@@ -182,6 +198,14 @@ def _descricao_evento():
 
 
 def _id_registro(view_args):
+    # Em rotas aninhadas, o último identificador é o registro modificado.
+    for chave in ('id_atualizacao', 'id_modelo', 'id_agendamento', 'id_processo', 'id_cliente', 'id_advogado', 'id_escritorio'):
+        valor = (view_args or {}).get(chave)
+        if valor is not None:
+            try:
+                return int(valor)
+            except (TypeError, ValueError):
+                return None
     for chave, valor in (view_args or {}).items():
         if chave.startswith('id_'):
             try:
@@ -194,6 +218,18 @@ def _id_registro(view_args):
 def _alvo_snapshot():
     argumentos = request.view_args or {}
     caminho = request.path.lower()
+    if 'id_atualizacao' in argumentos:
+        return (
+            'ATUALIZACOES',
+            'ID_ATUALIZACOES = ? AND ID_PROCESSOS = ?',
+            (argumentos['id_atualizacao'], argumentos['id_processo'])
+        )
+    if 'id_modelo' in argumentos:
+        return (
+            'MODELOS_DOCUMENTOS',
+            'ID_MODELOS_DOCUMENTOS = ? AND ID_ESCRITORIOS = ?',
+            (argumentos['id_modelo'], argumentos['id_escritorio'])
+        )
     if 'id_agendamento' in argumentos:
         return 'AGENDAMENTOS', 'ID_AGENDAMENTOS = ?', (argumentos['id_agendamento'],)
     if 'id_processo' in argumentos:
@@ -206,10 +242,15 @@ def _alvo_snapshot():
             'ID_USUARIOS = ? AND ID_ESCRITORIOS = ?',
             (argumentos['id_advogado'], argumentos['id_escritorio'])
         )
-    if caminho == '/editar_perfil':
+    if caminho in {'/editar_perfil', '/editar_perfil_cliente'}:
         token = getattr(g, 'auditoria_token', None) or {}
         if token.get('id_usuarios'):
             return 'USUARIOS', 'ID_USUARIOS = ?', (token['id_usuarios'],)
+    if caminho == '/editar_escritorio':
+        token = getattr(g, 'auditoria_token', None) or {}
+        id_escritorio = _identificar_escritorio(token.get('id_usuarios'), {}, argumentos)
+        if id_escritorio:
+            return 'ESCRITORIOS', 'ID_ESCRITORIOS = ?', (id_escritorio,)
     return None
 
 
@@ -280,8 +321,10 @@ def registrar_requisicao(token_data):
 
     acao, tabela = _descricao_evento()
     detalhes = json.dumps({
+        'id_evento': uuid.uuid4().hex,
         'metodo': request.method,
         'rota': request.path,
+        'parametros_rota': view_args,
         'dados': dados,
     }, ensure_ascii=False, default=str)
 
@@ -373,6 +416,66 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo):
     return f'{nome} {acao_txt} {alvo}.'
 
 
+def _alvo_humano(tabela, id_registro, detalhes=None):
+    _, substantivo = _ARTIGOS.get(tabela, ('um', (tabela or 'registro').lower()))
+    alvo = substantivo
+    alvo = f'{alvo} #{id_registro}' if id_registro else alvo
+
+    if tabela == 'ATUALIZACOES':
+        parametros = (detalhes or {}).get('parametros_rota') or {}
+        id_processo = parametros.get('id_processo')
+        if not id_processo:
+            rota = (detalhes or {}).get('rota') or ''
+            correspondencia = re.search(r'/processo/(\d+)/atualizacoes', rota)
+            id_processo = correspondencia.group(1) if correspondencia else None
+        if id_processo:
+            alvo += f' do processo #{id_processo}'
+
+    return alvo
+
+
+def _agrupar_eventos(todos):
+    """Reúne as mudanças criadas por uma única requisição."""
+    eventos = {}
+    agrupados = []
+
+    for log in todos:
+        try:
+            detalhes = json.loads(log.get('detalhes') or '{}')
+        except (TypeError, json.JSONDecodeError):
+            detalhes = {}
+        id_evento = detalhes.get('id_evento')
+
+        if not id_evento:
+            agrupados.append(log)
+            continue
+
+        alteracao = {
+            'campo': log['campo'],
+            'valor_antigo': log['valor_antigo'],
+            'valor_novo': log['valor_novo'],
+        }
+        evento = eventos.get(id_evento)
+        if evento is None:
+            log['alteracoes'] = [alteracao]
+            eventos[id_evento] = log
+            agrupados.append(log)
+        else:
+            evento['alteracoes'].append(alteracao)
+
+    for log in agrupados:
+        alteracoes = log.get('alteracoes', [])
+        if log['acao'] == 'EDITAR' and len(alteracoes) > 1:
+            campos = ', '.join(item['campo'].replace('_', ' ').lower() for item in alteracoes)
+            log['descricao_humana'] = (
+                f"{log['nome_usuario'] or 'O sistema'} editou "
+                f"{len(alteracoes)} campos em {_alvo_humano(log['tabela_afetada'], log['id_registro_afetado'], detalhes)}: "
+                f"{campos}."
+            )
+
+    return agrupados
+
+
 def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advogado=None,
                 pagina=1, por_pagina=6):
     """
@@ -457,6 +560,8 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
         if advogado:
             todos = [log for log in todos if log['nome_usuario'] == advogado]
 
+        todos = _agrupar_eventos(todos)
+
         total = len(todos)
         total_paginas = max(1, math.ceil(total / por_pagina)) if total > 0 else 1
 
@@ -488,6 +593,21 @@ def _texto_pdf_log(valor, tamanho=None):
     return texto
 
 
+def _resumo_alteracoes_pdf(log):
+    alteracoes = log.get('alteracoes') or [{
+        'campo': log.get('campo'),
+        'valor_antigo': log.get('valor_antigo'),
+        'valor_novo': log.get('valor_novo'),
+    }]
+    partes = []
+    for alteracao in alteracoes:
+        campo = _texto_pdf_log(alteracao.get('campo'))
+        antigo = _texto_pdf_log(alteracao.get('valor_antigo'))
+        novo = _texto_pdf_log(alteracao.get('valor_novo'))
+        partes.append(f'{campo}: {antigo} -> {novo}')
+    return ' | '.join(partes)
+
+
 class RelatorioLogPDF(FPDF):
     def header(self):
         self.set_fill_color(0, 71, 171)
@@ -510,6 +630,11 @@ class RelatorioLogPDF(FPDF):
 
 
 def gerar_pdf_logs(logs, titulo='Log do escritorio'):
+    # A API paginada retorna um dicionário; chamadas internas podem fornecer
+    # diretamente a lista de registros.
+    if isinstance(logs, dict):
+        logs = logs.get('logs', [])
+
     pdf = RelatorioLogPDF(orientation='L', unit='mm', format='A4')
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
@@ -532,8 +657,8 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
     pdf.ln(5)
 
     colunas = [
-        ('Nome', 30, 22), ('Acao', 22, 16), ('Data', 20, 12), ('Hora', 15, 8),
-        ('Descricao', 120, 100), ('Maquina', 30, 20)
+        ('Nome', 30, 22), ('Acao', 20, 16), ('Registro afetado', 35, 28),
+        ('Data', 20, 12), ('Hora', 15, 8), ('Alteracoes', 112, 150), ('Maquina', 33, 22)
     ]
 
     def cabecalho_tabela():
@@ -556,20 +681,47 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
         data_hora = log.get('data_hora') or ''
         data = f'{data_hora[8:10]}/{data_hora[5:7]}/{data_hora[:4]}' if len(data_hora) >= 10 else '-'
         hora = data_hora[11:16] if len(data_hora) >= 16 else '-'
+        registro = _alvo_humano(
+            log.get('tabela_afetada'),
+            log.get('id_registro_afetado')
+        )
+        alteracoes = _resumo_alteracoes_pdf(log)
         valores = [
             log.get('nome_usuario'),
             log.get('acao'),
+            registro,
             data,
             hora,
-            log.get('descricao_humana'),
+            alteracoes,
             log.get('maquina'),
         ]
+
+        # A coluna de alterações pode conter vários campos e valores longos.
+        # Aumenta a altura da linha para não descartar nenhuma informação.
+        altura_linha = max(7, 4 * math.ceil(max(1, len(alteracoes)) / 90))
+        if pdf.get_y() + altura_linha > 190:
+            pdf.add_page()
+            cabecalho_tabela()
+            pdf.set_font('Helvetica', '', 6.5)
+
+        y_inicial = pdf.get_y()
         if indice % 2:
             pdf.set_fill_color(250, 252, 255)
         else:
             pdf.set_fill_color(255, 255, 255)
-        for (_, largura, limite), valor in zip(colunas, valores):
-            pdf.cell(largura, 7, _texto_pdf_log(valor, limite), border=1, fill=True)
-        pdf.ln()
+        for indice_coluna, ((_, largura, limite), valor) in enumerate(zip(colunas, valores)):
+            if indice_coluna == 5:
+                pdf.multi_cell(
+                    largura,
+                    4,
+                    _texto_pdf_log(valor),
+                    border=1,
+                    fill=True,
+                    new_x='RIGHT',
+                    new_y='TOP',
+                )
+            else:
+                pdf.cell(largura, altura_linha, _texto_pdf_log(valor, limite), border=1, fill=True)
+        pdf.set_y(y_inicial + altura_linha)
 
     return bytes(pdf.output())
