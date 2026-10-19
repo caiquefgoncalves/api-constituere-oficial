@@ -8,7 +8,7 @@ from fpdf import FPDF
 import unicodedata
 
 
-def _converter_data(valor):
+def converter_data(valor):
     if not valor:
         return None
     if isinstance(valor, datetime.date):
@@ -22,7 +22,7 @@ def _converter_data(valor):
     return None
 
 
-def _periodo_para_datas(periodo, data_ini=None, data_fim=None):
+def periodo_para_datas(periodo, data_ini=None, data_fim=None):
     hoje = datetime.date.today()
 
     if periodo == 'mes':
@@ -39,8 +39,8 @@ def _periodo_para_datas(periodo, data_ini=None, data_fim=None):
         inicio = hoje - datetime.timedelta(days=90)
         fim = hoje
     elif periodo == 'personalizado':
-        inicio = _converter_data(data_ini)
-        fim = _converter_data(data_fim)
+        inicio = converter_data(data_ini)
+        fim = converter_data(data_fim)
     else:
         inicio = hoje.replace(day=1)
         fim = hoje
@@ -48,7 +48,7 @@ def _periodo_para_datas(periodo, data_ini=None, data_fim=None):
     return inicio, fim
 
 
-def _verificar_acesso_escritorio(cur, id_usuario, id_escritorio):
+def verificar_acesso_escritorio(cur, id_usuario, id_escritorio):
     cur.execute("""
         SELECT STATUS, ATIVO
         FROM ADVOGADO_ESCRITORIO
@@ -66,40 +66,40 @@ def _verificar_acesso_escritorio(cur, id_usuario, id_escritorio):
     return True, row[0]
 
 
-def _status_parcela(data_venc, status_db, hoje, data_pagamento=None):
+def status_parcela(data_venc, status_db, hoje, data_pagamento=None):
     status_db = (status_db or '').strip().upper()
 
     if data_pagamento or status_db in ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO', 'QUITADA', 'QUITADO'):
-        return 'recebida'
+        return 'Recebido'
 
     if data_venc and data_venc < hoje:
-        return 'atrasado'
+        return 'Atrasado'
 
-    return ''
+    return 'A pagar'
 
 
-def _status_lancamento_manual(tipo, status_db, data_lanc, hoje):
+def status_lancamento_manual(tipo, status_db, data_lanc, hoje):
     tipo = (tipo or '').lower()
     status_db = (status_db or '').lower()
 
     if tipo == 'receita':
         if status_db in ('recebida', 'recebido', 'pago', 'paga'):
-            return 'recebida'
+            return 'Recebido'
         if data_lanc and data_lanc < hoje:
-            return 'atrasado'
-        return ''
+            return 'Atrasado'
+        return 'A pagar'
 
     if tipo == 'despesa':
         if status_db in ('pago', 'paga', 'recebida', 'recebido'):
-            return 'pago'
+            return 'Recebido'
         if data_lanc and data_lanc < hoje:
-            return 'atrasado'
-        return ''
+            return 'Atrasado'
+        return 'A pagar'
 
-    return status_db or ''
+    return status_db or 'A pagar'
 
 
-def _dentro_periodo(data_obj, inicio, fim):
+def dentro_periodo(data_obj, inicio, fim):
     if data_obj is None:
         return False
     if inicio and data_obj < inicio:
@@ -128,7 +128,7 @@ def listar_lancamentos_escritorio(id_escritorio):
     if tipo not in ['todos', 'receita', 'despesa']:
         return jsonify({'error': 'Tipo inválido'}), 400
 
-    inicio, fim = _periodo_para_datas(periodo, data_ini, data_fim)
+    inicio, fim = periodo_para_datas(periodo, data_ini, data_fim)
 
     hoje = datetime.date.today()
 
@@ -136,7 +136,7 @@ def listar_lancamentos_escritorio(id_escritorio):
     cur = con.cursor()
 
     try:
-        permitido, msg = _verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
         if not permitido:
             return jsonify({'error': msg}), 403
 
@@ -165,7 +165,7 @@ def listar_lancamentos_escritorio(id_escritorio):
                 data_lanc = row[4]
                 data_obj = data_lanc.date() if hasattr(data_lanc, 'date') else data_lanc
 
-                status_calc = _status_lancamento_manual(
+                status_calc = status_lancamento_manual(
                     'despesa', row[7], data_obj, hoje
                 )
 
@@ -206,7 +206,7 @@ def listar_lancamentos_escritorio(id_escritorio):
                 data_lanc = row[4]
                 data_obj = data_lanc.date() if hasattr(data_lanc, 'date') else data_lanc
 
-                status_calc = _status_lancamento_manual(
+                status_calc = status_lancamento_manual(
                     'receita', row[7], data_obj, hoje
                 )
 
@@ -274,14 +274,14 @@ def listar_lancamentos_escritorio(id_escritorio):
                 venc = converter_data_pagamento(venc_raw)
                 pag = converter_data_pagamento(pag_raw)
 
-                status_calc = _status_parcela(venc, status_db, hoje, pag)
+                status_calc = status_parcela(venc, status_db, hoje, pag)
 
-                if status_calc == 'recebida':
+                if status_calc == 'Recebido':
                     data_exibir = pag if pag else venc
                 else:
                     data_exibir = venc
 
-                if not _dentro_periodo(data_exibir, inicio, fim):
+                if not dentro_periodo(data_exibir, inicio, fim):
                     continue
 
                 identificacao = 'Entrada' if num_parc == 0 else f'{num_parc}ª parcela'
@@ -351,14 +351,14 @@ def listar_lancamentos_escritorio(id_escritorio):
                 venc = converter_data_pagamento(venc_raw)
                 pag = converter_data_pagamento(pag_raw)
 
-                status_calc = _status_parcela(venc, status_db, hoje, pag)
+                status_calc = status_parcela(venc, status_db, hoje, pag)
 
-                if status_calc == 'recebida':
+                if status_calc == 'Recebido':
                     data_exibir = pag if pag else venc
                 else:
                     data_exibir = venc
 
-                if not _dentro_periodo(data_exibir, inicio, fim):
+                if not dentro_periodo(data_exibir, inicio, fim):
                     continue
 
                 identificacao = 'Entrada' if num_parc == 0 else f'{num_parc}ª parcela'
@@ -440,20 +440,20 @@ def criar_lancamento_escritorio(id_escritorio):
     if valor <= 0:
         return jsonify({'error': 'Valor deve ser maior que zero'}), 400
 
-    data_obj = _converter_data(data_raw)
+    data_obj = converter_data(data_raw)
     if not data_obj:
         return jsonify({'error': 'Data inválida'}), 400
 
     if data_obj > datetime.date.today():
         return jsonify({'error': 'A data não pode ser futura'}), 400
 
-    status_raw = 'recebida' if tipo == 'receita' else ''
+    status_raw = 'recebida' if tipo == 'receita' else 'a_pagar'
 
     con = conexao()
     cur = con.cursor()
 
     try:
-        permitido, msg = _verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
         if not permitido:
             return jsonify({'error': msg}), 403
 
@@ -514,7 +514,7 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
     cur = con.cursor()
 
     try:
-        permitido, msg = _verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
         if not permitido:
             return jsonify({'error': msg}), 403
 
@@ -538,7 +538,7 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
 
         cur.execute("""
             UPDATE LANCAMENTOS_FINANCEIROS
-            SET STATUS = 'pago'
+            SET STATUS = 'Recebido'
             WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
         """, (id_lancamento, id_escritorio))
 
@@ -572,7 +572,7 @@ def resumo_financeiro_escritorio(id_escritorio):
     data_ini = request.args.get('data_inicial')
     data_fim = request.args.get('data_final')
 
-    inicio, fim = _periodo_para_datas(periodo, data_ini, data_fim)
+    inicio, fim = periodo_para_datas(periodo, data_ini, data_fim)
 
     con = conexao()
     cur = con.cursor()
@@ -580,7 +580,7 @@ def resumo_financeiro_escritorio(id_escritorio):
     hoje = datetime.date.today()
 
     try:
-        permitido, msg = _verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
         if not permitido:
             return jsonify({'error': msg}), 403
 
@@ -614,20 +614,20 @@ def resumo_financeiro_escritorio(id_escritorio):
 
             data_obj = data_lanc.date() if hasattr(data_lanc, 'date') else data_lanc
 
-            status_calc = _status_lancamento_manual(tipo, status_db, data_obj, hoje)
+            status_calc = status_lancamento_manual(tipo, status_db, data_obj, hoje)
 
             if tipo == 'receita':
-                if status_calc == 'recebida':
+                if status_calc == 'Recebido':
                     receita_manual_recebida += v
-                elif status_calc == 'atrasado':
+                elif status_calc == 'Atrasado':
                     receita_manual_atrasada += v
                 else:
                     receita_manual_pendente += v
 
             elif tipo == 'despesa':
-                if status_calc == 'pago':
+                if status_calc == 'Recebido':
                     despesa_paga += v
-                elif status_calc == 'atrasado':
+                elif status_calc == 'Atrasado':
                     despesa_atrasada += v
                 else:
                     despesa_pendente += v
@@ -662,19 +662,19 @@ def resumo_financeiro_escritorio(id_escritorio):
             venc = converter_data_pagamento(venc_raw)
             pag = converter_data_pagamento(pag_raw)
 
-            status_calc = _status_parcela(venc, status_db, hoje, pag)
+            status_calc = status_parcela(venc, status_db, hoje, pag)
 
-            if status_calc == 'recebida':
+            if status_calc == 'Recebido':
                 data_ref = pag if pag else venc
             else:
                 data_ref = venc
 
-            if not _dentro_periodo(data_ref, inicio, fim):
+            if not dentro_periodo(data_ref, inicio, fim):
                 continue
 
-            if status_calc == 'recebida':
+            if status_calc == 'Recebido':
                 receita_parcelas_pagas += v
-            elif status_calc == 'atrasado':
+            elif status_calc == 'Atrasado':
                 receita_parcelas_atrasada += v
             else:
                 receita_parcelas_pendente += v
@@ -706,19 +706,19 @@ def resumo_financeiro_escritorio(id_escritorio):
             venc = converter_data_pagamento(venc_raw)
             pag = converter_data_pagamento(pag_raw)
 
-            status_calc = _status_parcela(venc, status_db, hoje, pag)
+            status_calc = status_parcela(venc, status_db, hoje, pag)
 
-            if status_calc == 'recebida':
+            if status_calc == 'Recebido':
                 data_ref = pag if pag else venc
             else:
                 data_ref = venc
 
-            if not _dentro_periodo(data_ref, inicio, fim):
+            if not dentro_periodo(data_ref, inicio, fim):
                 continue
 
-            if status_calc == 'recebida':
+            if status_calc == 'Recebido':
                 receita_parcelas_pagas += v
-            elif status_calc == 'atrasado':
+            elif status_calc == 'Atrasado':
                 receita_parcelas_atrasada += v
             else:
                 receita_parcelas_pendente += v
@@ -729,10 +729,9 @@ def resumo_financeiro_escritorio(id_escritorio):
 
         receita_a_receber = receita_pendente + receita_atrasada
         total_receitas = receita_recebida + receita_a_receber
-
         despesas = despesa_paga + despesa_pendente + despesa_atrasada
 
-        saldo = receita_recebida - despesas
+        saldo = receita_recebida - (despesas + receita_a_receber)
 
         if saldo > 0:
             resultado = 'lucro'
@@ -750,12 +749,12 @@ def resumo_financeiro_escritorio(id_escritorio):
         percentual_recebido = (receita_recebida / total_receitas * 100) if total_receitas > 0 else 0
         percentual_arredondado = round(percentual_recebido)
 
-        if saldo > 0 and percentual_recebido >= 70:
-            situacao = 'Boa'
-        elif saldo >= 0:
-            situacao = 'Atenção'
-        else:
+        if saldo < 0:
             situacao = 'Crítica'
+        elif percentual_recebido >= 70:
+            situacao = 'Boa'
+        else:
+            situacao = 'Atenção'
 
         return jsonify({
             'receita_recebida': receita_recebida,
@@ -806,7 +805,7 @@ def gerar_relatorio_financeiro(id_escritorio):
     cur = con.cursor()
 
     try:
-        permitido, msg = _verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
         if not permitido:
             return jsonify({'error': msg}), 403
 
@@ -920,10 +919,7 @@ def gerar_relatorio_financeiro(id_escritorio):
             tipo_txt = item.get('tipo', '').capitalize()
 
             status_raw = item.get('status', '')
-            status_txt = status_raw.capitalize() if status_raw else ''
-
-            if status_txt == 'Recebida': status_txt = 'Recebido'
-            if status_txt == 'Pago': status_txt = 'Pago'
+            status_txt = status_raw if status_raw else ''
 
             valores = [
                 data_fmt,
@@ -989,7 +985,6 @@ def notificar_vencimentos():
             titulo = 'Aviso de Vencimento'
             msg = f'A parcela de {nome_cliente} (Proc. {num_processo}) no valor de R$ {valor:.2f} vence em {venc_fmt}.'
 
-            # Evita duplicar a notificação no mesmo dia
             cur.execute("""
                 SELECT 1 FROM NOTIFICACOES 
                 WHERE ID_USUARIOS = ? AND TITULO = ? AND MENSAGEM = ? 
@@ -1006,7 +1001,6 @@ def notificar_vencimentos():
                 id_notif = cur.fetchone()[0]
                 con.commit()
 
-                # Envia em tempo real usando a sala que o Header.jsx escuta
                 agora = datetime.datetime.now()
                 socketio.emit('nova_notificacao', {
                     'id': id_notif,
@@ -1029,4 +1023,3 @@ def notificar_vencimentos():
     finally:
         cur.close()
         con.close()
-
