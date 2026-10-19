@@ -6,6 +6,7 @@ import socket
 import unicodedata
 import uuid
 from datetime import date, datetime, time
+from functools import lru_cache
 
 import fdb
 from fpdf import FPDF
@@ -86,6 +87,17 @@ def _dados_requisicao():
     return {}
 
 
+@lru_cache(maxsize=256)
+def _nome_maquina_por_ip(ip):
+    if not ip or ip in {'127.0.0.1', '::1'}:
+        return None
+    try:
+        nome, _, _ = socket.gethostbyaddr(ip)
+        return nome.split('.')[0] if nome else None
+    except (socket.herror, socket.gaierror, OSError):
+        return None
+
+
 def _origem_dispositivo():
     nome_dispositivo = (request.headers.get('X-Client-Device') or '').strip()
     nome_dispositivo = re.sub(r'[\r\n]+', ' ', nome_dispositivo)[:120]
@@ -99,6 +111,9 @@ def _origem_dispositivo():
     agente = (request.headers.get('User-Agent') or '').lower()
     if any(termo in agente for termo in ('android', 'iphone', 'ipad', 'mobile')):
         return 'Celular (navegador)'
+    nome_maquina = _nome_maquina_por_ip(request.remote_addr)
+    if nome_maquina:
+        return nome_maquina
     if agente:
         return 'Computador (navegador)'
     return socket.gethostname()
@@ -438,7 +453,7 @@ def _buscar_cargo_usuario(id_usuario, id_escritorio):
 
 
 def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
-                      cargo=None, id_usuario=None):
+                      cargo=None, id_usuario=None, detalhes=None):
     nome = nome or 'O sistema'
     acao_txt = _ACOES_HUMANAS.get((acao or '').upper(), f'{(acao or "").lower()}')
 
@@ -449,10 +464,7 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
         sufixo = f' #{id_registro}' if id_registro else ''
         return f'{nome} {acao_txt} {tabela or "um registro"}{sufixo}.'
 
-    artigo, substantivo = _ARTIGOS[tabela]
-    alvo = f'{artigo} {substantivo}'
-    if id_registro:
-        alvo += f' #{id_registro}'
+    alvo = _alvo_com_artigo(tabela, id_registro, detalhes)
 
     if acao == 'GERAR_PDF':
         return f'{nome} {acao_txt} {alvo}.'
@@ -482,10 +494,64 @@ def _alvo_humano(tabela, id_registro, detalhes=None):
             rota = (detalhes or {}).get('rota') or ''
             correspondencia = re.search(r'/processo/(\d+)/atualizacoes', rota)
             id_processo = correspondencia.group(1) if correspondencia else None
-        if id_processo:
+        titulo_atualizacao, numero_processo = _referencia_atualizacao(
+            id_registro, id_processo
+        )
+        if titulo_atualizacao:
+            alvo = f'atualiza\u00e7\u00e3o "{titulo_atualizacao}"'
+        elif not id_registro:
+            alvo = 'atualiza\u00e7\u00e3o'
+        if numero_processo:
+            alvo += f' do processo {numero_processo}'
+        elif id_processo:
             alvo += f' do processo #{id_processo}'
 
+    if tabela in {'MODELOS_DOCUMENTOS', 'ADVOGADO_ESCRITORIO'}:
+        parametros = (detalhes or {}).get('parametros_rota') or {}
+        id_escritorio = parametros.get('id_escritorio')
+        if id_escritorio:
+            alvo += f' do escrit\u00f3rio #{id_escritorio}'
+
     return alvo
+
+
+@lru_cache(maxsize=512)
+def _referencia_atualizacao(id_atualizacao, id_processo):
+    if not id_atualizacao or not id_processo:
+        return None, None
+
+    con = None
+    cur = None
+    try:
+        con = conexao()
+        cur = con.cursor()
+        cur.execute(
+            '''
+            SELECT a.TITULO, p.NUM_PROCESSO
+            FROM ATUALIZACOES a
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = a.ID_PROCESSOS
+            WHERE a.ID_ATUALIZACOES = ? AND a.ID_PROCESSOS = ?
+            ''',
+            (id_atualizacao, id_processo)
+        )
+        linha = cur.fetchone()
+        return (linha[0], linha[1]) if linha else (None, None)
+    except Exception as erro:
+        current_app.logger.warning(
+            'Não foi possível buscar a referência da atualização no log: %s',
+            erro
+        )
+        return None, None
+    finally:
+        if cur:
+            cur.close()
+        if con:
+            con.close()
+
+
+def _alvo_com_artigo(tabela, id_registro, detalhes=None):
+    artigo, _ = _ARTIGOS.get(tabela, ('um', (tabela or 'registro').lower()))
+    return f'{artigo} {_alvo_humano(tabela, id_registro, detalhes)}'
 
 
 def _agrupar_eventos(todos):
@@ -520,10 +586,14 @@ def _agrupar_eventos(todos):
     for log in agrupados:
         alteracoes = log.get('alteracoes', [])
         if log['acao'] == 'EDITAR' and len(alteracoes) > 1:
+            try:
+                detalhes = json.loads(log.get('detalhes') or '{}')
+            except (TypeError, json.JSONDecodeError):
+                detalhes = {}
             campos = ', '.join(item['campo'].replace('_', ' ').lower() for item in alteracoes)
             log['descricao_humana'] = (
                 f"{log['nome_usuario'] or 'O sistema'} editou "
-                f"{len(alteracoes)} campos em {_alvo_humano(log['tabela_afetada'], log['id_registro_afetado'], detalhes)}: "
+                f"{len(alteracoes)} campos em {_alvo_com_artigo(log['tabela_afetada'], log['id_registro_afetado'], detalhes)}: "
                 f"{campos}."
             )
 
@@ -586,6 +656,11 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
             campo = linha[6]
             valor_novo = _texto_blob(linha[8])
             cargo = _buscar_cargo_usuario(linha[1], id_escritorio)
+            detalhes_brutos = _texto_blob(linha[9])
+            try:
+                detalhes = json.loads(detalhes_brutos or '{}')
+            except (TypeError, json.JSONDecodeError):
+                detalhes = {}
 
             todos.append({
                 'id_log': linha[0],
@@ -597,7 +672,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                 'campo': campo,
                 'valor_antigo': _texto_blob(linha[7]),
                 'valor_novo': valor_novo,
-                'detalhes': _texto_blob(linha[9]),
+                'detalhes': detalhes_brutos,
                 'data_hora': linha[10].isoformat() if linha[10] else None,
                 'maquina': linha[11],
                 'ip_origem': linha[12],
@@ -605,7 +680,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                 'descricao_humana': _descricao_humana(
                     nome_usuario, acao, tabela_afetada,
                     id_registro_afetado, campo, valor_novo,
-                    cargo, linha[1]
+                    cargo, linha[1], detalhes
                 ),
             })
 
@@ -714,7 +789,8 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
 
     colunas = [
         ('Nome', 30, 22), ('Acao', 20, 16), ('Registro afetado', 35, 28),
-        ('Data', 20, 12), ('Hora', 15, 8), ('Alteracoes', 112, 150), ('Maquina', 33, 22)
+        ('Data', 20, 12), ('Hora', 15, 8), ('Alteracoes', 112, 150),
+        ('Origem/IP', 33, 22)
     ]
 
     def cabecalho_tabela():
@@ -749,7 +825,7 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
             data,
             hora,
             alteracoes,
-            log.get('maquina'),
+            log.get('ip_origem'),
         ]
 
         # A coluna de alterações pode conter vários campos e valores longos.
