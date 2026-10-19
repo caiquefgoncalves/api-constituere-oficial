@@ -1,8 +1,11 @@
-from flask import jsonify, request
+from flask import jsonify, request, send_file
 from funcao import decodificar_token, converter_data_pagamento, formatar_valor_br
-from main import app
+from main import app, socketio
 from db import conexao
 import datetime
+from io import BytesIO
+from fpdf import FPDF
+import unicodedata
 
 
 def _converter_data(valor):
@@ -72,7 +75,7 @@ def _status_parcela(data_venc, status_db, hoje, data_pagamento=None):
     if data_venc and data_venc < hoje:
         return 'atrasado'
 
-    return 'pendente'
+    return ''
 
 
 def _status_lancamento_manual(tipo, status_db, data_lanc, hoje):
@@ -84,16 +87,16 @@ def _status_lancamento_manual(tipo, status_db, data_lanc, hoje):
             return 'recebida'
         if data_lanc and data_lanc < hoje:
             return 'atrasado'
-        return 'pendente'
+        return ''
 
     if tipo == 'despesa':
         if status_db in ('pago', 'paga', 'recebida', 'recebido'):
             return 'pago'
         if data_lanc and data_lanc < hoje:
             return 'atrasado'
-        return 'pendente'
+        return ''
 
-    return status_db or 'pendente'
+    return status_db or ''
 
 
 def _dentro_periodo(data_obj, inicio, fim):
@@ -418,7 +421,6 @@ def criar_lancamento_escritorio(id_escritorio):
     descricao = (dados.get('descricao') or '').strip()
     valor_raw = dados.get('valor')
     data_raw = dados.get('data')
-    status_raw = (dados.get('status') or '').strip().lower()
 
     if tipo not in ['despesa', 'receita']:
         return jsonify({'error': 'Tipo inválido'}), 400
@@ -445,19 +447,7 @@ def criar_lancamento_escritorio(id_escritorio):
     if data_obj > datetime.date.today():
         return jsonify({'error': 'A data não pode ser futura'}), 400
 
-    if tipo == 'receita':
-        if status_raw not in ['recebida', 'pendente', 'atrasado', '']:
-            return jsonify({'error': 'Status inválido para receita'}), 400
-
-        if not status_raw:
-            status_raw = 'pendente'
-
-    if tipo == 'despesa':
-        if status_raw not in ['pago', 'pendente', 'atrasado', '']:
-            return jsonify({'error': 'Status inválido para despesa'}), 400
-
-        if not status_raw:
-            status_raw = 'pendente'
+    status_raw = 'recebida' if tipo == 'receita' else ''
 
     con = conexao()
     cur = con.cursor()
@@ -501,6 +491,64 @@ def criar_lancamento_escritorio(id_escritorio):
     except Exception as e:
         con.rollback()
         print(f'Erro ao criar lançamento: {e}')
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/escritorio/<int:id_escritorio>/financeiro/lancamentos/<int:id_lancamento>/baixar', methods=['PUT'])
+def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_usuario = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        permitido, msg = _verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        if not permitido:
+            return jsonify({'error': msg}), 403
+
+        cur.execute("""
+            SELECT TIPO, STATUS FROM LANCAMENTOS_FINANCEIROS
+            WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1
+        """, (id_lancamento, id_escritorio))
+
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'Lançamento não encontrado'}), 404
+
+        tipo_db = (row[0] or '').lower()
+        status_db = (row[1] or '').lower()
+
+        if tipo_db == 'receita':
+            return jsonify({'error': 'Receitas não precisam de baixa.'}), 400
+
+        if status_db in ('pago', 'paga', 'recebida', 'recebido'):
+            return jsonify({'error': 'Esta despesa já foi paga.'}), 400
+
+        cur.execute("""
+            UPDATE LANCAMENTOS_FINANCEIROS
+            SET STATUS = 'pago'
+            WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
+        """, (id_lancamento, id_escritorio))
+
+        con.commit()
+
+        return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
+
+    except Exception as e:
+        con.rollback()
+        print(f'Erro ao dar baixa no lançamento: {e}')
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -681,9 +729,10 @@ def resumo_financeiro_escritorio(id_escritorio):
 
         receita_a_receber = receita_pendente + receita_atrasada
         total_receitas = receita_recebida + receita_a_receber
+
         despesas = despesa_paga + despesa_pendente + despesa_atrasada
 
-        saldo = receita_recebida - despesa_paga
+        saldo = receita_recebida - despesas
 
         if saldo > 0:
             resultado = 'lucro'
@@ -736,3 +785,248 @@ def resumo_financeiro_escritorio(id_escritorio):
     finally:
         cur.close()
         con.close()
+
+
+@app.route('/escritorio/<int:id_escritorio>/financeiro/relatorio', methods=['POST'])
+def gerar_relatorio_financeiro(id_escritorio):
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    id_usuario = token_data['id_usuarios']
+    dados = request.get_json() or {}
+    lancamentos = dados.get('lancamentos', [])
+    resumo = dados.get('resumo', {})
+    periodo_texto = dados.get('periodo_texto', 'Período não especificado')
+
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        permitido, msg = _verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        if not permitido:
+            return jsonify({'error': msg}), 403
+
+        cur.execute("SELECT NOME_FANTASIA FROM ESCRITORIOS WHERE ID_ESCRITORIOS = ?", (id_escritorio,))
+        row = cur.fetchone()
+        nome_escritorio = row[0] if row and row[0] else 'Escritório'
+
+        def texto(valor, limite=None):
+            valor = '-' if valor in (None, '') else str(valor)
+            valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
+            if limite and len(valor) > limite:
+                return valor[:limite - 3] + '...'
+            return valor
+
+        def dinheiro(valor):
+            return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+        class RelatorioFinanceiroPDF(FPDF):
+            def header(self):
+                self.set_fill_color(0, 71, 171)
+                self.rect(0, 0, 297, 20, 'F')
+                self.set_text_color(255, 255, 255)
+                self.set_font('Helvetica', 'B', 15)
+                self.set_xy(16, 6)
+                self.cell(0, 8, 'Constituere | Relatorio Financeiro')
+                self.set_text_color(35, 35, 35)
+                self.set_y(28)
+
+            def footer(self):
+                self.set_y(-12)
+                self.set_draw_color(220, 228, 238)
+                self.line(16, self.get_y(), 281, self.get_y())
+                self.set_y(-9)
+                self.set_font('Helvetica', '', 8)
+                self.set_text_color(100, 100, 100)
+                self.cell(0, 5, f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}',
+                          align='C')
+
+        pdf = RelatorioFinanceiroPDF(orientation='L', unit='mm', format='A4')
+        pdf.set_auto_page_break(auto=True, margin=18)
+        pdf.set_margins(16, 16, 16)
+        pdf.add_page()
+
+        pdf.set_fill_color(237, 244, 255)
+        pdf.set_text_color(0, 71, 171)
+        pdf.set_font('Helvetica', 'B', 12)
+        pdf.cell(265, 8, texto(f"Relatório Financeiro - {nome_escritorio}", 80), fill=True, new_x='LMARGIN',
+                 new_y='NEXT')
+
+        pdf.set_text_color(90, 90, 90)
+        pdf.set_font('Helvetica', '', 9)
+        pdf.cell(0, 6, texto(f"Período: {periodo_texto}", 120), new_x='LMARGIN', new_y='NEXT')
+        pdf.ln(4)
+
+        pdf.set_fill_color(250, 252, 255)
+        pdf.set_draw_color(220, 228, 238)
+
+        resumo_itens = [
+            ('Total de Receitas Previstas', dinheiro(resumo.get('total_receitas', 0))),
+            ('Receita Recebida', dinheiro(resumo.get('receita_recebida', 0))),
+            ('Receita a Receber', dinheiro(resumo.get('receita_a_receber', 0))),
+            ('Despesas', dinheiro(resumo.get('despesas', 0))),
+            ('Saldo Atual', dinheiro(resumo.get('saldo', 0)))
+        ]
+
+        for rotulo, valor in resumo_itens:
+            pdf.set_text_color(0, 71, 171)
+            pdf.set_font('Helvetica', 'B', 9)
+            pdf.cell(70, 8, rotulo, border=1, fill=True)
+
+            pdf.set_text_color(35, 35, 35)
+            pdf.set_font('Helvetica', '', 9)
+            pdf.cell(40, 8, valor, border=1, new_x='LMARGIN', new_y='NEXT')
+
+        pdf.ln(10)
+
+        colunas = [
+            ('Data', 25, 10),
+            ('Tipo', 25, 15),
+            ('Descrição', 125, 100),
+            ('Status', 30, 20),
+            ('Valor', 60, 45)
+        ]
+
+        def cabecalho_tabela():
+            pdf.set_fill_color(237, 244, 255)
+            pdf.set_draw_color(220, 228, 238)
+            pdf.set_text_color(0, 71, 171)
+            pdf.set_font('Helvetica', 'B', 8)
+            for nome, largura, _ in colunas:
+                pdf.cell(largura, 8, nome, border=1, fill=True)
+            pdf.ln()
+            pdf.set_text_color(35, 35, 35)
+
+        cabecalho_tabela()
+        pdf.set_font('Helvetica', '', 8)
+
+        if not lancamentos:
+            pdf.set_fill_color(250, 252, 255)
+            pdf.cell(265, 9, 'Nenhum lançamento encontrado neste período.', border=1, fill=True, align='C',
+                     new_x='LMARGIN', new_y='NEXT')
+
+        for indice, item in enumerate(lancamentos):
+            if pdf.get_y() + 8 > 190:
+                pdf.add_page()
+                cabecalho_tabela()
+                pdf.set_font('Helvetica', '', 8)
+
+            data_txt = item.get('data', '').split('-')
+            data_fmt = f"{data_txt[2]}/{data_txt[1]}/{data_txt[0]}" if len(data_txt) == 3 else item.get('data', '')
+            tipo_txt = item.get('tipo', '').capitalize()
+
+            status_raw = item.get('status', '')
+            status_txt = status_raw.capitalize() if status_raw else ''
+
+            if status_txt == 'Recebida': status_txt = 'Recebido'
+            if status_txt == 'Pago': status_txt = 'Pago'
+
+            valores = [
+                data_fmt,
+                tipo_txt,
+                texto(item.get('descricao', ''), 100),
+                status_txt,
+                dinheiro(item.get('valor', 0))
+            ]
+
+            pdf.set_fill_color(250, 252, 255) if indice % 2 else pdf.set_fill_color(255, 255, 255)
+            for (_, largura, _), valor in zip(colunas, valores):
+                pdf.cell(largura, 7, valor, border=1, fill=True)
+            pdf.ln()
+
+        return send_file(BytesIO(bytes(pdf.output())), mimetype='application/pdf', as_attachment=True,
+                         download_name='relatorio-financeiro.pdf')
+
+    except Exception as e:
+        print(f"Erro ao gerar PDF financeiro: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/financeiro/notificar_vencimentos', methods=['GET', 'POST'])
+def notificar_vencimentos():
+    con = conexao()
+    cur = con.cursor()
+    hoje = datetime.date.today()
+    data_alerta = hoje + datetime.timedelta(days=3)
+
+    try:
+        cur.execute("""
+            SELECT 
+                p.ID_USUARIOS_ADVOGADO,
+                p.NUM_PROCESSO,
+                u.NOME,
+                parc.VALOR_PARCELA,
+                parc.DATA_VENCIMENTO
+            FROM PARCELAS parc
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+            INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
+            WHERE parc.DATA_VENCIMENTO BETWEEN ? AND ?
+              AND UPPER(COALESCE(parc.STATUS, '')) NOT IN ('PAGA', 'CANCELADA')
+        """, (hoje, data_alerta))
+
+        parcelas = cur.fetchall()
+        notificacoes_enviadas = 0
+
+        for row in parcelas:
+            id_advogado = row[0]
+            num_processo = row[1] or '--'
+            nome_cliente = row[2] or 'Cliente'
+            valor = float(row[3]) if row[3] else 0
+            vencimento = row[4]
+
+            venc_fmt = vencimento.strftime('%d/%m/%Y') if hasattr(vencimento, 'strftime') else str(vencimento)
+
+            titulo = 'Aviso de Vencimento'
+            msg = f'A parcela de {nome_cliente} (Proc. {num_processo}) no valor de R$ {valor:.2f} vence em {venc_fmt}.'
+
+            # Evita duplicar a notificação no mesmo dia
+            cur.execute("""
+                SELECT 1 FROM NOTIFICACOES 
+                WHERE ID_USUARIOS = ? AND TITULO = ? AND MENSAGEM = ? 
+                  AND CAST(DATA_CADASTRO AS DATE) = ?
+            """, (id_advogado, titulo, msg, hoje))
+
+            if not cur.fetchone():
+                cur.execute("""
+                    INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
+                    VALUES (?, ?, ?, ?)
+                    RETURNING ID_NOTIFICACAO
+                """, (id_advogado, 'FINANCEIRO_VENCIMENTO', titulo, msg))
+
+                id_notif = cur.fetchone()[0]
+                con.commit()
+
+                # Envia em tempo real usando a sala que o Header.jsx escuta
+                agora = datetime.datetime.now()
+                socketio.emit('nova_notificacao', {
+                    'id': id_notif,
+                    'tipo': 'FINANCEIRO_VENCIMENTO',
+                    'titulo': titulo,
+                    'mensagem': msg,
+                    'lida': False,
+                    'data_criacao': agora.strftime('%d/%m/%Y'),
+                    'hora_criacao': agora.strftime('%H:%M'),
+                    'data_leitura': None
+                }, room=f'usuario_{id_advogado}')
+
+                notificacoes_enviadas += 1
+
+        return jsonify({'mensagem': f'{notificacoes_enviadas} notificações enviadas.'}), 200
+
+    except Exception as e:
+        con.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        con.close()
+

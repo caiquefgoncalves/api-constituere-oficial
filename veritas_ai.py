@@ -17,14 +17,14 @@ from main import app
 ASSISTANT_NAME = "Veritas"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_NVIDIA_MODEL = "moonshotai/kimi-k3"
+DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 DEFAULT_NVIDIA_MODELS = (DEFAULT_NVIDIA_MODEL,)
 DEFAULT_MODEL_TIMEOUT_SECONDS = 30.0
 DEFAULT_OPENROUTER_MODELS = (
-  "inclusionai/ling-3.0-flash-sante:free",
-  "thinkingmachines/inkling-small:free",
-  "qwen/qwen3.8-27b:free",
-    "nvidia/nemotron-3.5-lightning:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "minimax/minimax-m3.1-flash:free",
+  "nvidia/nemotron-3.5-super-vl:free",
+  "dots-studio/dots-3-note-preview:free",
 )
 DEFAULT_PROVIDER_PRIORITY = "OPENROUTER"
 

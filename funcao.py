@@ -300,25 +300,24 @@ def gerar_token(tipo, id_usuarios, tempo):
     return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
 
 
-def decodificar_token():
+def decodificar_token(token=None):
     try:
-        token = None
-
-        token = request.headers.get('X-Access-Token')
-        if token:
-            print("Token encontrado no header X-Access-Token")
-
         if not token:
-            token = request.cookies.get('acess_token')
+            token = request.headers.get('X-Access-Token')
             if token:
-                print("Token encontrado no cookie")
+                print("Token encontrado no header X-Access-Token")
 
-        if not token:
-            auth_header = request.headers.get('Authorization')
-            if auth_header and auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
+            if not token:
+                token = request.cookies.get('acess_token')
                 if token:
-                    print("Token encontrado no header Authorization")
+                    print("Token encontrado no cookie")
+
+            if not token:
+                auth_header = request.headers.get('Authorization')
+                if auth_header and auth_header.startswith('Bearer '):
+                    token = auth_header.split(' ')[1]
+                    if token:
+                        print("Token encontrado no header Authorization")
 
         if not token:
             print("Token nao encontrado em nenhuma fonte")
@@ -340,7 +339,6 @@ def decodificar_token():
     except Exception as e:
         print(f"Erro ao decodificar token: {e}")
         return False
-
 
 def enviar_email_motivo(destinatario, assunto, nome_cliente, nome_advogado, data_agendamento, horario_agendamento, assunto_agendamento, motivo, tipo):
     user = "juriscriptoffice@gmail.com"
