@@ -86,6 +86,24 @@ def _dados_requisicao():
     return {}
 
 
+def _origem_dispositivo():
+    nome_dispositivo = (request.headers.get('X-Client-Device') or '').strip()
+    nome_dispositivo = re.sub(r'[\r\n]+', ' ', nome_dispositivo)[:120]
+    if nome_dispositivo:
+        return nome_dispositivo
+
+    plataforma = (request.headers.get('X-Client-Platform') or '').strip().lower()
+    if plataforma == 'expo-mobile':
+        return 'Celular (Expo)'
+
+    agente = (request.headers.get('User-Agent') or '').lower()
+    if any(termo in agente for termo in ('android', 'iphone', 'ipad', 'mobile')):
+        return 'Celular (navegador)'
+    if agente:
+        return 'Computador (navegador)'
+    return socket.gethostname()
+
+
 def _identificar_escritorio(id_usuario, dados, view_args):
     for origem in (dados, view_args or {}):
         for chave in ('id_escritorio', 'id_escritorios', 'ID_ESCRITORIO', 'ID_ESCRITORIOS'):
@@ -212,6 +230,13 @@ def _id_registro(view_args):
                 return int(valor)
             except (TypeError, ValueError):
                 return None
+
+    if request.path.lower() in {'/editar_perfil', '/editar_perfil_cliente'}:
+        token = getattr(g, 'auditoria_token', None) or {}
+        try:
+            return int(token.get('id_usuarios'))
+        except (TypeError, ValueError):
+            return None
     return None
 
 
@@ -349,7 +374,7 @@ def registrar_requisicao(token_data):
                 (
                     id_escritorio, id_usuario, _nome_usuario(id_usuario), acao,
                     tabela, _id_registro(view_args), campo, antigo, novo, detalhes,
-                    socket.gethostname(), request.remote_addr,
+                    _origem_dispositivo(), request.remote_addr,
                 )
             )
         con.commit()
@@ -390,7 +415,30 @@ def _buscar_cargo_advogado(id_usuario, id_escritorio):
         con.close()
 
 
-def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo):
+def _buscar_cargo_usuario(id_usuario, id_escritorio):
+    cargo_advogado = _buscar_cargo_advogado(id_usuario, id_escritorio)
+    if cargo_advogado:
+        return cargo_advogado
+
+    if not id_usuario:
+        return None
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            'SELECT TIPO FROM USUARIOS WHERE ID_USUARIOS = ?',
+            (id_usuario,)
+        )
+        linha = cur.fetchone()
+        return 'Cliente' if linha and linha[0] in (2, 3) else None
+    finally:
+        cur.close()
+        con.close()
+
+
+def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
+                      cargo=None, id_usuario=None):
     nome = nome or 'O sistema'
     acao_txt = _ACOES_HUMANAS.get((acao or '').upper(), f'{(acao or "").lower()}')
 
@@ -408,6 +456,12 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo):
 
     if acao == 'GERAR_PDF':
         return f'{nome} {acao_txt} {alvo}.'
+
+    if tabela == 'USUARIOS' and cargo == 'Cliente':
+        if acao == 'EDITAR' and campo and campo.upper() != 'REGISTRO':
+            campo_legivel = campo.replace('_', ' ').lower()
+            return f'{nome} editou seu cadastro (alterou o campo {campo_legivel}).'
+        return f'{nome} {acao_txt} seu cadastro.'
 
     if acao == 'EDITAR' and campo and campo.upper() != 'REGISTRO':
         campo_legivel = campo.replace('_', ' ').lower()
@@ -531,6 +585,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
             id_registro_afetado = linha[5]
             campo = linha[6]
             valor_novo = _texto_blob(linha[8])
+            cargo = _buscar_cargo_usuario(linha[1], id_escritorio)
 
             todos.append({
                 'id_log': linha[0],
@@ -546,10 +601,11 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                 'data_hora': linha[10].isoformat() if linha[10] else None,
                 'maquina': linha[11],
                 'ip_origem': linha[12],
-                'cargo': _buscar_cargo_advogado(linha[1], id_escritorio),
+                'cargo': cargo,
                 'descricao_humana': _descricao_humana(
                     nome_usuario, acao, tabela_afetada,
-                    id_registro_afetado, campo, valor_novo
+                    id_registro_afetado, campo, valor_novo,
+                    cargo, linha[1]
                 ),
             })
 

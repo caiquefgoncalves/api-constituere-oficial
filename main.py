@@ -40,7 +40,9 @@ CORS(
         "Content-Type",
         "Authorization",
         "X-Requested-With",
-        "X-Access-Token"
+        "X-Access-Token",
+        "X-Client-Platform",
+        "X-Client-Device"
     ],
     expose_headers=[
         "Content-Type",
@@ -75,7 +77,7 @@ def handle_options():
 
         response.headers.add(
             'Access-Control-Allow-Headers',
-            'Content-Type, Authorization, X-Requested-With, X-Access-Token'
+            'Content-Type, Authorization, X-Requested-With, X-Access-Token, X-Client-Platform, X-Client-Device'
         )
 
         response.headers.add(
