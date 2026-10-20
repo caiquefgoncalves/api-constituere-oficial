@@ -471,8 +471,7 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
         return f'{nome} entrou no sistema.'
 
     if tabela not in _ARTIGOS:
-        sufixo = f' #{id_registro}' if id_registro else ''
-        return f'{nome} {acao_txt} {tabela or "um registro"}{sufixo}.'
+        return f'{nome} {acao_txt} {tabela or "um registro"}.'
 
     alvo = _alvo_com_artigo(tabela, id_registro, detalhes)
 
@@ -519,7 +518,6 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
 def _alvo_humano(tabela, id_registro, detalhes=None):
     _, substantivo = _ARTIGOS.get(tabela, ('um', (tabela or 'registro').lower()))
     alvo = substantivo
-    alvo = f'{alvo} #{id_registro}' if id_registro else alvo
 
     if tabela == 'ATUALIZACOES':
         parametros = (detalhes or {}).get('parametros_rota') or {}
@@ -537,14 +535,8 @@ def _alvo_humano(tabela, id_registro, detalhes=None):
             alvo = 'atualiza\u00e7\u00e3o'
         if numero_processo:
             alvo += f' do processo {numero_processo}'
-        elif id_processo:
-            alvo += f' do processo #{id_processo}'
-
     if tabela in {'MODELOS_DOCUMENTOS', 'ADVOGADO_ESCRITORIO'}:
-        parametros = (detalhes or {}).get('parametros_rota') or {}
-        id_escritorio = parametros.get('id_escritorio')
-        if id_escritorio:
-            alvo += f' do escrit\u00f3rio #{id_escritorio}'
+        alvo += ' do escritório'
 
     return alvo
 
@@ -888,7 +880,10 @@ def _resumo_alteracoes_pdf(log):
     }]
     partes = []
     for alteracao in alteracoes:
-        campo = _texto_pdf_log(alteracao.get('campo'))
+        campo_original = str(alteracao.get('campo') or '')
+        if campo_original.lower() == 'id' or campo_original.lower().startswith('id_'):
+            continue
+        campo = _texto_pdf_log(campo_original)
         antigo = _texto_pdf_log(alteracao.get('valor_antigo'))
         novo = _texto_pdf_log(alteracao.get('valor_novo'))
         partes.append(f'{campo}: {antigo} -> {novo}')
@@ -931,7 +926,13 @@ def _linhas_detalhes_pdf(valor, prefixo=''):
     if isinstance(valor, dict):
         linhas = []
         for chave, item in valor.items():
-            if str(chave).lower() in _CAMPOS_SIGILOSOS or chave == 'id_evento':
+            chave_normalizada = str(chave).lower()
+            if (
+                chave_normalizada in _CAMPOS_SIGILOSOS
+                or chave_normalizada == 'id_evento'
+                or chave_normalizada == 'id'
+                or chave_normalizada.startswith('id_')
+            ):
                 continue
             rotulo = _rotulo_pdf_log(chave)
             caminho = f'{prefixo} - {rotulo}' if prefixo else rotulo
@@ -964,10 +965,6 @@ def _detalhes_pdf_log(log):
     dados = detalhes.get('dados')
     if isinstance(dados, dict):
         linhas.extend(_linhas_detalhes_pdf(dados))
-
-    for chave in ('metodo', 'rota'):
-        if detalhes.get(chave):
-            linhas.append(f'{_rotulo_pdf_log(chave)}: {_texto_pdf_log(detalhes[chave], 500)}')
     return linhas
 
 
@@ -1085,7 +1082,7 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
         alteracoes = _resumo_alteracoes_pdf(log)
         detalhes = _detalhes_pdf_log(log)
         cabecalho = (
-            f'Registro #{log.get("id_log", indice)} | {log.get("acao") or "Acao"} | '
+            f'Ação {indice} | {log.get("acao") or "Acao"} | '
             f'{_texto_pdf_log(log.get("nome_usuario") or "Sistema", 80)}'
         )
         altura_estimada = 34 + min(90, 4 * (len(detalhes) + max(1, len(alteracoes) // 105)))
