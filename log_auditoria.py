@@ -41,6 +41,8 @@ _ACOES_HUMANAS = {
     'CONCLUIR': 'concluiu',
     'INATIVAR': 'inativou',
     'ATIVAR': 'ativou',
+    'PROMOVER': 'promoveu',
+    'REBAIXAR': 'rebaixou',
     'GERAR_PDF': 'gerou o PDF de',
     'GERAR_PIX': 'gerou um codigo Pix para',
     'CONSULTAR_PIX': 'consultou o status do Pix de',
@@ -191,6 +193,10 @@ def _nome_usuario(id_usuario):
 def _descricao_evento():
     caminho = request.path.lower()
     argumentos = request.view_args or {}
+    if re.fullmatch(r'/alterar_cargo_advogado/\d+/\d+', caminho):
+        novo_cargo = str((_dados_requisicao().get('status') or '')).upper()
+        acao = 'PROMOVER' if novo_cargo == 'PROPRIETARIO' else 'REBAIXAR'
+        return acao, 'ADVOGADO_ESCRITORIO'
     if re.fullmatch(r'/processo/\d+/atualizacoes', caminho) and request.method == 'POST':
         return 'CRIAR', 'ATUALIZACOES'
     if caminho == '/cliente/pagamento/pix' and request.method == 'POST':
@@ -502,13 +508,24 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
     if tabela == 'PARCELAS' and acao == 'CONSULTAR_PIX':
         return f'{nome} consultou o status de uma cobrança Pix.'
 
-    if tabela in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR', 'EXCLUIR'}:
+    if tabela in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {
+        'ATIVAR', 'INATIVAR', 'EXCLUIR', 'PROMOVER', 'REBAIXAR'
+    }:
         dados = (detalhes or {}).get('dados') or {}
         advogado = dados.get('advogado') if isinstance(dados, dict) else None
         nome_advogado = advogado.get('nome') if isinstance(advogado, dict) else None
         if nome_advogado:
             if acao == 'EXCLUIR':
                 return f'{nome} removeu {nome_advogado} do escritório.'
+            if acao in {'PROMOVER', 'REBAIXAR'}:
+                cargo = str(dados.get('status') or '').lower()
+                cargo = {
+                    'proprietario': 'proprietário',
+                    'parceiro': 'parceiro',
+                    'associado': 'associado',
+                }.get(cargo, cargo or 'nova posição')
+                verbo = 'promoveu' if acao == 'PROMOVER' else 'rebaixou'
+                return f'{nome} {verbo} {nome_advogado} para {cargo}.'
             verbo = 'ativou' if acao == 'ATIVAR' else 'inativou'
             return f'{nome} {verbo} o vínculo de {nome_advogado} com o escritório.'
 
@@ -791,6 +808,13 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
             ):
                 tabela_afetada = 'ATUALIZACOES'
                 id_registro_afetado = None
+            elif (
+                re.fullmatch(r'/alterar_cargo_advogado/\d+/\d+', rota)
+                and acao == 'EDITAR'
+                and tabela_afetada == 'ADVOGADO_ESCRITORIO'
+            ):
+                novo_cargo = str((detalhes.get('dados') or {}).get('status') or '').upper()
+                acao = 'PROMOVER' if novo_cargo == 'PROPRIETARIO' else 'REBAIXAR'
 
             try:
                 if tabela_afetada == 'AGENDAMENTOS':
@@ -806,7 +830,9 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                             detalhes, ensure_ascii=False, default=str
                         )
 
-                if tabela_afetada in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR', 'EXCLUIR'}:
+                if tabela_afetada in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {
+                    'ATIVAR', 'INATIVAR', 'EXCLUIR', 'PROMOVER', 'REBAIXAR'
+                }:
                     parametros = detalhes.get('parametros_rota') or {}
                     referencia_advogado = _referencia_advogado_escritorio(
                         id_registro_afetado, parametros.get('id_escritorio')
