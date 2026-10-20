@@ -98,7 +98,6 @@ def status_lancamento_manual(tipo, status_db, data_lanc, hoje):
 
     return status_db or 'A pagar'
 
-
 def dentro_periodo(data_obj, inicio, fim):
     if data_obj is None:
         return False
@@ -518,33 +517,97 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
         if not permitido:
             return jsonify({'error': msg}), 403
 
+        # 1. Tenta achar na tabela de lançamentos manuais
         cur.execute("""
             SELECT TIPO, STATUS FROM LANCAMENTOS_FINANCEIROS
             WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1
         """, (id_lancamento, id_escritorio))
 
         row = cur.fetchone()
-        if not row:
-            return jsonify({'error': 'Lançamento não encontrado'}), 404
 
-        tipo_db = (row[0] or '').lower()
-        status_db = (row[1] or '').lower()
+        if row:
+            tipo_db = (row[0] or '').lower()
+            status_db = (row[1] or '').lower()
 
-        if tipo_db == 'receita':
-            return jsonify({'error': 'Receitas não precisam de baixa.'}), 400
+            if tipo_db == 'receita':
+                return jsonify({'error': 'Receitas não precisam de baixa.'}), 400
 
-        if status_db in ('pago', 'paga', 'recebida', 'recebido'):
-            return jsonify({'error': 'Esta despesa já foi paga.'}), 400
+            if status_db in ('pago', 'paga', 'recebida', 'recebido'):
+                return jsonify({'error': 'Esta despesa já foi paga.'}), 400
 
+            cur.execute("""
+                UPDATE LANCAMENTOS_FINANCEIROS
+                SET STATUS = 'Recebido'
+                WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
+            """, (id_lancamento, id_escritorio))
+
+            con.commit()
+            return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
+
+        # 2. Se não achou, tenta achar nas parcelas de clientes (Prolabore)
         cur.execute("""
-            UPDATE LANCAMENTOS_FINANCEIROS
-            SET STATUS = 'Recebido'
-            WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
-        """, (id_lancamento, id_escritorio))
+            SELECT parc.ID_PARCELAS, parc.STATUS
+            FROM PARCELAS parc
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+            WHERE parc.ID_PARCELAS = ? 
+              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
+                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+              ))
+        """, (id_lancamento, id_escritorio, id_escritorio))
 
-        con.commit()
+        row_parc = cur.fetchone()
 
-        return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
+        if row_parc:
+            status_db = (row_parc[1] or '').upper()
+
+            if status_db == 'PAGA':
+                return jsonify({'error': 'Esta parcela já foi paga.'}), 400
+
+            data_pagamento = datetime.date.today()
+
+            cur.execute("""
+                UPDATE PARCELAS
+                SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
+                WHERE ID_PARCELAS = ?
+            """, (data_pagamento, id_lancamento))
+
+            con.commit()
+            return jsonify({'mensagem': 'Pagamento da parcela confirmado com sucesso.'}), 200
+
+        # 3. Se não achou, tenta achar nas parcelas de êxito
+        cur.execute("""
+            SELECT pe.ID_PARCELA_EXITO, pe.STATUS
+            FROM PARCELAS_EXITO pe
+            INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+            WHERE pe.ID_PARCELA_EXITO = ? 
+              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
+                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+              ))
+        """, (id_lancamento, id_escritorio, id_escritorio))
+
+        row_exito = cur.fetchone()
+
+        if row_exito:
+            status_db = (row_exito[1] or '').upper()
+
+            if status_db == 'PAGA':
+                return jsonify({'error': 'Esta parcela de êxito já foi paga.'}), 400
+
+            data_pagamento = datetime.date.today()
+
+            cur.execute("""
+                UPDATE PARCELAS_EXITO
+                SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
+                WHERE ID_PARCELA_EXITO = ?
+            """, (data_pagamento, id_lancamento))
+
+            con.commit()
+            return jsonify({'mensagem': 'Pagamento da parcela de êxito confirmado com sucesso.'}), 200
+
+        return jsonify({'error': 'Lançamento não encontrado'}), 404
 
     except Exception as e:
         con.rollback()

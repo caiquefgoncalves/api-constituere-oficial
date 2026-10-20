@@ -5761,14 +5761,14 @@ def converter_valor_pix(valor):
         return None
 
 
-def buscar_parcela_pix(id_parcela, id_cliente, tipo_parcela):
+def buscar_parcela(id_parcela, id_cliente, tipo_parcela):
     con = conexao()
     cur = con.cursor()
 
     try:
         if tipo_parcela == "exito":
             cur.execute(
-                "SELECT pe.ID_PARCELA_EXITO, pe.VALOR_PARCELA, pe.STATUS "
+                "SELECT pe.ID_PARCELA_EXITO, pe.VALOR_PARCELA, pe.STATUS, pe.DATA_VENCIMENTO "
                 "FROM PARCELAS_EXITO pe "
                 "INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO "
                 "INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO "
@@ -5778,7 +5778,7 @@ def buscar_parcela_pix(id_parcela, id_cliente, tipo_parcela):
             )
         else:
             cur.execute(
-                "SELECT parc.ID_PARCELAS, parc.VALOR_PARCELA, parc.STATUS "
+                "SELECT parc.ID_PARCELAS, parc.VALOR_PARCELA, parc.STATUS, parc.DATA_VENCIMENTO "
                 "FROM PARCELAS parc "
                 "INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO "
                 "INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO "
@@ -5796,7 +5796,8 @@ def buscar_parcela_pix(id_parcela, id_cliente, tipo_parcela):
             'valor': converter_valor_pix(row[1]),
             'valor_raw': row[1],
             'tipo_raw': type(row[1]).__name__,
-            'status': row[2]
+            'status': row[2],
+            'data_vencimento': row[3],
         }
 
     finally:
@@ -5964,7 +5965,7 @@ def criar_cobranca_pix():
     if tipo_parcela not in ['prolabore', 'exito']:
         return jsonify({'error': 'Tipo de parcela inválido'}), 400
 
-    parcela = buscar_parcela_pix(id_parcela, id_cliente, tipo_parcela)
+    parcela = buscar_parcela(id_parcela, id_cliente, tipo_parcela)
 
     print(f"[PIX] Parcela encontrada: {parcela}")
 
@@ -6072,4 +6073,118 @@ def consultar_cobranca_pix(id_cobranca):
 
     except Exception as e:
         print(f"[PIX] Erro ao consultar: {e}")
+        return jsonify({'error': 'Erro interno'}), 500
+
+
+
+@app.route('/cliente/pagamento/boleto', methods=['POST'])
+def criar_cobranca_boleto():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    if not ARKHE_CLIENT_ID or not ARKHE_CLIENT_SECRET:
+        return jsonify({'error': 'Pagamento boleto não configurado'}), 503
+
+    id_cliente = token_data['id_usuarios']
+    dados = request.get_json() or {}
+
+    con = conexao()
+    cur = con.cursor()
+
+    cur.execute("""
+            SELECT 
+                ID_USUARIOS, 
+                CPF, 
+                CNPJ
+            FROM USUARIOS WHERE ID_USUARIOS = ?
+        """, (id_cliente,))
+
+    usuario = cur.fetchone()
+    cpf = usuario[1]
+    cnpj = usuario[2]
+    if cpf == None:
+        cpf_cnpj = cnpj
+    else:
+        cpf_cnpj = cpf
+
+
+    id_parcela = dados.get('id_parcela')
+    tipo_parcela = dados.get('tipo_parcela', 'prolabore')
+
+    print(f"[BOLETO] Requisição recebida - id_cliente={id_cliente}, id_parcela={id_parcela}, tipo={tipo_parcela}")
+
+    if not id_parcela:
+        return jsonify({'error': 'Parcela é obrigatória'}), 400
+
+    try:
+        id_parcela = int(id_parcela)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'ID de parcela inválido'}), 400
+
+    if tipo_parcela not in ['prolabore', 'exito']:
+        return jsonify({'error': 'Tipo de parcela inválido'}), 400
+
+    parcela = buscar_parcela(id_parcela, id_cliente, tipo_parcela)
+
+    print(f"[BOLETO] Parcela encontrada: {parcela}")
+
+    if not parcela:
+        return jsonify({'error': 'Parcela não encontrada'}), 404
+
+    if parcela['status'] == 'PAGA':
+        return jsonify({'error': 'Esta parcela já foi paga'}), 400
+
+    valor = parcela['valor']
+    data_vencimento = parcela['data_vencimento']
+
+    print(f"[BOLETO] Valor convertido: {valor} (original: {parcela['valor_raw']}, tipo: {parcela['tipo_raw']})")
+
+    if valor is None:
+        return jsonify({'error': 'Valor da parcela inválido no banco'}), 400
+
+    if valor <= 0:
+        return jsonify({'error': f'Valor da parcela é {valor}, precisa ser maior que zero'}), 400
+
+    try:
+        resposta = requests.post(
+            f"{ARKHE_URL}/cobrancas/boletos",
+            headers=headers_arkhe(),
+            json={"documento_pagador": cpf_cnpj,
+                  "valor": valor,
+                  "data_vencimento": data_vencimento
+                  },
+            timeout=15
+        )
+
+        print(f"[BOLETO] Resposta Arkhé: status={resposta.status_code}, body={resposta.text[:500]}")
+
+        if resposta.status_code >= 400:
+            return jsonify({'error': f'Erro ao criar boleto ({resposta.status_code})'}), 400
+
+        dados_arkhe = resposta.json()
+
+        return jsonify({
+            'id_cobranca': dados_arkhe.get('id_cobranca'),
+            'id_pagador': dados_arkhe.get('id_pagador'),
+            'id_recebedor': dados_arkhe.get('id_recebedor'),
+            'valor': valor,
+            'data_vencimento': dados_arkhe.get('data_vencimento'),
+            'codigo_pagamento': dados_arkhe.get('codigo_pagamento'),
+            'url_pdf': dados_arkhe.get('url_pdf'),
+            'id_parcela': id_parcela,
+            'tipo_parcela': tipo_parcela
+        }), 200
+
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Tempo esgotado ao conectar com a Arkhé'}), 504
+
+    except Exception as e:
+        print(f"[BOLETO] Erro: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': 'Erro interno'}), 500
