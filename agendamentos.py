@@ -12,6 +12,7 @@ from db import conexao
 from main import app, socketio
 import datetime
 import concurrent.futures
+import re
 from io import BytesIO
 import unicodedata
 from fpdf import FPDF
@@ -76,6 +77,23 @@ def converter_duracao(duracao_texto):
         return None
 
     texto = str(duracao_texto).strip()
+    texto_normalizado = ''.join(
+        caractere
+        for caractere in unicodedata.normalize('NFD', texto.lower())
+        if unicodedata.category(caractere) != 'Mn'
+    )
+
+    correspondencia_horas = re.fullmatch(
+        r'(\d+)\s*h(?:ora|oras)?', texto_normalizado
+    )
+    if correspondencia_horas:
+        return int(correspondencia_horas.group(1)) * 60
+
+    correspondencia_minutos = re.fullmatch(
+        r'(\d+)\s*(?:min|mins|minuto|minutos)', texto_normalizado
+    )
+    if correspondencia_minutos:
+        return int(correspondencia_minutos.group(1))
 
     if ':' in texto:
         partes = texto.split(':')
@@ -504,23 +522,30 @@ def solicitar_agendamento_cliente():
     """Creates a client's meeting request with an attorney from its own office."""
     token_data = decodificar_token()
     if token_data == False:
-        return jsonify({'error': 'Token necessÃ¡rio'}), 401
+        return jsonify({'error': 'Token necessário'}), 401
 
     if token_data['tipo'] not in (2, 3):
-        return jsonify({'error': 'Acesso nÃ£o autorizado'}), 403
+        return jsonify({'error': 'Acesso não autorizado'}), 403
 
     dados = request.get_json() or {}
     id_cliente = token_data['id_usuarios']
     id_advogado = dados.get('id_advogado')
     assunto = (dados.get('assunto') or '').strip()
-    data_agendamento = converter_data(dados.get('data'))
-    horario_obj = converter_horario(dados.get('horario'))
-    duracao_min = converter_duracao(dados.get('duracao'))
+    data_recebida = dados.get('data')
+    horario_recebido = dados.get('horario')
+    duracao_recebida = dados.get('duracao')
 
-    if not id_advogado or not assunto or not data_agendamento or not horario_obj or not duracao_min:
-        return jsonify({'error': 'Informe advogado, assunto, data, horÃ¡rio e duraÃ§Ã£o.'}), 400
+    if not id_advogado or not assunto or not data_recebida or not horario_recebido or not duracao_recebida:
+        return jsonify({'error': 'Informe advogado, assunto, data, horário e duração.'}), 400
+
+    data_agendamento = converter_data(data_recebida)
+    horario_obj = converter_horario(horario_recebido)
+    duracao_min = converter_duracao(duracao_recebida)
+
+    if not data_agendamento or not horario_obj or not duracao_min:
+        return jsonify({'error': 'Data, horário ou duração inválidos para o agendamento.'}), 400
     if data_agendamento < datetime.date.today() or duracao_min <= 0 or duracao_min > 480:
-        return jsonify({'error': 'Data ou duraÃ§Ã£o invÃ¡lida para o agendamento.'}), 400
+        return jsonify({'error': 'Data ou duração inválida para o agendamento.'}), 400
 
     horario_min = horario_obj.hour * 60 + horario_obj.minute
     horario_final_min = horario_min + duracao_min
@@ -530,12 +555,12 @@ def solicitar_agendamento_cliente():
         or 12 * 60 <= horario_min < 13 * 60
         or (horario_min < 12 * 60 and horario_final_min > 12 * 60)
     ):
-        return jsonify({'error': 'Escolha um horÃ¡rio entre 08:00 e 18:00, fora do intervalo de almoÃ§o.'}), 400
+        return jsonify({'error': 'Escolha um horário entre 08:00 e 18:00, fora do intervalo de almoço.'}), 400
 
     try:
         id_advogado = int(id_advogado)
     except (TypeError, ValueError):
-        return jsonify({'error': 'Advogado invÃ¡lido.'}), 400
+        return jsonify({'error': 'Advogado inválido.'}), 400
 
     con = conexao()
     cur = con.cursor()
@@ -551,7 +576,7 @@ def solicitar_agendamento_cliente():
         )
         cliente = cur.fetchone()
         if not cliente or not cliente[1]:
-            return jsonify({'error': 'Cliente sem advogado responsÃ¡vel para agendamento.'}), 403
+            return jsonify({'error': 'Cliente sem advogado responsável para agendamento.'}), 403
 
         nome_cliente, id_responsavel = cliente
         cur.execute(
@@ -577,14 +602,14 @@ def solicitar_agendamento_cliente():
         )
         advogado = cur.fetchone()
         if not advogado:
-            return jsonify({'error': 'Escolha um advogado do seu escritÃ³rio.'}), 403
+            return jsonify({'error': 'Escolha um advogado do seu escritório.'}), 403
 
         conflito = buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min)
         if conflito:
             return jsonify({
                 'error': (
-                    f'O advogado jÃ¡ possui agendamento em {conflito["data"]} '
-                    f'Ã s {conflito["horario"]}. Escolha outro horÃ¡rio.'
+                    f'O advogado já possui agendamento em {conflito["data"]} '
+                    f'às {conflito["horario"]}. Escolha outro horário.'
                 )
             }), 409
 
@@ -607,8 +632,8 @@ def solicitar_agendamento_cliente():
         id_agendamento = cur.fetchone()[0]
         data_fmt = data_agendamento.strftime('%d/%m/%Y')
         hora_fmt = horario_obj.strftime('%H:%M')
-        titulo = 'SolicitaÃ§Ã£o de agendamento'
-        mensagem = f'{nome_cliente} solicitou uma reuniÃ£o para {data_fmt} Ã s {hora_fmt}.'
+        titulo = 'Solicitação de agendamento'
+        mensagem = f'{nome_cliente} solicitou uma reunião para {data_fmt} às {hora_fmt}.'
         cur.execute(
             """
             INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
@@ -625,11 +650,11 @@ def solicitar_agendamento_cliente():
             'hora_criacao': hora_fmt, 'data_leitura': None,
             'id_agendamento': id_agendamento,
         }, room=f'usuario_{id_advogado}')
-        return jsonify({'mensagem': 'SolicitaÃ§Ã£o de agendamento enviada ao advogado.', 'id_agendamento': id_agendamento}), 201
+        return jsonify({'mensagem': 'Solicitação de agendamento enviada ao advogado.', 'id_agendamento': id_agendamento}), 201
     except Exception as e:
         con.rollback()
         print('Erro ao solicitar agendamento do cliente:', e)
-        return jsonify({'error': 'NÃ£o foi possÃ­vel enviar a solicitaÃ§Ã£o de agendamento.'}), 500
+        return jsonify({'error': 'Não foi possível enviar a solicitação de agendamento.'}), 500
     finally:
         cur.close()
         con.close()

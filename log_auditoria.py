@@ -23,7 +23,9 @@ _ARTIGOS = {
     'ATUALIZACOES': ('uma', 'atualização'),
     'MODELOS_DOCUMENTOS': ('um', 'modelo de documento'),
     'PROCESSOS': ('um', 'processo'),
+    'PARCELAS': ('uma', 'parcela'),
     'USUARIOS': ('um', 'cliente'),
+    'ADVOGADO': ('um', 'advogado do escritório'),
     'ADVOGADO_ESCRITORIO': ('um', 'advogado do escritório'),
     'ESCRITORIOS': ('um', 'escritório'),
     'SISTEMA': ('uma', 'ação no sistema'),
@@ -40,6 +42,8 @@ _ACOES_HUMANAS = {
     'INATIVAR': 'inativou',
     'ATIVAR': 'ativou',
     'GERAR_PDF': 'gerou o PDF de',
+    'GERAR_PIX': 'gerou um codigo Pix para',
+    'CONSULTAR_PIX': 'consultou o status do Pix de',
     'LOGIN': 'entrou no sistema',
 }
 
@@ -187,6 +191,10 @@ def _nome_usuario(id_usuario):
 def _descricao_evento():
     caminho = request.path.lower()
     argumentos = request.view_args or {}
+    if caminho == '/cliente/pagamento/pix' and request.method == 'POST':
+        return 'GERAR_PIX', 'PARCELAS'
+    if re.fullmatch(r'/cliente/pagamento/pix/\d+', caminho) and request.method == 'GET':
+        return 'CONSULTAR_PIX', 'PARCELAS'
     if caminho.endswith('/documento'):
         return 'GERAR_PDF', 'PROCESSOS'
     if caminho.endswith('/confirmar'):
@@ -197,6 +205,8 @@ def _descricao_evento():
         return 'CANCELAR', 'AGENDAMENTOS'
     if caminho.endswith('/concluir'):
         return 'CONCLUIR', 'PROCESSOS'
+    if re.fullmatch(r'/advogado/\d+/escritorio/\d+/(?:inativar|ativar)', caminho):
+        return ('INATIVAR' if caminho.endswith('/inativar') else 'ATIVAR'), 'ADVOGADO_ESCRITORIO'
     if caminho.endswith('/inativar'):
         return 'INATIVAR', caminho.split('/')[1].upper()
     if caminho.endswith('/ativar'):
@@ -469,6 +479,30 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
     if acao == 'GERAR_PDF':
         return f'{nome} {acao_txt} {alvo}.'
 
+    if tabela == 'AGENDAMENTOS' and acao == 'CANCELAR':
+        dados = (detalhes or {}).get('dados') or {}
+        agendamento = dados.get('agendamento') if isinstance(dados, dict) else None
+        nome_cliente = agendamento.get('cliente') if isinstance(agendamento, dict) else None
+        if nome_cliente:
+            return f'{nome} cancelou o agendamento com {nome_cliente}.'
+
+    if tabela == 'PARCELAS' and acao == 'GERAR_PIX':
+        dados = (detalhes or {}).get('dados') or {}
+        tipo_parcela = dados.get('tipo_parcela') if isinstance(dados, dict) else None
+        complemento = ' de êxito' if tipo_parcela == 'exito' else ''
+        return f'{nome} gerou um código Pix para uma parcela{complemento} em aberto.'
+
+    if tabela == 'PARCELAS' and acao == 'CONSULTAR_PIX':
+        return f'{nome} consultou o status de uma cobrança Pix.'
+
+    if tabela in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR'}:
+        dados = (detalhes or {}).get('dados') or {}
+        advogado = dados.get('advogado') if isinstance(dados, dict) else None
+        nome_advogado = advogado.get('nome') if isinstance(advogado, dict) else None
+        if nome_advogado:
+            verbo = 'ativou' if acao == 'ATIVAR' else 'inativou'
+            return f'{nome} {verbo} o vínculo de {nome_advogado} com o escritório.'
+
     if tabela == 'USUARIOS' and cargo == 'Cliente':
         if acao == 'EDITAR' and campo and campo.upper() != 'REGISTRO':
             campo_legivel = campo.replace('_', ' ').lower()
@@ -542,6 +576,81 @@ def _referencia_atualizacao(id_atualizacao, id_processo):
             erro
         )
         return None, None
+    finally:
+        if cur:
+            cur.close()
+        if con:
+            con.close()
+
+
+@lru_cache(maxsize=512)
+def _referencia_agendamento(id_agendamento):
+    if not id_agendamento:
+        return None
+
+    con = None
+    cur = None
+    try:
+        con = conexao()
+        cur = con.cursor()
+        cur.execute(
+            '''
+            SELECT CLIENTE, ASSUNTO, DATA, HORARIO, DURACAO, STATUS
+            FROM AGENDAMENTOS
+            WHERE ID_AGENDAMENTOS = ?
+            ''',
+            (id_agendamento,)
+        )
+        linha = cur.fetchone()
+        if not linha:
+            return None
+        return {
+            'cliente': linha[0],
+            'assunto': linha[1],
+            'data': _normalizar_valor(linha[2]),
+            'horario': _normalizar_valor(linha[3]),
+            'duracao': linha[4],
+            'status': linha[5],
+        }
+    except Exception as erro:
+        current_app.logger.warning(
+            'Não foi possível buscar a referência do agendamento no log: %s',
+            erro
+        )
+        return None
+    finally:
+        if cur:
+            cur.close()
+        if con:
+            con.close()
+
+
+@lru_cache(maxsize=512)
+def _referencia_advogado_escritorio(id_advogado, id_escritorio):
+    if not id_advogado or not id_escritorio:
+        return None
+
+    con = None
+    cur = None
+    try:
+        con = conexao()
+        cur = con.cursor()
+        cur.execute(
+            '''
+            SELECT COALESCE(NULLIF(u.NOME, ''), '--')
+            FROM ADVOGADO_ESCRITORIO ae
+            INNER JOIN USUARIOS u ON u.ID_USUARIOS = ae.ID_USUARIOS
+            WHERE ae.ID_USUARIOS = ? AND ae.ID_ESCRITORIOS = ?
+            ''',
+            (id_advogado, id_escritorio),
+        )
+        linha = cur.fetchone()
+        return {'nome': linha[0]} if linha else None
+    except Exception as erro:
+        current_app.logger.warning(
+            'Não foi possível buscar a referência do advogado no log: %s', erro
+        )
+        return None
     finally:
         if cur:
             cur.close()
@@ -661,6 +770,53 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                 detalhes = json.loads(detalhes_brutos or '{}')
             except (TypeError, json.JSONDecodeError):
                 detalhes = {}
+            if not isinstance(detalhes, dict):
+                detalhes = {}
+
+            # Corrige a leitura de logs antigos: antes de existir uma regra
+            # específica, a geração de Pix era confundida com criação de cliente
+            # porque a rota começa com "/cliente".
+            rota = (detalhes.get('rota') or '').lower()
+            if rota == '/cliente/pagamento/pix' and acao == 'CRIAR':
+                acao = 'GERAR_PIX'
+                tabela_afetada = 'PARCELAS'
+            elif re.fullmatch(r'/cliente/pagamento/pix/\d+', rota) and acao == 'GET':
+                acao = 'CONSULTAR_PIX'
+                tabela_afetada = 'PARCELAS'
+
+            try:
+                if tabela_afetada == 'AGENDAMENTOS':
+                    agendamento = _referencia_agendamento(id_registro_afetado)
+                    if agendamento:
+                        dados_evento = detalhes.get('dados')
+                        dados_evento = dados_evento if isinstance(dados_evento, dict) else {}
+                        detalhes['dados'] = {
+                            **dados_evento,
+                            'agendamento': agendamento,
+                        }
+                        detalhes_brutos = json.dumps(
+                            detalhes, ensure_ascii=False, default=str
+                        )
+
+                if tabela_afetada in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR'}:
+                    parametros = detalhes.get('parametros_rota') or {}
+                    referencia_advogado = _referencia_advogado_escritorio(
+                        id_registro_afetado, parametros.get('id_escritorio')
+                    )
+                    if referencia_advogado:
+                        dados_evento = detalhes.get('dados')
+                        dados_evento = dados_evento if isinstance(dados_evento, dict) else {}
+                        detalhes['dados'] = {
+                            **dados_evento,
+                            'advogado': referencia_advogado,
+                        }
+                        detalhes_brutos = json.dumps(
+                            detalhes, ensure_ascii=False, default=str
+                        )
+            except Exception as erro:
+                current_app.logger.warning(
+                    'Não foi possível complementar um registro do log: %s', erro
+                )
 
             todos.append({
                 'id_log': linha[0],
@@ -739,10 +895,86 @@ def _resumo_alteracoes_pdf(log):
     return ' | '.join(partes)
 
 
+_ROTULOS_PDF_LOG = {
+    'id_advogado': 'Advogado',
+    'id_advogado_2': 'Segundo advogado',
+    'id_cliente': 'Cliente',
+    'id_escritorio': 'Escritorio',
+    'assunto': 'Assunto',
+    'cliente': 'Cliente',
+    'data': 'Data',
+    'horario': 'Horario',
+    'duracao': 'Duracao',
+    'motivo': 'Motivo',
+    'status': 'Status',
+    'nome': 'Nome',
+    'email': 'E-mail',
+    'telefone': 'Telefone',
+    'area_atuacao': 'Area de atuacao',
+    'ativo': 'Situacao',
+    'processo': 'Processo',
+    'agendamento': 'Agendamento',
+    'advogado': 'Advogado',
+    'rota': 'Rota',
+    'metodo': 'Metodo',
+}
+
+
+def _rotulo_pdf_log(chave):
+    return _ROTULOS_PDF_LOG.get(
+        str(chave), str(chave).replace('_', ' ').capitalize()
+    )
+
+
+def _linhas_detalhes_pdf(valor, prefixo=''):
+    """Converte os detalhes JSON de um log em linhas legiveis para o PDF."""
+    if isinstance(valor, dict):
+        linhas = []
+        for chave, item in valor.items():
+            if str(chave).lower() in _CAMPOS_SIGILOSOS or chave == 'id_evento':
+                continue
+            rotulo = _rotulo_pdf_log(chave)
+            caminho = f'{prefixo} - {rotulo}' if prefixo else rotulo
+            if isinstance(item, (dict, list, tuple)):
+                linhas.extend(_linhas_detalhes_pdf(item, caminho))
+            elif item not in (None, ''):
+                if str(chave).lower() == 'ativo':
+                    item = 'Ativado' if str(item).lower() in {'1', 'true'} else 'Desativado'
+                linhas.append(f'{caminho}: {_texto_pdf_log(item, 500)}')
+        return linhas
+
+    if isinstance(valor, (list, tuple)):
+        linhas = []
+        for indice, item in enumerate(valor, start=1):
+            linhas.extend(_linhas_detalhes_pdf(item, f'{prefixo} {indice}'.strip()))
+        return linhas
+
+    return [f'{prefixo}: {_texto_pdf_log(valor, 500)}'] if valor not in (None, '') else []
+
+
+def _detalhes_pdf_log(log):
+    try:
+        detalhes = json.loads(log.get('detalhes') or '{}')
+    except (TypeError, json.JSONDecodeError):
+        detalhes = {}
+    if not isinstance(detalhes, dict):
+        return []
+
+    linhas = []
+    dados = detalhes.get('dados')
+    if isinstance(dados, dict):
+        linhas.extend(_linhas_detalhes_pdf(dados))
+
+    for chave in ('metodo', 'rota'):
+        if detalhes.get(chave):
+            linhas.append(f'{_rotulo_pdf_log(chave)}: {_texto_pdf_log(detalhes[chave], 500)}')
+    return linhas
+
+
 class RelatorioLogPDF(FPDF):
     def header(self):
         self.set_fill_color(0, 71, 171)
-        self.rect(0, 0, 297, 20, 'F')
+        self.rect(0, 0, self.w, 20, 'F')
         self.set_text_color(255, 255, 255)
         self.set_font('Helvetica', 'B', 15)
         self.set_xy(16, 6)
@@ -753,7 +985,7 @@ class RelatorioLogPDF(FPDF):
     def footer(self):
         self.set_y(-12)
         self.set_draw_color(220, 228, 238)
-        self.line(16, self.get_y(), 281, self.get_y())
+        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.set_y(-9)
         self.set_font('Helvetica', '', 8)
         self.set_text_color(100, 100, 100)
@@ -788,9 +1020,8 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
     pdf.ln(5)
 
     colunas = [
-        ('Nome', 30, 22), ('Acao', 20, 16), ('Registro afetado', 35, 28),
-        ('Data', 20, 12), ('Hora', 15, 8), ('Alteracoes', 112, 150),
-        ('Origem/IP', 33, 22)
+        ('Usuario', 38, 28), ('Acao', 22, 18), ('Registro afetado', 42, 34),
+        ('Data e hora', 30, 18), ('Resumo da acao', 111, 105), ('IP', 22, 16)
     ]
 
     def cabecalho_tabela():
@@ -815,45 +1046,94 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
         hora = data_hora[11:16] if len(data_hora) >= 16 else '-'
         registro = _alvo_humano(
             log.get('tabela_afetada'),
-            log.get('id_registro_afetado')
+            log.get('id_registro_afetado'),
         )
-        alteracoes = _resumo_alteracoes_pdf(log)
         valores = [
             log.get('nome_usuario'),
             log.get('acao'),
             registro,
-            data,
-            hora,
-            alteracoes,
+            f'{data} {hora}',
+            log.get('descricao_humana') or _resumo_alteracoes_pdf(log),
             log.get('ip_origem'),
         ]
 
-        # A coluna de alterações pode conter vários campos e valores longos.
-        # Aumenta a altura da linha para não descartar nenhuma informação.
-        altura_linha = max(7, 4 * math.ceil(max(1, len(alteracoes)) / 90))
-        if pdf.get_y() + altura_linha > 190:
-            pdf.add_page()
-            cabecalho_tabela()
-            pdf.set_font('Helvetica', '', 6.5)
-
-        y_inicial = pdf.get_y()
         if indice % 2:
             pdf.set_fill_color(250, 252, 255)
         else:
             pdf.set_fill_color(255, 255, 255)
-        for indice_coluna, ((_, largura, limite), valor) in enumerate(zip(colunas, valores)):
-            if indice_coluna == 5:
-                pdf.multi_cell(
-                    largura,
-                    4,
-                    _texto_pdf_log(valor),
-                    border=1,
-                    fill=True,
-                    new_x='RIGHT',
-                    new_y='TOP',
-                )
-            else:
-                pdf.cell(largura, altura_linha, _texto_pdf_log(valor, limite), border=1, fill=True)
-        pdf.set_y(y_inicial + altura_linha)
+        for (_, largura, limite), valor in zip(colunas, valores):
+            pdf.cell(largura, 8, _texto_pdf_log(valor, limite), border=1, fill=True)
+        pdf.ln()
+
+    pdf.add_page()
+    pdf.set_fill_color(237, 244, 255)
+    pdf.set_text_color(0, 71, 171)
+    pdf.set_font('Helvetica', 'B', 11)
+    pdf.cell(0, 8, 'DETALHAMENTO DOS REGISTROS', fill=True, new_x='LMARGIN', new_y='NEXT')
+    pdf.set_text_color(35, 35, 35)
+    pdf.ln(3)
+
+    for indice, log in enumerate(logs, start=1):
+        data_hora = log.get('data_hora') or ''
+        data_hora_legivel = (
+            f'{data_hora[8:10]}/{data_hora[5:7]}/{data_hora[:4]} {data_hora[11:16]}'
+            if len(data_hora) >= 16 else '-'
+        )
+        registro = _alvo_humano(
+            log.get('tabela_afetada'), log.get('id_registro_afetado')
+        )
+        alteracoes = _resumo_alteracoes_pdf(log)
+        detalhes = _detalhes_pdf_log(log)
+        cabecalho = (
+            f'Registro #{log.get("id_log", indice)} | {log.get("acao") or "Acao"} | '
+            f'{_texto_pdf_log(log.get("nome_usuario") or "Sistema", 80)}'
+        )
+        altura_estimada = 34 + min(90, 4 * (len(detalhes) + max(1, len(alteracoes) // 105)))
+        if pdf.get_y() + altura_estimada > 186:
+            pdf.add_page()
+
+        pdf.set_fill_color(0, 71, 171)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font('Helvetica', 'B', 8)
+        pdf.cell(0, 6, _texto_pdf_log(cabecalho, 180), fill=True, new_x='LMARGIN', new_y='NEXT')
+        pdf.set_text_color(35, 35, 35)
+        pdf.set_font('Helvetica', '', 8)
+        resumo = log.get('descricao_humana') or 'Acao registrada no sistema.'
+        pdf.multi_cell(
+            0, 4.5, f'Resumo: {_texto_pdf_log(resumo, 900)}', border=1,
+            new_x='LMARGIN', new_y='NEXT',
+        )
+        pdf.multi_cell(
+            0,
+            4.5,
+            _texto_pdf_log(
+                f'Registro afetado: {registro}\n'
+                f'Data e hora: {data_hora_legivel}\n'
+                f'Cargo: {log.get("cargo") or "--"}\n'
+                f'Dispositivo: {log.get("maquina") or "--"}\n'
+                f'IP de origem: {log.get("ip_origem") or "--"}',
+                1200,
+            ),
+            border=1,
+            new_x='LMARGIN',
+            new_y='NEXT',
+        )
+        if alteracoes:
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.cell(0, 5, 'Alteracoes registradas', border='LTR', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_font('Helvetica', '', 8)
+            pdf.multi_cell(
+                0, 4.5, _texto_pdf_log(alteracoes, 1400), border='LBR',
+                new_x='LMARGIN', new_y='NEXT',
+            )
+        if detalhes:
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.cell(0, 5, 'Informacoes adicionais', border='LTR', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_font('Helvetica', '', 8)
+            pdf.multi_cell(
+                0, 4.5, '\n'.join(detalhes), border='LBR',
+                new_x='LMARGIN', new_y='NEXT',
+            )
+        pdf.ln(4)
 
     return bytes(pdf.output())
