@@ -26,7 +26,7 @@ _ARTIGOS = {
     'PARCELAS': ('uma', 'parcela'),
     'USUARIOS': ('um', 'cliente'),
     'ADVOGADO': ('um', 'advogado do escritório'),
-    'ADVOGADO_ESCRITORIO': ('um', 'advogado do escritório'),
+    'ADVOGADO_ESCRITORIO': ('um', 'advogado'),
     'ESCRITORIOS': ('um', 'escritório'),
     'SISTEMA': ('uma', 'ação no sistema'),
 }
@@ -191,6 +191,8 @@ def _nome_usuario(id_usuario):
 def _descricao_evento():
     caminho = request.path.lower()
     argumentos = request.view_args or {}
+    if re.fullmatch(r'/processo/\d+/atualizacoes', caminho) and request.method == 'POST':
+        return 'CRIAR', 'ATUALIZACOES'
     if caminho == '/cliente/pagamento/pix' and request.method == 'POST':
         return 'GERAR_PIX', 'PARCELAS'
     if re.fullmatch(r'/cliente/pagamento/pix/\d+', caminho) and request.method == 'GET':
@@ -370,6 +372,12 @@ def registrar_requisicao(token_data):
         return
 
     acao, tabela = _descricao_evento()
+    anterior = getattr(g, 'auditoria_anterior', None) or {}
+    if tabela == 'ADVOGADO_ESCRITORIO' and acao == 'EXCLUIR':
+        id_advogado = anterior.get('ID_USUARIOS') or _id_registro(view_args)
+        nome_advogado = _nome_usuario(id_advogado) if id_advogado else None
+        if nome_advogado:
+            dados['advogado'] = {'nome': nome_advogado}
     detalhes = json.dumps({
         'id_evento': uuid.uuid4().hex,
         'metodo': request.method,
@@ -494,11 +502,13 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
     if tabela == 'PARCELAS' and acao == 'CONSULTAR_PIX':
         return f'{nome} consultou o status de uma cobrança Pix.'
 
-    if tabela in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR'}:
+    if tabela in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR', 'EXCLUIR'}:
         dados = (detalhes or {}).get('dados') or {}
         advogado = dados.get('advogado') if isinstance(dados, dict) else None
         nome_advogado = advogado.get('nome') if isinstance(advogado, dict) else None
         if nome_advogado:
+            if acao == 'EXCLUIR':
+                return f'{nome} removeu {nome_advogado} do escritório.'
             verbo = 'ativou' if acao == 'ATIVAR' else 'inativou'
             return f'{nome} {verbo} o vínculo de {nome_advogado} com o escritório.'
 
@@ -630,11 +640,10 @@ def _referencia_advogado_escritorio(id_advogado, id_escritorio):
         cur.execute(
             '''
             SELECT COALESCE(NULLIF(u.NOME, ''), '--')
-            FROM ADVOGADO_ESCRITORIO ae
-            INNER JOIN USUARIOS u ON u.ID_USUARIOS = ae.ID_USUARIOS
-            WHERE ae.ID_USUARIOS = ? AND ae.ID_ESCRITORIOS = ?
+            FROM USUARIOS u
+            WHERE u.ID_USUARIOS = ? AND u.TIPO = 0
             ''',
-            (id_advogado, id_escritorio),
+            (id_advogado,),
         )
         linha = cur.fetchone()
         return {'nome': linha[0]} if linha else None
@@ -775,6 +784,13 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
             elif re.fullmatch(r'/cliente/pagamento/pix/\d+', rota) and acao == 'GET':
                 acao = 'CONSULTAR_PIX'
                 tabela_afetada = 'PARCELAS'
+            elif (
+                re.fullmatch(r'/processo/\d+/atualizacoes', rota)
+                and acao == 'CRIAR'
+                and tabela_afetada == 'PROCESSOS'
+            ):
+                tabela_afetada = 'ATUALIZACOES'
+                id_registro_afetado = None
 
             try:
                 if tabela_afetada == 'AGENDAMENTOS':
@@ -790,7 +806,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                             detalhes, ensure_ascii=False, default=str
                         )
 
-                if tabela_afetada in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR'}:
+                if tabela_afetada in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {'ATIVAR', 'INATIVAR', 'EXCLUIR'}:
                     parametros = detalhes.get('parametros_rota') or {}
                     referencia_advogado = _referencia_advogado_escritorio(
                         id_registro_afetado, parametros.get('id_escritorio')
