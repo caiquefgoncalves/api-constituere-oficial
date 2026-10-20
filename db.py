@@ -7,7 +7,6 @@ from flask import current_app
 
 
 def _cliente_firebird():
-    """Retorna a DLL do cliente Firebird configurada ou instalada localmente."""
     configurado = os.getenv('FIREBIRD_CLIENT_DLL')
     locais = ([Path(configurado)] if configurado else []) + [
         Path(os.getenv('PROGRAMFILES(X86)', r'C:\\Program Files (x86)')) / 'Firebird' / 'Firebird_4_0' / 'fbclient.dll',
@@ -22,7 +21,6 @@ def _cliente_firebird():
 
 
 def _dll_compativel(caminho, arquitetura_python):
-    """Verifica se uma DLL PE possui a mesma arquitetura do Python atual."""
     try:
         with caminho.open('rb') as arquivo:
             arquivo.seek(0x3C)
