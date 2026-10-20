@@ -9,3 +9,9 @@ openai
 fpdf2==2.8.8
 requests
 docxtpl
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+cryptography==42.0.8
+tzdata

@@ -1280,6 +1280,238 @@ def editar_agendamento(id_agendamento):
 
         con.commit()
 
+        google_sincronizado = False
+        google_erro = None
+
+
+
+        try:
+            from google_calendar import atualizar_evento_google
+            from zoneinfo import ZoneInfo
+
+            cur.execute("""
+                SELECT
+                    a.ID_USUARIOS_ADVOGADO_1,
+                    a.ID_USUARIOS_ADVOGADO_2,
+                    a.ID_USUARIOS_CLIENTE,
+                    a.CLIENTE,
+                    a.ASSUNTO,
+                    a.DATA,
+                    a.HORARIO,
+                    a.DURACAO,
+                    a.STATUS,
+                    a.CONFIRMADO_ADVOGADO_1,
+                    a.CONFIRMADO_ADVOGADO_2,
+                    a.GOOGLE_EVENT_ID,
+                    u.EMAIL
+                FROM AGENDAMENTOS a
+                LEFT JOIN USUARIOS u
+                    ON u.ID_USUARIOS = a.ID_USUARIOS_CLIENTE
+                WHERE a.ID_AGENDAMENTOS = ?
+            """, (id_agendamento,))
+
+            dados_google = cur.fetchone()
+
+            if dados_google:
+                id_adv_1_google = dados_google[0]
+                id_adv_2_google = dados_google[1]
+
+                nome_cliente_google = (
+                        dados_google[3]
+                        or 'Cliente'
+                )
+
+                assunto_google = (
+                        dados_google[4]
+                        or 'Consulta'
+                )
+
+                data_google = dados_google[5]
+                horario_google = dados_google[6]
+                duracao_google = dados_google[7]
+
+                status_google = dados_google[8]
+
+                confirmado_1_google = (
+                        dados_google[9]
+                        or 0
+                )
+
+                confirmado_2_google = (
+                        dados_google[10]
+                        or 0
+                )
+
+                google_event_id = dados_google[11]
+
+                email_cliente_google = dados_google[12]
+
+
+                if (
+                        status_google == 'confirmado'
+                        and google_event_id
+                ):
+
+
+                    if confirmado_1_google == 1:
+                        id_organizador = id_adv_1_google
+
+                    elif (
+                            id_adv_2_google
+                            and confirmado_2_google == 1
+                    ):
+                        id_organizador = id_adv_2_google
+
+                    else:
+                        id_organizador = None
+
+                    if id_organizador:
+
+
+
+                        if isinstance(
+                                horario_google,
+                                datetime.time
+                        ):
+                            horario_obj_google = (
+                                horario_google
+                            )
+
+                        else:
+                            horario_obj_google = (
+                                datetime.datetime.strptime(
+                                    str(horario_google)[:5],
+                                    '%H:%M'
+                                ).time()
+                            )
+
+                        if isinstance(
+                                duracao_google,
+                                int
+                        ):
+                            duracao_min_google = (
+                                duracao_google
+                            )
+
+                        else:
+                            duracao_min_google = (
+                                converter_duracao(
+                                    duracao_google
+                                )
+                            )
+
+                        fuso = ZoneInfo(
+                            'America/Sao_Paulo'
+                        )
+
+                        inicio_google = (
+                            datetime.datetime.combine(
+                                data_google,
+                                horario_obj_google
+                            ).replace(
+                                tzinfo=fuso
+                            )
+                        )
+
+                        fim_google = (
+                                inicio_google
+                                + datetime.timedelta(
+                            minutes=duracao_min_google
+                        )
+                        )
+
+
+
+                        convidados = []
+
+                        if email_cliente_google:
+                            convidados.append(
+                                email_cliente_google
+                            )
+
+
+                        id_advogado_convidado = None
+
+                        if (
+                                id_adv_2_google
+                                and confirmado_1_google == 1
+                                and confirmado_2_google == 1
+                        ):
+
+                            if (
+                                    id_organizador
+                                    == id_adv_1_google
+                            ):
+                                id_advogado_convidado = (
+                                    id_adv_2_google
+                                )
+
+                            else:
+                                id_advogado_convidado = (
+                                    id_adv_1_google
+                                )
+
+                        if id_advogado_convidado:
+                            cur.execute("""
+                                SELECT EMAIL
+                                FROM USUARIOS
+                                WHERE ID_USUARIOS = ?
+                            """, (
+                                id_advogado_convidado,
+                            ))
+
+                            resultado_email_adv = (
+                                cur.fetchone()
+                            )
+
+                            if (
+                                    resultado_email_adv
+                                    and resultado_email_adv[0]
+                            ):
+                                convidados.append(
+                                    resultado_email_adv[0]
+                                )
+
+
+
+                        atualizar_evento_google(
+                            id_usuario=id_organizador,
+                            google_event_id=google_event_id,
+                            titulo=f'Consulta - {nome_cliente_google} - {assunto_google}',
+                            descricao=(
+                                f'Cliente: '
+                                f'{nome_cliente_google}\n'
+                                f'Assunto: '
+                                f'{assunto_google}'
+                            ),
+                            inicio=inicio_google,
+                            fim=fim_google,
+                            convidados=convidados
+                        )
+
+                        google_sincronizado = True
+
+                        print(
+                            'Evento Google atualizado: '
+                            f'{google_event_id}'
+                        )
+
+        except Exception as erro_google:
+            google_erro = str(
+                erro_google
+            )
+
+            print(
+                'Erro ao atualizar evento '
+                'no Google Agenda:',
+                erro_google
+            )
+
+            import traceback
+            traceback.print_exc()
+
+
+
         try:
             eh_um_advogado = not id_advogado_2
 
@@ -1330,7 +1562,14 @@ def editar_agendamento(id_agendamento):
         except Exception as e:
             print(f"Erro ao agendar e-mail (editar): {e}")
 
-        return jsonify({'mensagem': 'Agendamento atualizado com sucesso'}), 200
+        return jsonify({
+            'mensagem': 'Agendamento atualizado com sucesso',
+
+            'google_calendar': {
+                'sincronizado': google_sincronizado,
+                'erro': google_erro
+            }
+        }), 200
 
     except Exception as e:
         con.rollback()
@@ -1486,7 +1725,216 @@ def confirmar_agendamento(id_agendamento):
 
             id_notificacao = cur.fetchone()[0]
 
+        google_sincronizado = False
+        google_erro = None
+
         con.commit()
+
+
+
+        if novo_status == 'confirmado':
+            try:
+                from google_calendar import criar_evento_google
+                from zoneinfo import ZoneInfo
+
+                cur.execute("""
+                    SELECT
+                        a.ID_USUARIOS_ADVOGADO_1,
+                        a.ID_USUARIOS_ADVOGADO_2,
+                        a.ID_USUARIOS_CLIENTE,
+                        a.CLIENTE,
+                        a.ASSUNTO,
+                        a.DATA,
+                        a.HORARIO,
+                        a.DURACAO,
+                        a.CONFIRMADO_ADVOGADO_1,
+                        a.CONFIRMADO_ADVOGADO_2,
+                        a.GOOGLE_EVENT_ID,
+                        u.EMAIL
+                    FROM AGENDAMENTOS a
+                    LEFT JOIN USUARIOS u
+                        ON u.ID_USUARIOS = a.ID_USUARIOS_CLIENTE
+                    WHERE a.ID_AGENDAMENTOS = ?
+                """, (id_agendamento,))
+
+                dados_google = cur.fetchone()
+
+                if dados_google:
+                    google_event_id = dados_google[10]
+
+                    if not google_event_id:
+                        id_adv_1_google = dados_google[0]
+                        id_adv_2_google = dados_google[1]
+                        nome_cliente_google = dados_google[3] or 'Cliente'
+                        assunto_google = dados_google[4] or 'Consulta'
+                        data_google = dados_google[5]
+                        horario_google = dados_google[6]
+                        duracao_google = dados_google[7]
+                        confirmado_1_google = dados_google[8] or 0
+                        confirmado_2_google = dados_google[9] or 0
+                        email_cliente_google = dados_google[11]
+
+
+                        if confirmado_1_google == 1:
+                            id_organizador = id_adv_1_google
+
+                        elif (
+                            id_adv_2_google
+                            and confirmado_2_google == 1
+                        ):
+
+                            id_organizador = id_adv_2_google
+
+                        else:
+                            id_organizador = None
+
+                        if id_organizador:
+
+
+                            if isinstance(
+                                horario_google,
+                                datetime.time
+                            ):
+                                horario_obj_google = horario_google
+
+                            else:
+                                horario_obj_google = (
+                                    datetime.datetime.strptime(
+                                        str(horario_google)[:5],
+                                        '%H:%M'
+                                    ).time()
+                                )
+
+                            if isinstance(
+                                duracao_google,
+                                int
+                            ):
+                                duracao_min_google = duracao_google
+
+                            else:
+                                duracao_min_google = (
+                                    converter_duracao(
+                                        duracao_google
+                                    )
+                                )
+
+                            fuso = ZoneInfo(
+                                'America/Sao_Paulo'
+                            )
+
+                            inicio_google = datetime.datetime.combine(
+                                data_google,
+                                horario_obj_google
+                            ).replace(
+                                tzinfo=fuso
+                            )
+
+                            fim_google = (
+                                inicio_google
+                                + datetime.timedelta(
+                                    minutes=duracao_min_google
+                                )
+                            )
+
+
+                            convidados = []
+
+                            if email_cliente_google:
+                                convidados.append(
+                                    email_cliente_google
+                                )
+
+
+                            id_advogado_convidado = None
+
+                            if (
+                                id_adv_2_google
+                                and confirmado_1_google == 1
+                                and confirmado_2_google == 1
+                            ):
+                                if (
+                                    id_organizador
+                                    == id_adv_1_google
+                                ):
+                                    id_advogado_convidado = (
+                                        id_adv_2_google
+                                    )
+                                else:
+                                    id_advogado_convidado = (
+                                        id_adv_1_google
+                                    )
+
+                            if id_advogado_convidado:
+                                cur.execute("""
+                                    SELECT EMAIL
+                                    FROM USUARIOS
+                                    WHERE ID_USUARIOS = ?
+                                """, (
+                                    id_advogado_convidado,
+                                ))
+
+                                resultado_email_adv = (
+                                    cur.fetchone()
+                                )
+
+                                if (
+                                    resultado_email_adv
+                                    and resultado_email_adv[0]
+                                ):
+                                    convidados.append(
+                                        resultado_email_adv[0]
+                                    )
+
+
+
+                            evento_google = criar_evento_google(
+                                id_usuario=id_organizador,
+                                titulo=f'Consulta - {nome_cliente_google} - {assunto_google}',
+                                descricao=(
+                                    f'Cliente: '
+                                    f'{nome_cliente_google}\n'
+                                    f'Assunto: '
+                                    f'{assunto_google}'
+                                ),
+                                inicio=inicio_google,
+                                fim=fim_google,
+                                convidados=convidados
+                            )
+
+                            novo_google_event_id = (
+                                evento_google.get('id')
+                            )
+
+                            if novo_google_event_id:
+                                cur.execute("""
+                                    UPDATE AGENDAMENTOS
+                                    SET GOOGLE_EVENT_ID = ?
+                                    WHERE ID_AGENDAMENTOS = ?
+                                """, (
+                                    novo_google_event_id,
+                                    id_agendamento
+                                ))
+
+                                con.commit()
+
+                                google_sincronizado = True
+
+                                print(
+                                    'Evento Google criado: '
+                                    f'{novo_google_event_id}'
+                                )
+
+            except Exception as erro_google:
+                google_erro = str(erro_google)
+
+                print(
+                    'Erro ao sincronizar '
+                    'agendamento com Google:',
+                    erro_google
+                )
+
+                import traceback
+                traceback.print_exc()
 
         if id_notificacao:
             agora = datetime.datetime.now()
@@ -1570,6 +2018,12 @@ def confirmar_agendamento(id_agendamento):
         return jsonify({
             'mensagem': 'Resposta registrada com sucesso',
             'status': novo_status,
+
+            'google_calendar': {
+                'sincronizado': google_sincronizado,
+                'erro': google_erro
+            },
+
             'respostas': {
                 'respondidos': total_respostas,
                 'necessarios': total_advogados,
@@ -1578,6 +2032,7 @@ def confirmar_agendamento(id_agendamento):
                 'texto': f'{total_respostas}/{total_advogados}'
             }
         }), 200
+
 
     except Exception as e:
         con.rollback()
@@ -1646,6 +2101,22 @@ def cancelar_agendamento(id_agendamento):
         recusado_1 = agendamento[7] or 0
         recusado_2 = agendamento[8] or 0
         status_atual = agendamento[9]
+
+        id_organizador_google_anterior = None
+
+        if status_atual == 'confirmado':
+            if confirmado_1 == 1:
+                id_organizador_google_anterior = (
+                    id_advogado_1
+                )
+
+            elif (
+                    id_advogado_2
+                    and confirmado_2 == 1
+            ):
+                id_organizador_google_anterior = (
+                    id_advogado_2
+                )
 
         if hasattr(data_agendamento, 'strftime'):
             data_formatada = data_agendamento.strftime('%d/%m/%Y')
@@ -1740,6 +2211,338 @@ def cancelar_agendamento(id_agendamento):
             id_notificacao = cur.fetchone()[0]
 
         con.commit()
+
+        google_sincronizado = False
+        google_erro = None
+        google_acao = 'nenhuma'
+
+
+
+        try:
+            from google_calendar import (
+                cancelar_evento_google,
+                atualizar_evento_google,
+                criar_evento_google
+            )
+
+            from zoneinfo import ZoneInfo
+
+            cur.execute("""
+                SELECT
+                    a.GOOGLE_EVENT_ID,
+                    a.ID_USUARIOS_ADVOGADO_1,
+                    a.ID_USUARIOS_ADVOGADO_2,
+                    a.CLIENTE,
+                    a.ASSUNTO,
+                    a.DATA,
+                    a.HORARIO,
+                    a.DURACAO,
+                    u.EMAIL
+                FROM AGENDAMENTOS a
+                LEFT JOIN USUARIOS u
+                    ON u.ID_USUARIOS =
+                       a.ID_USUARIOS_CLIENTE
+                WHERE a.ID_AGENDAMENTOS = ?
+            """, (
+                id_agendamento,
+            ))
+
+            dados_google = cur.fetchone()
+
+            if dados_google:
+                google_event_id = (
+                    dados_google[0]
+                )
+
+                id_adv_1_google = (
+                    dados_google[1]
+                )
+
+                id_adv_2_google = (
+                    dados_google[2]
+                )
+
+                nome_cliente_google = (
+                    dados_google[3]
+                    or 'Cliente'
+                )
+
+                assunto_google = (
+                    dados_google[4]
+                    or 'Consulta'
+                )
+
+                data_google = (
+                    dados_google[5]
+                )
+
+                horario_google = (
+                    dados_google[6]
+                )
+
+                duracao_google = (
+                    dados_google[7]
+                )
+
+                email_cliente_google = (
+                    dados_google[8]
+                )
+
+
+                if google_event_id:
+
+
+                    if novo_status == 'cancelado':
+
+                        if (
+                            id_organizador_google_anterior
+                        ):
+                            cancelar_evento_google(
+                                id_usuario=(
+                                    id_organizador_google_anterior
+                                ),
+                                google_event_id=(
+                                    google_event_id
+                                )
+                            )
+
+                            cur.execute("""
+                                UPDATE AGENDAMENTOS
+                                SET GOOGLE_EVENT_ID = NULL
+                                WHERE ID_AGENDAMENTOS = ?
+                            """, (
+                                id_agendamento,
+                            ))
+
+                            con.commit()
+
+                            google_sincronizado = True
+                            google_acao = 'cancelado'
+
+                            print(
+                                'Evento Google cancelado: '
+                                f'{google_event_id}'
+                            )
+
+
+
+                    elif (
+                        novo_status == 'confirmado'
+                        and total_confirmados == 1
+                    ):
+
+                        if confirmado_1 == 1:
+                            id_advogado_presente = (
+                                id_adv_1_google
+                            )
+
+                        elif (
+                            id_adv_2_google
+                            and confirmado_2 == 1
+                        ):
+                            id_advogado_presente = (
+                                id_adv_2_google
+                            )
+
+                        else:
+                            id_advogado_presente = None
+
+                        if id_advogado_presente:
+
+
+
+                            if isinstance(
+                                horario_google,
+                                datetime.time
+                            ):
+                                horario_obj_google = (
+                                    horario_google
+                                )
+
+                            else:
+                                horario_obj_google = (
+                                    datetime.datetime.strptime(
+                                        str(
+                                            horario_google
+                                        )[:5],
+                                        '%H:%M'
+                                    ).time()
+                                )
+
+                            if isinstance(
+                                duracao_google,
+                                int
+                            ):
+                                duracao_min_google = (
+                                    duracao_google
+                                )
+
+                            else:
+                                duracao_min_google = (
+                                    converter_duracao(
+                                        duracao_google
+                                    )
+                                )
+
+                            fuso = ZoneInfo(
+                                'America/Sao_Paulo'
+                            )
+
+                            inicio_google = (
+                                datetime.datetime.combine(
+                                    data_google,
+                                    horario_obj_google
+                                ).replace(
+                                    tzinfo=fuso
+                                )
+                            )
+
+                            fim_google = (
+                                inicio_google
+                                + datetime.timedelta(
+                                    minutes=(
+                                        duracao_min_google
+                                    )
+                                )
+                            )
+
+                            convidados = []
+
+                            if email_cliente_google:
+                                convidados.append(
+                                    email_cliente_google
+                                )
+
+
+
+                            if (
+                                id_advogado_presente
+                                ==
+                                id_organizador_google_anterior
+                            ):
+
+                                atualizar_evento_google(
+                                    id_usuario=(
+                                        id_advogado_presente
+                                    ),
+                                    google_event_id=(
+                                        google_event_id
+                                    ),
+                                    titulo=(
+                                        f'Consulta - {nome_cliente_google} - {assunto_google}'
+                                    ),
+                                    descricao=(
+                                        f'Cliente: '
+                                        f'{nome_cliente_google}'
+                                        f'\nAssunto: '
+                                        f'{assunto_google}'
+                                    ),
+                                    inicio=inicio_google,
+                                    fim=fim_google,
+                                    convidados=convidados
+                                )
+
+                                google_sincronizado = True
+                                google_acao = 'atualizado'
+
+                                print(
+                                    'Evento Google '
+                                    'atualizado após '
+                                    'saída de advogado: '
+                                    f'{google_event_id}'
+                                )
+
+
+
+                            else:
+
+                                if (
+                                    id_organizador_google_anterior
+                                ):
+                                    cancelar_evento_google(
+                                        id_usuario=(
+                                            id_organizador_google_anterior
+                                        ),
+                                        google_event_id=(
+                                            google_event_id
+                                        )
+                                    )
+
+
+                                cur.execute("""
+                                    UPDATE AGENDAMENTOS
+                                    SET GOOGLE_EVENT_ID = NULL
+                                    WHERE ID_AGENDAMENTOS = ?
+                                """, (
+                                    id_agendamento,
+                                ))
+
+                                con.commit()
+
+
+                                novo_evento_google = (
+                                    criar_evento_google(
+                                        id_usuario=(
+                                            id_advogado_presente
+                                        ),
+                                        titulo=(
+                                            f'Consulta - {nome_cliente_google} - {assunto_google}'
+                                        ),
+                                        descricao=(
+                                            f'Cliente: '
+                                            f'{nome_cliente_google}'
+                                            f'\nAssunto: '
+                                            f'{assunto_google}'
+                                        ),
+                                        inicio=inicio_google,
+                                        fim=fim_google,
+                                        convidados=(
+                                            convidados
+                                        )
+                                    )
+                                )
+
+                                novo_event_id = (
+                                    novo_evento_google.get(
+                                        'id'
+                                    )
+                                )
+
+                                if novo_event_id:
+                                    cur.execute("""
+                                        UPDATE AGENDAMENTOS
+                                        SET GOOGLE_EVENT_ID = ?
+                                        WHERE ID_AGENDAMENTOS = ?
+                                    """, (
+                                        novo_event_id,
+                                        id_agendamento
+                                    ))
+
+                                    con.commit()
+
+                                    google_sincronizado = True
+                                    google_acao = 'recriado'
+
+                                    print(
+                                        'Evento Google '
+                                        'recriado com novo '
+                                        'organizador: '
+                                        f'{novo_event_id}'
+                                    )
+
+        except Exception as erro_google:
+            google_erro = str(
+                erro_google
+            )
+
+            print(
+                'Erro ao sincronizar '
+                'cancelamento com Google:',
+                erro_google
+            )
+
+            import traceback
+            traceback.print_exc()
 
         if id_notificacao:
             agora = datetime.datetime.now()
@@ -1880,12 +2683,22 @@ def cancelar_agendamento(id_agendamento):
         return jsonify({
             'mensagem': 'Resposta registrada com sucesso',
             'status': novo_status,
+
+            'google_calendar': {
+                'sincronizado': google_sincronizado,
+                'acao': google_acao,
+                'erro': google_erro
+            },
+
             'respostas': {
                 'respondidos': total_respostas,
                 'necessarios': total_advogados,
                 'confirmados': total_confirmados,
                 'recusados': total_recusados,
-                'texto': f'{total_respostas}/{total_advogados}'
+                'texto': (
+                    f'{total_respostas}/'
+                    f'{total_advogados}'
+                )
             }
         }), 200
 
@@ -2051,6 +2864,195 @@ def recusar_agendamento(id_agendamento):
 
         con.commit()
 
+        google_sincronizado = False
+        google_erro = None
+
+
+
+        if (
+                novo_status == 'confirmado'
+                and total_confirmados == 1
+                and total_recusados == 1
+        ):
+            try:
+                from google_calendar import criar_evento_google
+                from zoneinfo import ZoneInfo
+
+                cur.execute("""
+                    SELECT
+                        ASSUNTO,
+                        DURACAO,
+                        GOOGLE_EVENT_ID,
+                        ID_USUARIOS_CLIENTE
+                    FROM AGENDAMENTOS
+                    WHERE ID_AGENDAMENTOS = ?
+                """, (
+                    id_agendamento,
+                ))
+
+                dados_google = cur.fetchone()
+
+                if dados_google:
+                    assunto_google = (
+                            dados_google[0]
+                            or 'Consulta'
+                    )
+
+                    duracao_google = dados_google[1]
+                    google_event_id = dados_google[2]
+                    id_cliente_google = dados_google[3]
+
+                    if not google_event_id:
+
+
+
+                        if confirmado_1 == 1:
+                            id_organizador = id_advogado_1
+
+                        elif (
+                                id_advogado_2
+                                and confirmado_2 == 1
+                        ):
+                            id_organizador = id_advogado_2
+
+                        else:
+                            id_organizador = None
+
+                        if id_organizador:
+
+
+
+                            cur.execute("""
+                                SELECT EMAIL
+                                FROM USUARIOS
+                                WHERE ID_USUARIOS = ?
+                            """, (
+                                id_cliente_google,
+                            ))
+
+                            cliente_email = cur.fetchone()
+
+                            email_cliente_google = (
+                                cliente_email[0]
+                                if cliente_email
+                                else None
+                            )
+
+
+
+                            if isinstance(
+                                    horario_agendamento,
+                                    datetime.time
+                            ):
+                                horario_obj_google = (
+                                    horario_agendamento
+                                )
+
+                            else:
+                                horario_obj_google = (
+                                    datetime.datetime.strptime(
+                                        str(
+                                            horario_agendamento
+                                        )[:5],
+                                        '%H:%M'
+                                    ).time()
+                                )
+
+                            if isinstance(
+                                    duracao_google,
+                                    int
+                            ):
+                                duracao_min_google = (
+                                    duracao_google
+                                )
+
+                            else:
+                                duracao_min_google = (
+                                    converter_duracao(
+                                        duracao_google
+                                    )
+                                )
+
+                            fuso = ZoneInfo(
+                                'America/Sao_Paulo'
+                            )
+
+                            inicio_google = (
+                                datetime.datetime.combine(
+                                    data_agendamento,
+                                    horario_obj_google
+                                ).replace(
+                                    tzinfo=fuso
+                                )
+                            )
+
+                            fim_google = (
+                                    inicio_google
+                                    + datetime.timedelta(
+                                minutes=duracao_min_google
+                            )
+                            )
+
+
+
+                            convidados = []
+
+                            if email_cliente_google:
+                                convidados.append(
+                                    email_cliente_google
+                                )
+
+
+                            evento_google = criar_evento_google(
+                                id_usuario=id_organizador,
+                                titulo=f'Consulta - {nome_cliente} - {assunto_google}',
+                                descricao=(
+                                    f'Cliente: {nome_cliente}\n'
+                                    f'Assunto: {assunto_google}'
+                                ),
+                                inicio=inicio_google,
+                                fim=fim_google,
+                                convidados=convidados
+                            )
+
+                            novo_google_event_id = (
+                                evento_google.get('id')
+                            )
+
+                            if novo_google_event_id:
+                                cur.execute("""
+                                    UPDATE AGENDAMENTOS
+                                    SET GOOGLE_EVENT_ID = ?
+                                    WHERE ID_AGENDAMENTOS = ?
+                                """, (
+                                    novo_google_event_id,
+                                    id_agendamento
+                                ))
+
+                                con.commit()
+
+                                google_sincronizado = True
+
+                                print(
+                                    'Evento Google criado '
+                                    'após recusa de um advogado: '
+                                    f'{novo_google_event_id}'
+                                )
+
+            except Exception as erro_google:
+                google_erro = str(
+                    erro_google
+                )
+
+                print(
+                    'Erro ao sincronizar recusa '
+                    'com Google Agenda:',
+                    erro_google
+                )
+
+                import traceback
+                traceback.print_exc()
+
         if id_notificacao:
             agora = datetime.datetime.now()
 
@@ -2190,6 +3192,12 @@ def recusar_agendamento(id_agendamento):
         return jsonify({
             'mensagem': 'Resposta registrada com sucesso',
             'status': novo_status,
+
+            'google_calendar': {
+                'sincronizado': google_sincronizado,
+                'erro': google_erro
+            },
+
             'respostas': {
                 'respondidos': total_respostas,
                 'necessarios': total_advogados,

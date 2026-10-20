@@ -196,6 +196,7 @@ from documentos import *
 from veritas_ai import *
 from financeiro import *
 from dm import *
+from google_calendar import *
 
 
 if __name__ == '__main__':
