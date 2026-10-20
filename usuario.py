@@ -2458,7 +2458,6 @@ def editar_escritorio():
         con.close()
 
 
-
 @app.route('/meu_escritorio', methods=['GET'])
 def meu_escritorio():
     token_data = decodificar_token()
@@ -2475,38 +2474,42 @@ def meu_escritorio():
     cur = con.cursor()
 
     try:
+        # A MÁGICA ACONTECE AQUI: Busca o vínculo ativo, priorizando PROPRIETARIO, mas aceitando PARCEIRO
         cur.execute("""
-            SELECT ID_ESCRITORIOS
-            FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ? AND STATUS = 'PROPRIETARIO'
-        """, (id_usuario,))
+                    SELECT FIRST 1 ID_ESCRITORIOS
+                    FROM ADVOGADO_ESCRITORIO
+                    WHERE ID_USUARIOS = ? AND ATIVO = 1
+                    ORDER BY CASE WHEN STATUS = 'PROPRIETARIO' THEN 0 ELSE 1
+                    END
+                    """, (id_usuario,))
+
         escritorio = cur.fetchone()
+
         if not escritorio:
-            return jsonify({'error': 'Nenhum escritório encontrado'}), 404
+            return jsonify({'error': 'Nenhum escritório ativo encontrado'}), 404
 
         id_escritorio = escritorio[0]
 
         cur.execute("""
-            SELECT
-                ID_ESCRITORIOS,
-                RAZAO_SOCIAL,
-                NOME_FANTASIA,
-                REGISTRO_OAB,
-                UF_OAB,
-                TELEFONE,
-                EMAIL,
-                CNPJ,
-                CEP,
-                LOGRADOURO,
-                NUMERO,
-                COMPLEMENTO,
-                BAIRRO,
-                CIDADE,
-                ESTADO,
-                DATA_CADASTRO
-            FROM ESCRITORIOS
-            WHERE ID_ESCRITORIOS = ?
-        """, (id_escritorio,))
+                    SELECT ID_ESCRITORIOS,
+                           RAZAO_SOCIAL,
+                           NOME_FANTASIA,
+                           REGISTRO_OAB,
+                           UF_OAB,
+                           TELEFONE,
+                           EMAIL,
+                           CNPJ,
+                           CEP,
+                           LOGRADOURO,
+                           NUMERO,
+                           COMPLEMENTO,
+                           BAIRRO,
+                           CIDADE,
+                           ESTADO,
+                           DATA_CADASTRO
+                    FROM ESCRITORIOS
+                    WHERE ID_ESCRITORIOS = ?
+                    """, (id_escritorio,))
 
         row = cur.fetchone()
         if not row:
@@ -2534,11 +2537,11 @@ def meu_escritorio():
         return jsonify({'escritorio': escritorio_data}), 200
 
     except Exception as e:
+        print(f"Erro ao buscar escritório: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
         con.close()
-
 @app.route('/listar_advogados', methods=['GET'])
 def listar_advogados():
     token_data = decodificar_token()
