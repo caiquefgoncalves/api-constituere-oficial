@@ -63,6 +63,9 @@ def verificar_acesso_escritorio(cur, id_usuario, id_escritorio):
     if row[1] != 1:
         return False, 'Seu acesso a este escritório está inativo.'
 
+    if row[0] != 'PROPRIETARIO':
+        return False, 'Apenas o proprietário do escritório pode acessar o financeiro.'
+
     return True, row[0]
 
 

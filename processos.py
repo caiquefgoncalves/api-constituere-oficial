@@ -10,8 +10,11 @@ from io import BytesIO
 import os
 import requests
 
-from fpdf import FPDF
+
 from flask import jsonify, request, send_file
+from io import BytesIO
+from fpdf import FPDF
+import unicodedata
 
 
 @app.route('/cadastrar_processo', methods=['POST'])
@@ -6188,3 +6191,137 @@ def criar_cobranca_boleto():
         import traceback
         traceback.print_exc()
         return jsonify({'error': 'Erro interno'}), 500
+
+
+@app.route('/pagamentos/relatorio', methods=['POST'])
+def gerar_relatorio_pagamentos():
+    token_data = decodificar_token()
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    tipo_usuario = token_data['tipo']
+    if tipo_usuario != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    dados = request.get_json() or {}
+    pagamentos = dados.get('pagamentos', [])
+    totais = dados.get('totais', {})
+
+    def texto(valor, limite=None):
+        valor = '-' if valor in (None, '') else str(valor)
+        valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
+        if limite and len(valor) > limite:
+            return valor[:limite - 3] + '...'
+        return valor
+
+    def dinheiro(valor):
+        try:
+            return f"R$ {float(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+        except:
+            return 'R$ 0,00'
+
+    class RelatorioPagamentosPDF(FPDF):
+        def header(self):
+            self.set_fill_color(0, 71, 171)
+            self.rect(0, 0, 297, 20, 'F')
+            self.set_text_color(255, 255, 255)
+            self.set_font('Helvetica', 'B', 15)
+            self.set_xy(16, 6)
+            self.cell(0, 8, 'Constituere | Relatorio de Pagamentos')
+            self.set_text_color(35, 35, 35)
+            self.set_y(28)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_draw_color(220, 228, 238)
+            self.line(16, self.get_y(), 281, self.get_y())
+            self.set_y(-9)
+            self.set_font('Helvetica', '', 8)
+            self.set_text_color(100, 100, 100)
+            self.cell(0, 5, f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}',
+                      align='C')
+
+    pdf = RelatorioPagamentosPDF(orientation='L', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_margins(16, 16, 16)
+    pdf.add_page()
+
+    pdf.set_fill_color(237, 244, 255)
+    pdf.set_text_color(0, 71, 171)
+    pdf.set_font('Helvetica', 'B', 12)
+    pdf.cell(265, 8, 'Resumo Financeiro de Pagamentos', fill=True, new_x='LMARGIN', new_y='NEXT')
+
+    pdf.ln(4)
+
+    pdf.set_fill_color(250, 252, 255)
+    pdf.set_draw_color(220, 228, 238)
+
+    indicadores = [
+        ('TOTAL RECEBIDO', dinheiro(totais.get('recebido', 0))),
+        ('A PAGAR', dinheiro(totais.get('a_pagar', 0))),
+        ('EM ATRASO', dinheiro(totais.get('atrasado', 0)))
+    ]
+
+    for rotulo, valor in indicadores:
+        pdf.set_text_color(0, 71, 171)
+        pdf.set_font('Helvetica', 'B', 9)
+        pdf.cell(55, 8, rotulo, border=1, fill=True)
+        pdf.set_text_color(35, 35, 35)
+        pdf.set_font('Helvetica', 'B', 10)
+        pdf.cell(40, 8, valor, border=1, new_x='LMARGIN', new_y='NEXT')
+
+    pdf.ln(8)
+
+    colunas = [
+        ('Nome', 65, 60), ('Cliente', 50, 45), ('Valor', 30, 20),
+        ('Status', 25, 15), ('Pagamento', 25, 15), ('Vencimento', 25, 15),
+        ('Ações', 30, 20)
+    ]
+
+    def cabecalho_tabela():
+        pdf.set_fill_color(237, 244, 255)
+        pdf.set_draw_color(220, 228, 238)
+        pdf.set_text_color(0, 71, 171)
+        pdf.set_font('Helvetica', 'B', 8)
+        for nome, largura, _ in colunas:
+            pdf.cell(largura, 8, nome, border=1, fill=True)
+        pdf.ln()
+        pdf.set_text_color(35, 35, 35)
+
+    cabecalho_tabela()
+    pdf.set_font('Helvetica', '', 7.5)
+
+    if not pagamentos:
+        pdf.set_fill_color(250, 252, 255)
+        pdf.cell(250, 9, 'Nenhum pagamento encontrado para os filtros informados.', border=1, fill=True, align='C',
+                 new_x='LMARGIN', new_y='NEXT')
+
+    for indice, pag in enumerate(pagamentos):
+        if pdf.get_y() + 8 > 190:
+            pdf.add_page()
+            cabecalho_tabela()
+            pdf.set_font('Helvetica', '', 7.5)
+
+        acao_txt = "Concluído" if pag.get('status') == 'Paga' else "Dar Baixa"
+
+        valores = [
+            texto(pag.get('nome', ''), 60),
+            texto(pag.get('cliente', ''), 45),
+            dinheiro(pag.get('valor', 0)),
+            texto(pag.get('status', ''), 15),
+            texto(pag.get('pagamento', ''), 15),
+            texto(pag.get('vencimento', ''), 15),
+            acao_txt
+        ]
+
+        pdf.set_fill_color(250, 252, 255) if indice % 2 else pdf.set_fill_color(255, 255, 255)
+        for (_, largura, _), valor in zip(colunas, valores):
+            pdf.cell(largura, 7, valor, border=1, fill=True)
+        pdf.ln()
+
+    return send_file(
+        BytesIO(bytes(pdf.output())),
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name='relatorio-pagamentos.pdf'
+    )
