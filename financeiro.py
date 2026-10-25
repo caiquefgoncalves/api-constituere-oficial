@@ -111,6 +111,90 @@ def dentro_periodo(data_obj, inicio, fim):
     return True
 
 
+def processar_notificacoes_vencimento():
+    con = conexao()
+    cur = con.cursor()
+    hoje = datetime.date.today()
+    data_alerta = hoje + datetime.timedelta(days=3)
+    notificacoes_enviadas = 0
+
+    try:
+        cur.execute("""
+            SELECT 
+                p.ID_USUARIOS_ADVOGADO,
+                p.NUM_PROCESSO,
+                u.NOME,
+                parc.VALOR_PARCELA,
+                parc.DATA_VENCIMENTO
+            FROM PARCELAS parc
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+            INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
+            WHERE parc.DATA_VENCIMENTO BETWEEN ? AND ?
+              AND UPPER(COALESCE(parc.STATUS, '')) NOT IN ('PAGA', 'CANCELADA')
+        """, (hoje, data_alerta))
+
+        parcelas = cur.fetchall()
+
+        for row in parcelas:
+            id_advogado = row[0]
+            num_processo = row[1] or '--'
+            nome_cliente = row[2] or 'Cliente'
+            valor = float(row[3]) if row[3] else 0
+            vencimento = row[4]
+
+            venc_fmt = vencimento.strftime('%d/%m/%Y') if hasattr(vencimento, 'strftime') else str(vencimento)
+            titulo = 'Aviso de Vencimento'
+            msg = f'A parcela de {nome_cliente} (Proc. {num_processo}) no valor de R$ {valor:.2f} vence em {venc_fmt}.'
+
+            cur.execute("""
+                SELECT 1 FROM NOTIFICACOES 
+                WHERE ID_USUARIOS = ? AND TITULO = ? AND MENSAGEM = ? 
+                  AND CAST(DATA_CRIACAO AS DATE) = ?
+            """, (id_advogado, titulo, msg, hoje))
+
+            if not cur.fetchone():
+                cur.execute("""
+                    INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
+                    VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO
+                """, (id_advogado, 'FINANCEIRO_VENCIMENTO', titulo, msg))
+
+                id_notif = cur.fetchone()[0]
+                con.commit()
+
+                agora = datetime.datetime.now()
+                socketio.emit('nova_notificacao', {
+                    'id': id_notif,
+                    'tipo': 'FINANCEIRO_VENCIMENTO',
+                    'titulo': titulo,
+                    'mensagem': msg,
+                    'lida': False,
+                    'data_criacao': agora.strftime('%d/%m/%Y'),
+                    'hora_criacao': agora.strftime('%H:%M'),
+                    'data_leitura': None
+                }, room=f'usuario_{id_advogado}')
+
+                notificacoes_enviadas += 1
+
+        return notificacoes_enviadas
+
+    except Exception as e:
+        con.rollback()
+        print(f"Erro ao processar notificações de vencimento: {e}")
+        import traceback
+        traceback.print_exc()
+        return 0
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/financeiro/notificar_vencimentos', methods=['GET', 'POST'])
+def notificar_vencimentos():
+    enviadas = processar_notificacoes_vencimento()
+    return jsonify({'mensagem': f'{enviadas} notificações enviadas.'}), 200
+
+
 @app.route('/escritorio/<int:id_escritorio>/financeiro/lancamentos', methods=['GET'])
 def listar_lancamentos_escritorio(id_escritorio):
     token_data = decodificar_token()
@@ -520,7 +604,6 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
         if not permitido:
             return jsonify({'error': msg}), 403
 
-        # 1. Tenta achar na tabela de lançamentos manuais
         cur.execute("""
             SELECT TIPO, STATUS FROM LANCAMENTOS_FINANCEIROS
             WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1
@@ -547,7 +630,6 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
             con.commit()
             return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
 
-        # 2. Se não achou, tenta achar nas parcelas de clientes (Prolabore)
         cur.execute("""
             SELECT parc.ID_PARCELAS, parc.STATUS
             FROM PARCELAS parc
@@ -578,7 +660,6 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
             con.commit()
             return jsonify({'mensagem': 'Pagamento da parcela confirmado com sucesso.'}), 200
 
-        # 3. Se não achou, tenta achar nas parcelas de êxito
         cur.execute("""
             SELECT pe.ID_PARCELA_EXITO, pe.STATUS
             FROM PARCELAS_EXITO pe
@@ -1007,84 +1088,6 @@ def gerar_relatorio_financeiro(id_escritorio):
         print(f"Erro ao gerar PDF financeiro: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cur.close()
-        con.close()
-
-
-@app.route('/financeiro/notificar_vencimentos', methods=['GET', 'POST'])
-def notificar_vencimentos():
-    con = conexao()
-    cur = con.cursor()
-    hoje = datetime.date.today()
-    data_alerta = hoje + datetime.timedelta(days=3)
-
-    try:
-        cur.execute("""
-            SELECT 
-                p.ID_USUARIOS_ADVOGADO,
-                p.NUM_PROCESSO,
-                u.NOME,
-                parc.VALOR_PARCELA,
-                parc.DATA_VENCIMENTO
-            FROM PARCELAS parc
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
-            WHERE parc.DATA_VENCIMENTO BETWEEN ? AND ?
-              AND UPPER(COALESCE(parc.STATUS, '')) NOT IN ('PAGA', 'CANCELADA')
-        """, (hoje, data_alerta))
-
-        parcelas = cur.fetchall()
-        notificacoes_enviadas = 0
-
-        for row in parcelas:
-            id_advogado = row[0]
-            num_processo = row[1] or '--'
-            nome_cliente = row[2] or 'Cliente'
-            valor = float(row[3]) if row[3] else 0
-            vencimento = row[4]
-
-            venc_fmt = vencimento.strftime('%d/%m/%Y') if hasattr(vencimento, 'strftime') else str(vencimento)
-
-            titulo = 'Aviso de Vencimento'
-            msg = f'A parcela de {nome_cliente} (Proc. {num_processo}) no valor de R$ {valor:.2f} vence em {venc_fmt}.'
-
-            cur.execute("""
-                SELECT 1 FROM NOTIFICACOES 
-                WHERE ID_USUARIOS = ? AND TITULO = ? AND MENSAGEM = ? 
-                  AND CAST(DATA_CADASTRO AS DATE) = ?
-            """, (id_advogado, titulo, msg, hoje))
-
-            if not cur.fetchone():
-                cur.execute("""
-                    INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
-                    VALUES (?, ?, ?, ?)
-                    RETURNING ID_NOTIFICACAO
-                """, (id_advogado, 'FINANCEIRO_VENCIMENTO', titulo, msg))
-
-                id_notif = cur.fetchone()[0]
-                con.commit()
-
-                agora = datetime.datetime.now()
-                socketio.emit('nova_notificacao', {
-                    'id': id_notif,
-                    'tipo': 'FINANCEIRO_VENCIMENTO',
-                    'titulo': titulo,
-                    'mensagem': msg,
-                    'lida': False,
-                    'data_criacao': agora.strftime('%d/%m/%Y'),
-                    'hora_criacao': agora.strftime('%H:%M'),
-                    'data_leitura': None
-                }, room=f'usuario_{id_advogado}')
-
-                notificacoes_enviadas += 1
-
-        return jsonify({'mensagem': f'{notificacoes_enviadas} notificações enviadas.'}), 200
-
-    except Exception as e:
-        con.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()

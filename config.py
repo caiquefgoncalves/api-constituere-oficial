@@ -18,8 +18,7 @@ def carregar_env_local():
         chave = chave.strip()
         valor = valor.strip().strip('"').strip("'")
 
-        # An empty variable inherited from the IDE must not hide the value in
-        # the local .env file. A non-empty system variable still has priority.
+
         if chave and not os.environ.get(chave):
             os.environ[chave] = valor
 
@@ -36,12 +35,11 @@ DB_NAME = str(
         'BANCO_CONSTITUERE.FDB'
     )
 )
-DB_USER = 'sysdba'
-DB_PASSWORD = 'sysdba'
+DB_USER = 'SYSDBA'
+DB_PASSWORD = 'SYSDBA'
 
-# Banco separado e exclusivo para a trilha de auditoria.
 LOG_DB_NAME = str(Path(__file__).with_name('Log.FDB'))
-LOG_DB_USER = 'sysdba'
-LOG_DB_PASSWORD = 'sysdba'
+LOG_DB_USER = 'SYSDBA'
+LOG_DB_PASSWORD = 'SYSDBA'
 
 UPLOAD_FOLDER = os.path.abspath(os.path.dirname(__file__))

@@ -10,6 +10,8 @@ from io import BytesIO
 import os
 import requests
 
+from financeiro import processar_notificacoes_vencimento
+
 
 from flask import jsonify, request, send_file
 from io import BytesIO
@@ -642,6 +644,11 @@ def cadastrar_processo():
             )
 
         con.commit()
+
+        try:
+            processar_notificacoes_vencimento()
+        except Exception as e:
+            print(f"Erro ao disparar notificação de vencimento: {e}")
 
         return jsonify({
             'mensagem': 'Processo cadastrado com sucesso',
