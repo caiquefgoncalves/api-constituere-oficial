@@ -4,6 +4,9 @@ import os
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from funcao import decodificar_token
 from log_auditoria import preparar_requisicao, registrar_requisicao
+import threading
+import time
+import datetime as dt
 
 app = Flask(__name__)
 
@@ -51,7 +54,6 @@ CORS(
     ]
 )
 
-
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
@@ -64,27 +66,11 @@ socketio = SocketIO(
 def handle_options():
     if request.method == 'OPTIONS':
         response = make_response()
-
-        response.headers.add(
-            "Access-Control-Allow-Origin",
-            request.headers.get('Origin', '')
-        )
-
-        response.headers.add(
-            'Access-Control-Allow-Credentials',
-            'true'
-        )
-
-        response.headers.add(
-            'Access-Control-Allow-Headers',
-            'Content-Type, Authorization, X-Requested-With, X-Access-Token, X-Client-Platform, X-Client-Device'
-        )
-
-        response.headers.add(
-            'Access-Control-Allow-Methods',
-            'GET, POST, PUT, DELETE, OPTIONS'
-        )
-
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', ''))
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers',
+                             'Content-Type, Authorization, X-Requested-With, X-Access-Token, X-Client-Platform, X-Client-Device')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         return response
 
 
@@ -108,8 +94,8 @@ def preparar_auditoria():
 @app.after_request
 def registrar_auditoria(response):
     deve_registrar = (
-        request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}
-        or (request.method == 'GET' and request.path.endswith('/documento'))
+            request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}
+            or (request.method == 'GET' and request.path.endswith('/documento'))
     )
     if deve_registrar and 200 <= response.status_code < 300:
         try:
@@ -155,18 +141,12 @@ def socket_disconnect():
 def entrar_usuario(data):
     try:
         id_usuario = data.get('id_usuario')
-
         if not id_usuario:
             return
-
         sala = f'usuario_{id_usuario}'
-
         join_room(sala)
-
         print(f'Usuário {id_usuario} entrou na sala {sala}')
-
         emit('entrou_sala', {'sala': sala, 'id_usuario': id_usuario})
-
     except Exception as e:
         print(f'Erro ao colocar usuário na sala: {e}')
 
@@ -175,16 +155,11 @@ def entrar_usuario(data):
 def sair_usuario(data):
     try:
         id_usuario = data.get('id_usuario')
-
         if not id_usuario:
             return
-
         sala = f'usuario_{id_usuario}'
-
         leave_room(sala)
-
         print(f'Usuário {id_usuario} saiu da sala {sala}')
-
     except Exception as e:
         print(f'Erro ao remover usuário da sala: {e}')
 
@@ -199,7 +174,28 @@ from dm import *
 from google_calendar import *
 
 
+def agendador_notificacoes():
+    print("\n>>> [AGENDADOR] THREAD INICIADA COM SUCESSO! <<<\n", flush=True)
+
+    while True:
+        agora = dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+        print(f"[AGENDADOR] Rodando verificação às {agora}...", flush=True)
+
+        try:
+            with app.app_context():
+                from financeiro import processar_notificacoes_vencimento
+                enviadas = processar_notificacoes_vencimento()
+                print(f"[AGENDADOR] Finalizado. {enviadas} notificações enviadas.", flush=True)
+        except Exception as e:
+            print(f"[AGENDADOR] Erro: {e}", flush=True)
+
+        time.sleep(30)
+
+
 if __name__ == '__main__':
+    thread_agendador = threading.Thread(target=agendador_notificacoes, daemon=True)
+    thread_agendador.start()
+
     print("\n=== ROTAS REGISTRADAS ===")
 
     for rule in app.url_map.iter_rules():
