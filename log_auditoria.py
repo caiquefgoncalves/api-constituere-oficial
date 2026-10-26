@@ -1,3 +1,11 @@
+"""Auditoria da Constituere.
+
+O módulo mantém o histórico em Log.FDB, separado do banco operacional. Ele
+descobre o escritório e o usuário da requisição, classifica a ação, compara o
+estado anterior e posterior quando aplicável e salva uma descrição técnica que
+depois é convertida em texto humano para a interface e os PDFs.
+"""
+
 import json
 import math
 import os
@@ -74,6 +82,7 @@ def conexao_log():
 
 
 def normalizar_valor(valor):
+    """Converte valores para JSON e mascara chaves que nunca devem ir ao Log."""
     if isinstance(valor, (datetime, date, time)):
         return valor.isoformat()
     if isinstance(valor, dict):
@@ -87,6 +96,7 @@ def normalizar_valor(valor):
 
 
 def dados_requisicao():
+    """Extrai JSON ou formulário já normalizado para compor DETALHES."""
     if request.is_json:
         return normalizar_valor(request.get_json(silent=True) or {})
     if request.form:
@@ -106,6 +116,11 @@ def nome_maquina_por_ip(ip):
 
 
 def origem_dispositivo():
+    """Determina uma origem legível sem depender de um único cabeçalho.
+
+    A identificação é apenas informativa para investigação: ela não é usada
+    para autenticar ou autorizar usuários.
+    """
     nome_dispositivo = (request.headers.get('X-Client-Device') or '').strip()
     nome_dispositivo = re.sub(r'[\r\n]+', ' ', nome_dispositivo)[:120]
     if nome_dispositivo:
@@ -127,6 +142,12 @@ def origem_dispositivo():
 
 
 def identificar_escritorio(id_usuario, dados, view_args):
+    """Encontra o escritório proprietário do evento.
+
+    Prioriza o escritório explícito na requisição; quando ele não existe,
+    encontra o vínculo ativo do advogado ou o responsável do cliente. Assim o
+    mesmo mecanismo de auditoria atende rotas de advogado e de cliente.
+    """
     for origem in (dados, view_args or {}):
         for chave in ('id_escritorio', 'id_escritorios', 'ID_ESCRITORIO', 'ID_ESCRITORIOS'):
             valor = origem.get(chave) if isinstance(origem, dict) else None
@@ -192,6 +213,11 @@ def nome_usuario(id_usuario):
 
 
 def descricao_evento():
+    """Converte rota e método HTTP em uma ação de auditoria e seu recurso.
+
+    Regras específicas vêm antes da regra genérica para que um pagamento Pix,
+    por exemplo, não seja apresentado apenas como uma edição de parcela.
+    """
     caminho = request.path.lower()
     argumentos = request.view_args or {}
     if re.fullmatch(r'/alterar_cargo_advogado/\d+/\d+', caminho):
@@ -203,6 +229,8 @@ def descricao_evento():
     if caminho == '/cliente/pagamento/pix' and request.method == 'POST':
         return 'GERAR_PIX', 'PARCELAS'
     if re.fullmatch(r'/cliente/pagamento/pix/\d+', caminho) and request.method == 'GET':
+        # A rota consulta a provedora; somente a própria rota define esta marca
+        # após atualizar a parcela com sucesso. Sem ela, trata-se de consulta.
         if getattr(g, 'auditoria_pagamento_pix', None):
             return 'PAGAMENTO_PIX', 'PARCELAS'
         return 'CONSULTAR_PIX', 'PARCELAS'
@@ -284,6 +312,7 @@ def id_registro(view_args):
 
 
 def alvo_snapshot():
+    """Traduz parâmetros da rota na consulta usada para o snapshot anterior."""
     argumentos = request.view_args or {}
     caminho = request.path.lower()
     if 'id_atualizacao' in argumentos:
@@ -323,6 +352,7 @@ def alvo_snapshot():
 
 
 def buscar_snapshot(alvo):
+    """Lê uma linha do banco operacional para comparação na auditoria."""
     if not alvo:
         return None
     tabela, condicao, parametros = alvo
@@ -343,6 +373,7 @@ def buscar_snapshot(alvo):
 
 
 def preparar_requisicao(token_data):
+    """Guarda no contexto Flask o token e o snapshot anterior da requisição."""
     if eh_conversa_ia() or eh_rota_log():
         return
     g.auditoria_token = token_data or {}
@@ -362,6 +393,7 @@ def valor_para_log(valor):
 
 
 def alteracoes_registradas():
+    """Retorna apenas os campos que mudaram entre o snapshot e o banco atual."""
     anterior = getattr(g, 'auditoria_anterior', None)
     alvo = getattr(g, 'auditoria_alvo', None)
     if not anterior or not alvo:
@@ -377,12 +409,19 @@ def alteracoes_registradas():
 
 
 def registrar_requisicao(token_data):
+    """Grava no Log.FDB o evento concluído pela requisição atual.
+
+    O id_evento no JSON de detalhes é comum às linhas da mesma requisição,
+    permitindo que a listagem agrupe uma edição com múltiplos campos.
+    """
     if request.path.startswith('/logs') or eh_conversa_ia() or eh_rota_log():
         return
 
     dados = dados_requisicao()
     pagamento_pix = getattr(g, 'auditoria_pagamento_pix', None)
     if isinstance(pagamento_pix, dict):
+        # A confirmação Pix ocorre em uma consulta GET; estes dados vêm da
+        # atualização real da parcela e dão contexto ao evento de pagamento.
         dados['pagamento_pix'] = pagamento_pix
     view_args = request.view_args or {}
     id_usuario = token_data.get('id_usuarios') if token_data else None
@@ -491,6 +530,11 @@ def buscar_cargo_usuario(id_usuario, id_escritorio):
 
 def descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
                       cargo=None, id_usuario=None, detalhes=None):
+    """Converte o registro técnico em uma frase segura para o usuário final.
+
+    Dados complementares vêm de DETALHES somente quando ajudam a dar contexto,
+    como o motivo de agenda ou o valor de um pagamento Pix.
+    """
     nome = nome or 'O sistema'
     acao_txt = ACOES_HUMANAS.get((acao or '').upper(), f'{(acao or "").lower()}')
 
@@ -708,6 +752,11 @@ def alvo_com_artigo(tabela, id_registro, detalhes=None):
 
 
 def agrupar_eventos(todos):
+    """Agrupa linhas de uma requisição em um único evento visual.
+
+    Uma edição pode mudar diversos campos e gerar várias linhas no banco. O
+    id_evento evita que a interface apresente cada campo como uma ação isolada.
+    """
     eventos = {}
     agrupados = []
 
@@ -756,6 +805,9 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                 pagina=1, por_pagina=6):
     """
     Retorna os logs do escritório já paginados.
+
+    Durante a leitura, esta função também interpreta detalhes JSON, corrige
+    classificações legadas conhecidas e monta descricao_humana para a tela.
 
     Parâmetros:
         id_escritorio: ID do escritório
@@ -1057,6 +1109,11 @@ class RelatorioLogPDF(FPDF):
 
 
 def gerar_pdf_logs(logs, titulo='Log do escritorio'):
+    """Produz o relatório PDF do Log em visão resumida e detalhada.
+
+    A parte detalhada usa somente os campos permitidos por linhas_detalhes_pdf,
+    que remove IDs internos, senhas, tokens e o identificador técnico do evento.
+    """
     # A API paginada retorna um dicionário; chamadas internas podem fornecer
     # diretamente a lista de registros.
     if isinstance(logs, dict):

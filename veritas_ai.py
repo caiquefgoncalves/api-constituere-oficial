@@ -1,3 +1,11 @@
+"""Orquestração da assistente jurídica Veritas.
+
+A Veritas recebe uma pergunta autenticada, identifica a intenção, monta um
+contexto mínimo autorizado, consulta um modelo de IA e valida qualquer ação
+solicitada pelo modelo. A função nunca executa alterações: devolve uma proposta
+para a interface apresentar e confirmar no endpoint correspondente.
+"""
+
 import datetime
 import json
 import os
@@ -63,6 +71,8 @@ LEGAL_SCOPE_KEYWORDS = (
     "indenizacao", "divorcio", "heranca", "inventario", "trabalhista",
 )
 
+# Esquemas de ferramentas enviados ao modelo. Cada chamada é validada novamente
+# em _proposal_from_tool_call antes de virar uma ação proposta para a interface.
 SCHEDULE_TOOLS = [
     {"type": "function", "function": {"name": "gerar_pagamento_pix", "description": "Propõe gerar uma cobrança Pix para uma parcela em aberto do próprio cliente.", "parameters": {"type": "object", "properties": {"id_parcela": {"type": "integer"}, "tipo_parcela": {"type": "string", "enum": ["prolabore", "exito"]}}, "required": ["id_parcela", "tipo_parcela"]}}},
     {"type": "function", "function": {"name": "cadastrar_cliente", "description": "Propõe cadastrar cliente pessoa física ou jurídica para o advogado ou proprietário. Para pessoa física, data_nascimento e sexo também são obrigatórios. Para pessoa jurídica, razao_social e nome_fantasia também são obrigatórios.", "parameters": {"type": "object", "properties": {"tipo": {"type": "integer", "enum": [2, 3]}, "nome": {"type": "string"}, "email": {"type": "string"}, "telefone": {"type": "string"}, "cpf_cnpj": {"type": "string"}, "senha": {"type": "string"}, "confirmar_senha": {"type": "string"}, "data_nascimento": {"type": "string"}, "sexo": {"type": "string"}, "razao_social": {"type": "string"}, "nome_fantasia": {"type": "string"}}, "required": ["tipo", "nome", "email", "telefone", "cpf_cnpj", "senha", "confirmar_senha"]}}},
@@ -290,6 +300,7 @@ SCHEDULE_TOOLS = [
 
 
 def _decode_request_token():
+    """Lê o JWT dos cabeçalhos/cookie e expõe somente tipo e id do usuário."""
     token = request.headers.get("X-Access-Token")
 
     if not token:
@@ -528,7 +539,11 @@ def _is_pending_workflow_reply(question, history):
 
 
 def _is_in_scope_request(question, history):
-    """Rejects casual requests before they reach the language model."""
+    """Impede que pedidos casuais cheguem ao modelo de linguagem.
+
+    Aceita operações do sistema, perguntas jurídicas e respostas curtas que
+    completam um fluxo já autorizado no histórico recente.
+    """
     normalized = _normalize_text(question)
     is_system_request = (
         _question_mentions_schedule(question)
@@ -1111,6 +1126,7 @@ def _question_requests_own_profile_edit(question):
 
 
 def _question_mentions_payments(question):
+    """Reconhece pedidos financeiros para carregar somente o resumo necessário."""
     normalized = _normalize_text(question)
     payment_words = (
         "pagamento", "pagamentos", "parcela", "parcelas", "honorario",
@@ -1708,7 +1724,11 @@ def _find_schedule_parties(question, id_lawyer):
 
 
 def _summarize_payment_rows(rows):
-    """Normalizes payment rows without exposing internal payment identifiers."""
+    """Agrupa parcelas por cliente sem expor identificadores financeiros internos.
+
+    A situação é calculada por status e vencimento: paga, em atraso ou pendente.
+    O resultado é usado pela IA como resumo, não como fonte para executar baixas.
+    """
     today = datetime.date.today()
     clients = {}
     for client_id, client_name, amount, due_date, status in rows:
@@ -1769,6 +1789,7 @@ def _summarize_payment_rows(rows):
 
 
 def _fetch_lawyer_payment_summary(id_lawyer):
+    """Busca e resume somente os pagamentos dos clientes do advogado logado."""
     """Summarizes only the logged lawyer's client payments for Veritas."""
     con = conexao()
     cur = con.cursor()
@@ -1814,6 +1835,7 @@ def _fetch_lawyer_payment_summary(id_lawyer):
 
 
 def _fetch_client_payment_summary(id_client):
+    """Busca o resumo financeiro do próprio cliente autenticado."""
     """Returns only the logged client's own financial summary."""
     con = conexao()
     cur = con.cursor()
@@ -1871,6 +1893,7 @@ def _fetch_client_payment_summary(id_client):
 
 
 def _fetch_client_payable_installments(id_client):
+    """Lista parcelas abertas próprias que podem ser validadas para pagamento Pix."""
     """Lists only the authenticated client's unpaid installments for Pix."""
     con = conexao()
     cur = con.cursor()
@@ -2058,10 +2081,12 @@ def _fetch_process_success_fee(id_lawyer, process_id):
 
 
 def _build_authorized_context(question, token_data, contextual_question=None):
-    """Builds data for the current intent, using history only to complete it.
+    """Monta os dados autorizados para a intenção atual.
 
-    Assistant messages in the history can contain words such as "clientes".  They
-    must not turn an agenda request into a request to list contacts.
+    O histórico é usado somente para completar um fluxo em andamento. A função
+    decide quais consultas executar pelo tipo do usuário: clientes recebem
+    somente dados próprios; advogados recebem dados vinculados; ações de gestão
+    exigem que o advogado seja proprietário do escritório.
     """
     contextual_question = contextual_question or question
     user_type = token_data["tipo"]
@@ -2271,6 +2296,11 @@ def _build_authorized_context(question, token_data, contextual_question=None):
 
 
 def _fallback_answer(question, authorized_context):
+    """Gera respostas locais quando não é necessário ou possível chamar o modelo.
+
+    Também é a alternativa quando nenhum provedor de IA está configurado. Ela
+    usa exclusivamente dados já presentes no contexto autorizado.
+    """
     user_type = authorized_context.get("usuario_logado", {}).get("tipo")
     appointments = authorized_context.get("dados", {}).get("agendamentos")
     target_appointments = authorized_context.get("dados", {}).get("agendamentos_alvo", [])
@@ -2395,6 +2425,7 @@ def _fallback_answer(question, authorized_context):
 
 
 def _sanitize_history(history):
+    """Limita o histórico a mensagens úteis e impede conteúdo estrutural inválido."""
     if not isinstance(history, list):
         return []
 
@@ -2415,6 +2446,7 @@ def _sanitize_history(history):
 
 
 def _question_with_history(question, history):
+    """Anexa contexto anterior apenas se a pergunta atual completar o mesmo fluxo."""
     # Keep only the active workflow. Reusing every prior user message can make a
     # previous restricted request interfere with a new, valid request.
     recent_messages = [
@@ -2438,6 +2470,7 @@ def _question_with_history(question, history):
 
 
 def _hide_internal_ids(answer):
+    """Remove IDs de usuário, cliente e cadastro antes de devolver a resposta."""
     if re.search(
         r"\b(?:id_cliente|id\s+(?:do|da)\s+cliente|id\s+cadastrado)\b",
         answer,
@@ -2457,7 +2490,7 @@ def _hide_internal_ids(answer):
 
 
 def _remover_fontes_nao_oficiais(answer):
-    """Impede que o chat apresente links jurídicos fora dos portais aprovados."""
+    """Impede links jurídicos fora dos portais aprovados e limpa termos internos."""
     # O contexto autorizado é uma estrutura interna enviada ao modelo; nunca é
     # um conceito que o usuário precisa conhecer na resposta.
     answer = re.sub(
@@ -2526,6 +2559,7 @@ def _get_nvidia_models():
 
 
 def _get_model_timeout_seconds():
+    """Lê o timeout configurado e o mantém em faixa segura para a interface."""
     try:
         configured_timeout = float(
             os.getenv("VERITAS_MODEL_TIMEOUT_SECONDS", DEFAULT_MODEL_TIMEOUT_SECONDS)
@@ -2538,7 +2572,7 @@ def _get_model_timeout_seconds():
 
 
 def _get_provider_priority():
-    """Returns the preferred provider; the other provider remains a fallback."""
+    """Escolhe o provedor preferido; o outro permanece como fallback."""
     configured_provider = os.getenv(
         "VERITAS_PROVIDER_PRIORITY", DEFAULT_PROVIDER_PRIORITY
     ).strip().upper()
@@ -2547,6 +2581,12 @@ def _get_provider_priority():
 
 
 def _proposal_from_tool_call(tool_call, authorized_context, question):
+    """Valida uma ferramenta solicitada pelo modelo e cria uma proposta segura.
+
+    IDs e entidades precisam existir no contexto autorizado. Se faltar uma
+    permissão, um campo obrigatório ou um alvo permitido, retorna None e a
+    alteração não é oferecida à interface.
+    """
     try:
         arguments = json.loads(tool_call.function.arguments)
     except (AttributeError, TypeError, json.JSONDecodeError):
@@ -2985,6 +3025,12 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
 
 
 def _call_openrouter(question, authorized_context, history, force_provider=None):
+    """Chama o provedor configurado e tenta o provedor alternativo se necessário.
+
+    Apesar do nome histórico, esta função também chama a NVIDIA. O modelo recebe
+    as regras fixas, o contexto autorizado e os esquemas de ferramentas, mas não
+    recebe acesso direto ao banco ou aos endpoints internos.
+    """
     nvidia_api_key = os.getenv("NVIDIA_API_KEY", "").strip()
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 
@@ -3145,6 +3191,11 @@ CONTEXTO AUTORIZADO:
 
 @app.route("/ai/veritas", methods=["POST"])
 def perguntar_veritas():
+    """Endpoint da conversa: valida, monta contexto, consulta a IA e responde.
+
+    A resposta contém texto, restrições aplicadas, chaves de dados utilizadas e
+    uma ação proposta opcional. A confirmação e a execução ficam no cliente.
+    """
     request_started = time.perf_counter()
     token_data = _decode_request_token()
 
