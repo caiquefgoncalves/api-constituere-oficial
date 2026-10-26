@@ -46,6 +46,7 @@ ACOES_HUMANAS = {
     'GERAR_PDF': 'gerou o PDF de',
     'GERAR_PIX': 'gerou um codigo Pix para',
     'CONSULTAR_PIX': 'consultou o status do Pix de',
+    'PAGAMENTO_PIX': 'realizou um pagamento via Pix de',
     'LOGIN': 'entrou no sistema',
 }
 
@@ -202,6 +203,8 @@ def descricao_evento():
     if caminho == '/cliente/pagamento/pix' and request.method == 'POST':
         return 'GERAR_PIX', 'PARCELAS'
     if re.fullmatch(r'/cliente/pagamento/pix/\d+', caminho) and request.method == 'GET':
+        if getattr(g, 'auditoria_pagamento_pix', None):
+            return 'PAGAMENTO_PIX', 'PARCELAS'
         return 'CONSULTAR_PIX', 'PARCELAS'
     if caminho.endswith('/documento'):
         return 'GERAR_PDF', 'PROCESSOS'
@@ -249,6 +252,13 @@ def descricao_evento():
 
 
 def id_registro(view_args):
+    pagamento_pix = getattr(g, 'auditoria_pagamento_pix', None)
+    if isinstance(pagamento_pix, dict):
+        try:
+            return int(pagamento_pix.get('id_parcela'))
+        except (TypeError, ValueError):
+            pass
+
     # Em rotas aninhadas, o último identificador é o registro modificado.
     for chave in ('id_atualizacao', 'id_modelo', 'id_agendamento', 'id_processo', 'id_cliente', 'id_advogado', 'id_escritorio'):
         valor = (view_args or {}).get(chave)
@@ -371,6 +381,9 @@ def registrar_requisicao(token_data):
         return
 
     dados = dados_requisicao()
+    pagamento_pix = getattr(g, 'auditoria_pagamento_pix', None)
+    if isinstance(pagamento_pix, dict):
+        dados['pagamento_pix'] = pagamento_pix
     view_args = request.view_args or {}
     id_usuario = token_data.get('id_usuarios') if token_data else None
     id_escritorio = identificar_escritorio(id_usuario, dados, view_args)
@@ -507,6 +520,19 @@ def descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
 
     if tabela == 'PARCELAS' and acao == 'CONSULTAR_PIX':
         return f'{nome} consultou o status de uma cobrança Pix.'
+
+    if tabela == 'PARCELAS' and acao == 'PAGAMENTO_PIX':
+        dados = (detalhes or {}).get('dados') or {}
+        pagamento = dados.get('pagamento_pix') if isinstance(dados, dict) else None
+        pagamento = pagamento if isinstance(pagamento, dict) else {}
+        tipo_parcela = pagamento.get('tipo_parcela')
+        complemento = ' de êxito' if tipo_parcela == 'exito' else ''
+        valor = pagamento.get('valor')
+        try:
+            valor_formatado = f' no valor de R$ {float(valor):,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
+        except (TypeError, ValueError):
+            valor_formatado = ''
+        return f'{nome} realizou um pagamento via Pix{complemento}{valor_formatado}.'
 
     if tabela in {'ADVOGADO', 'ADVOGADO_ESCRITORIO'} and acao in {
         'ATIVAR', 'INATIVAR', 'EXCLUIR', 'PROMOVER', 'REBAIXAR'

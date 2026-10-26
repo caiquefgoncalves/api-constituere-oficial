@@ -13,7 +13,7 @@ import requests
 from financeiro import processar_notificacoes_vencimento
 
 
-from flask import jsonify, request, send_file
+from flask import g, jsonify, request, send_file
 from io import BytesIO
 from fpdf import FPDF
 import unicodedata
@@ -5848,7 +5848,7 @@ def confirmar_pagamento_pix(id_parcela, tipo_parcela):
                 return False
 
             if str(row[6] or '').upper() == 'PAGA':
-                return True
+                return None
             valor_parcela = row[0]
             numero_parcela = row[1]
             id_cliente = row[2]
@@ -5879,7 +5879,7 @@ def confirmar_pagamento_pix(id_parcela, tipo_parcela):
                 return False
 
             if str(row[6] or '').upper() == 'PAGA':
-                return True
+                return None
             valor_parcela = row[0]
             numero_parcela = row[1]
             id_cliente = row[2]
@@ -5930,7 +5930,13 @@ def confirmar_pagamento_pix(id_parcela, tipo_parcela):
                 )
 
         con.commit()
-        return True
+        return {
+            'id_parcela': id_parcela,
+            'tipo_parcela': tipo_parcela,
+            'valor': float(valor_parcela) if valor_parcela is not None else None,
+            'numero_parcela': numero_parcela,
+            'tipo_processo': tipo_processo,
+        }
 
     except Exception as e:
         con.rollback()
@@ -6070,8 +6076,11 @@ def consultar_cobranca_pix(id_cobranca):
         )
 
         if pago and id_parcela:
-            if not confirmar_pagamento_pix(id_parcela, tipo_parcela):
+            pagamento_confirmado = confirmar_pagamento_pix(id_parcela, tipo_parcela)
+            if pagamento_confirmado is False:
                 return jsonify({'error': 'Não foi possível registrar o pagamento'}), 500
+            if pagamento_confirmado:
+                g.auditoria_pagamento_pix = pagamento_confirmado
 
         return jsonify({
             'id_cobranca': dados.get('id_cobranca'),

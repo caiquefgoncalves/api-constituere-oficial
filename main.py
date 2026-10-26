@@ -95,7 +95,10 @@ def preparar_auditoria():
 def registrar_auditoria(response):
     deve_registrar = (
             request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}
-            or (request.method == 'GET' and request.path.endswith('/documento'))
+            or (request.method == 'GET' and (
+                request.path.endswith('/documento')
+                or request.path.startswith('/cliente/pagamento/pix/')
+            ))
     )
     if deve_registrar and 200 <= response.status_code < 300:
         try:
