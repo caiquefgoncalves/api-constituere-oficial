@@ -763,10 +763,18 @@ def login():
 
         origem = request.headers.get('X-Client-Platform', '').strip().lower()
 
+        # Regra 1: Bloqueio da Web para Clientes
         if origem != 'expo-mobile' and tipo in (2, 3):
             return jsonify({
                 'error': 'Clientes não podem acessar o site pela web. Apenas advogados podem fazer login por aqui. Utilize o aplicativo Constituere.',
                 'bloqueado_web': True
+            }), 403
+
+        # Regra 2: Bloqueio do App para Advogados/Escritórios
+        if origem == 'expo-mobile' and tipo in (0, 1):
+            return jsonify({
+                'error': 'Advogados e escritórios não podem acessar o aplicativo. Utilize o site oficial para fazer login.',
+                'bloqueado_app': True
             }), 403
 
         token = gerar_token(tipo, id_usuario, 1440)
