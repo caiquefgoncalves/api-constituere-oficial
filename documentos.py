@@ -1,15 +1,23 @@
+# os organiza caminhos e pastas no armazenamento do servidor.
 import os
 
+# Flask conecta as funções Python às requisições do site:
+# request lê os dados recebidos; jsonify cria respostas em JSON;
+# send_file envia arquivos para download.
 from flask import (
     jsonify,
     request,
     send_file
 )
 
+# datetime permite obter a data atual para preencher os documentos.
 from datetime import datetime
 
+# werkzeug ajuda a limpar nomes de arquivos enviados por usuários de forma segura
 from werkzeug.utils import secure_filename
 
+# Importa a aplicação Flask, a conexão com o banco de dados e as
+# funções de autenticação e permissão usadas nas rotas.
 from main import app
 from db import conexao
 
@@ -19,6 +27,7 @@ from permissoes import (
     verificar_acesso_escritorio_ativo
 )
 
+# Biblioteca utilizada para manipular templates de documentos Word (.docx) injetando dados neles
 from docxtpl import DocxTemplate
 
 
@@ -26,6 +35,10 @@ from docxtpl import DocxTemplate
 # CONFIGURAÇÕES
 # =========================================================
 
+
+# Pasta dos modelos de documentos
+# dirname(__file__) identifica a pasta deste código; abspath cria
+# o caminho absoluto e join monta o caminho da pasta de modelos.
 PASTA_MODELOS = os.path.join(
     os.path.abspath(
         os.path.dirname(__file__)
@@ -35,11 +48,15 @@ PASTA_MODELOS = os.path.join(
 )
 
 
+# Cria a pasta no servidor, caso ainda não exista.
+# exist_ok=True evita erro se ela já tiver sido criada.
 os.makedirs(
     PASTA_MODELOS,
     exist_ok=True
 )
 
+# Pasta dos documentos gerados
+# Os documentos prontos ficam separados dos modelos originais.
 PASTA_DOCUMENTOS_GERADOS = os.path.join(
     os.path.abspath(
         os.path.dirname(__file__)
@@ -49,19 +66,22 @@ PASTA_DOCUMENTOS_GERADOS = os.path.join(
 )
 
 
+# Garante que a pasta de saída esteja disponível antes dos downloads.
 os.makedirs(
     PASTA_DOCUMENTOS_GERADOS,
     exist_ok=True
 )
 
 
+# Lista dos tipos de modelo aceitos ao cadastrar ou editar.
 TIPOS_PERMITIDOS = [
     'CONTRATO',
     'PETICAO_INICIAL',
     'HIPOSSUFICIENCIA'
 ]
 
-
+# Código padrão que avisa a internet que o arquivo sendo enviado é um Word (.docx)
+# MIME type: identifica para o navegador o formato do arquivo enviado.
 MIMETYPE_DOCX = (
     'application/'
     'vnd.openxmlformats-officedocument.'
@@ -73,12 +93,16 @@ MIMETYPE_DOCX = (
 # FUNÇÕES AUXILIARES
 # =========================================================
 
+# Valida quem está fazendo a requisição antes de acessar documentos.
 def verificar_usuario():
 
+    # Decodifica o token de autenticação enviado pelo usuário.
     token_data = decodificar_token()
 
+    # Sem um token válido, interrompe a operação (HTTP 401).
     if token_data == False:
 
+        # Cada retorno combina uma resposta JSON com o código HTTP correspondente.
         return None, (
             jsonify({
                 'error':
@@ -87,6 +111,7 @@ def verificar_usuario():
             401
         )
 
+    # O tipo 0 é o perfil autorizado a usar essas rotas (HTTP 403 se não).
     if token_data['tipo'] != 0:
 
         return None, (
@@ -97,15 +122,19 @@ def verificar_usuario():
             403
         )
 
+    # Retorna os dados do usuário e None para indicar ausência de erro.
     return token_data, None
 
 
+# Confere o vínculo ativo do usuário com o escritório informado.
+# somente_proprietario=True exige uma permissão adicional.
 def verificar_escritorio(
     id_usuario,
     id_escritorio,
     somente_proprietario=False
 ):
 
+    # A verificação de acesso é centralizada em outra função do projeto.
     acesso = (
         verificar_acesso_escritorio_ativo(
             id_usuario,
@@ -113,6 +142,7 @@ def verificar_escritorio(
         )
     )
 
+    # Se o vínculo ou a permissão forem inválidos, devolve o erro recebido.
     if not acesso['permitido']:
 
         return (
@@ -123,6 +153,7 @@ def verificar_escritorio(
             acesso['status_http']
         )
 
+    # Bloqueia ações administrativas (como gerenciar templates) se não for proprietário
     if (
         somente_proprietario
         and
@@ -138,18 +169,22 @@ def verificar_escritorio(
             403
         )
 
+    # None significa que a operação pode continuar.
     return None
 
 
+# Localiza a pasta de modelos exclusiva de cada escritório.
 def pasta_escritorio(
     id_escritorio
 ):
 
+    # str converte o ID numérico em texto para usá-lo como nome de pasta.
     pasta = os.path.join(
         PASTA_MODELOS,
         str(id_escritorio)
     )
 
+    # Cria a subpasta do escritório apenas quando necessário.
     os.makedirs(
         pasta,
         exist_ok=True
@@ -158,6 +193,7 @@ def pasta_escritorio(
     return pasta
 
 
+# Constrói o caminho do Word original usando o ID do modelo.
 def caminho_modelo(
     id_escritorio,
     id_modelo
@@ -171,10 +207,12 @@ def caminho_modelo(
     )
 
 
+# Faz a validação básica do arquivo recebido no cadastro.
 def arquivo_docx_valido(
     arquivo
 ):
 
+    # Primeiro verifica se existe arquivo e se ele possui nome.
     if not arquivo:
 
         return False
@@ -183,23 +221,29 @@ def arquivo_docx_valido(
 
         return False
 
+    # lower ignora diferenças entre maiúsculas e minúsculas;
+    # strip remove espaços antes/depois do nome.
     nome = (
         arquivo.filename
         .lower()
         .strip()
     )
 
+    # endswith verifica se a extensão informada termina em .docx.
     return nome.endswith('.docx')
 
 
+# Apresenta datas no formato brasileiro: dia/mês/ano.
 def formatar_data(
     data
 ):
 
+    # Uma data ausente permanece como None, evitando erro de formatação.
     if not data:
 
         return None
 
+    # try executa a formatação; except usa o valor original se falhar.
     try:
 
         return data.strftime(
@@ -211,10 +255,12 @@ def formatar_data(
         return str(data)
 
 
+# Transforma uma linha do banco em um dicionário identificado por campos.
 def formatar_modelo(
     row
 ):
 
+    # Os índices row[0], row[1] etc. seguem a ordem do SELECT no SQL.
     return {
 
         'id':
@@ -227,12 +273,14 @@ def formatar_modelo(
             row[2],
 
         'descricao':
+            # or "" fornece texto vazio quando a descrição vier nula.
             row[3] or '',
 
         'arquivo':
             row[4],
 
         'ativo':
+            # Converte o 1/0 armazenado no banco para True/False da API.
             row[5] == 1,
 
         'atualizado_em':
@@ -241,6 +289,7 @@ def formatar_modelo(
             )
     }
 
+# Define o nome físico do documento gerado a partir de seu ID.
 def caminho_documento_gerado(
     id_documento
 ):
@@ -251,10 +300,12 @@ def caminho_documento_gerado(
     )
 
 
+# Converte qualquer valor para texto, sem escrever "None" no Word.
 def valor_texto(
     valor
 ):
 
+    # Se o banco não tiver informação, o campo no documento fica vazio.
     if valor is None:
 
         return ''
@@ -264,6 +315,7 @@ def valor_texto(
     )
 
 
+# Formata datas opcionais utilizadas durante o preenchimento.
 def valor_data(
     valor
 ):
@@ -285,18 +337,22 @@ def valor_data(
         )
 
 
+# Prepara um nome de arquivo seguro, sem caracteres inadequados.
 def limpar_nome_documento(
     nome
 ):
 
+    # secure_filename remove ou adapta caracteres problemáticos do nome.
     nome = secure_filename(
         nome
     )
 
+    # Usa um nome padrão caso a limpeza resulte em texto vazio.
     if not nome:
 
         return 'documento'
 
+    # Remove a extensão original para adicioná-la uma única vez depois.
     if nome.lower().endswith(
         '.docx'
     ):
@@ -305,6 +361,7 @@ def limpar_nome_documento(
 
     return nome
 
+# Extrai só os dígitos; serve de base para CPF, CNPJ, CEP e telefone.
 def somente_numeros(
     valor
 ):
@@ -313,6 +370,7 @@ def somente_numeros(
 
         return ''
 
+    # Percorre cada caractere e junta apenas os que são números.
     return ''.join(
         caractere
         for caractere in str(valor)
@@ -320,20 +378,24 @@ def somente_numeros(
     )
 
 
+# Insere pontos e hífen nos 11 dígitos de um CPF.
 def formatar_cpf(
     valor
 ):
 
+    # Normaliza o valor recebido antes de verificar seu tamanho.
     numero = somente_numeros(
         valor
     )
 
+    # Se houver outra quantidade de dígitos, mantém o valor informado.
     if len(numero) != 11:
 
         return valor_texto(
             valor
         )
 
+    # As fatias [início:fim] selecionam os grupos de dígitos.
     return (
         f'{numero[0:3]}.'
         f'{numero[3:6]}.'
@@ -342,6 +404,7 @@ def formatar_cpf(
     )
 
 
+# Aplica a máscara visual de CNPJ quando há exatamente 14 dígitos.
 def formatar_cnpj(
     valor
 ):
@@ -365,6 +428,7 @@ def formatar_cnpj(
     )
 
 
+# Formata telefones brasileiros com DDD e hífen.
 def formatar_telefone(
     valor
 ):
@@ -373,6 +437,7 @@ def formatar_telefone(
         valor
     )
 
+    # Onze dígitos indicam o padrão usado para celulares com nono dígito.
     if len(numero) == 11:
 
         return (
@@ -382,6 +447,7 @@ def formatar_telefone(
         )
 
 
+    # Dez dígitos seguem a máscara de telefone fixo.
     if len(numero) == 10:
 
         return (
@@ -391,11 +457,13 @@ def formatar_telefone(
         )
 
 
+    # Se nenhum dos formatos se aplicar, conserva o texto original.
     return valor_texto(
         valor
     )
 
 
+# Insere hífen no CEP de oito dígitos.
 def formatar_cep(
     valor
 ):
@@ -416,6 +484,7 @@ def formatar_cep(
     )
 
 
+# Formata o número de processo no padrão de 20 dígitos.
 def formatar_numero_processo(
     valor
 ):
@@ -439,10 +508,13 @@ def formatar_numero_processo(
         f'{numero[16:20]}'
     )
 
+# Cria os campos de data que podem aparecer no modelo Word.
 def formatar_data_atual():
 
+    # datetime.now() consulta a data e a hora atuais do servidor.
     hoje = datetime.now()
 
+    # Lista os meses por extenso, na ordem de janeiro a dezembro.
     meses = [
         'janeiro',
         'fevereiro',
@@ -458,6 +530,8 @@ def formatar_data_atual():
         'dezembro'
     ]
 
+    # Retorna dia, mês, ano e uma versão completa para o documento.
+    # O índice do mês subtrai 1 porque listas começam em zero.
     return {
         'dia': hoje.day,
         'mes': meses[hoje.month - 1],
@@ -473,6 +547,8 @@ def formatar_data_atual():
 # LISTAR MODELOS
 # =========================================================
 
+# GET: fornece ao site todos os modelos cadastrados em um escritório.
+# <int:id_escritorio> captura o ID diretamente do endereço da rota.
 @app.route(
     '/escritorio/<int:id_escritorio>/modelos-documentos',
     methods=['GET']
@@ -481,6 +557,7 @@ def listar_modelos_documentos(
     id_escritorio
 ):
 
+    # A consulta só prossegue após validar o usuário.
     token_data, erro = (
         verificar_usuario()
     )
@@ -489,6 +566,7 @@ def listar_modelos_documentos(
 
         return erro
 
+    # Confirma também que esse usuário tem acesso ao escritório solicitado.
     erro_acesso = verificar_escritorio(
         token_data['id_usuarios'],
         id_escritorio
@@ -498,11 +576,16 @@ def listar_modelos_documentos(
 
         return erro_acesso
 
+    # Abre a conexão e o cursor que executará os comandos SQL.
     con = conexao()
     cur = con.cursor()
 
+    # A consulta é protegida por try/except/finally para tratar falhas.
     try:
 
+        # SELECT escolhe as colunas; FROM indica a tabela pesquisada.
+        # WHERE filtra pelo escritório; ORDER BY traz ativos e mais recentes
+        # primeiro. O ? recebe id_escritorio sem concatenar texto ao SQL.
         cur.execute("""
             SELECT
                 ID_MODELOS_DOCUMENTOS,
@@ -522,10 +605,13 @@ def listar_modelos_documentos(
             id_escritorio,
         ))
 
+        # fetchall() devolve todas as linhas encontradas pela consulta.
         rows = cur.fetchall()
 
+        # Cria a lista que será devolvida ao frontend.
         modelos = []
 
+        # Percorre as linhas e padroniza cada modelo com formatar_modelo().
         for row in rows:
 
             modelos.append(
@@ -534,11 +620,14 @@ def listar_modelos_documentos(
                 )
             )
 
+        # jsonify converte o dicionário em JSON; HTTP 200 indica sucesso.
         return jsonify({
             'modelos':
                 modelos
         }), 200
 
+    # Em caso de erro inesperado, registra o motivo no terminal e
+    # devolve uma mensagem genérica (HTTP 500).
     except Exception as erro:
 
         print(
@@ -552,6 +641,8 @@ def listar_modelos_documentos(
                 'os modelos de documentos.'
         }), 500
 
+    # finally executa a limpeza mesmo com return ou erro;
+    # fecha cursor e conexão para liberar recursos.
     finally:
 
         cur.close()
@@ -562,6 +653,7 @@ def listar_modelos_documentos(
 # CADASTRAR MODELO
 # =========================================================
 
+# POST: recebe informações e o arquivo .docx de um novo modelo.
 @app.route(
     '/escritorio/<int:id_escritorio>/modelos-documentos',
     methods=['POST']
@@ -570,6 +662,7 @@ def cadastrar_modelo_documento(
     id_escritorio
 ):
 
+    # Obtém a identidade de quem está cadastrando o modelo.
     token_data, erro = (
         verificar_usuario()
     )
@@ -578,6 +671,7 @@ def cadastrar_modelo_documento(
 
         return erro
 
+    # Gerenciar modelos é uma operação reservada ao proprietário.
     erro_acesso = verificar_escritorio(
         token_data['id_usuarios'],
         id_escritorio,
@@ -588,6 +682,8 @@ def cadastrar_modelo_documento(
 
         return erro_acesso
 
+    # request.form lê campos enviados junto ao arquivo (multipart/form-data).
+    # or "" trata campo ausente; strip elimina espaços extras.
     nome = (
         request.form.get(
             'nome'
@@ -595,6 +691,7 @@ def cadastrar_modelo_documento(
         or ''
     ).strip()
 
+    # upper padroniza o tipo em letras maiúsculas para a validação.
     tipo = (
         request.form.get(
             'tipo'
@@ -609,6 +706,7 @@ def cadastrar_modelo_documento(
         or ''
     ).strip()
 
+    # request.files acessa o arquivo anexado no formulário.
     arquivo = request.files.get(
         'arquivo'
     )
@@ -617,6 +715,7 @@ def cadastrar_modelo_documento(
     # VALIDAÇÕES
     # -----------------------------------------------------
 
+    # A API valida os dados antes de gravar qualquer informação.
     if not nome:
 
         return jsonify({
@@ -625,6 +724,7 @@ def cadastrar_modelo_documento(
                 'é obrigatório.'
         }), 400
 
+    # Limita o tamanho do nome a 150 caracteres.
     if len(nome) > 150:
 
         return jsonify({
@@ -633,6 +733,7 @@ def cadastrar_modelo_documento(
                 'muito longo.'
         }), 400
 
+    # Exige a categoria do documento.
     if not tipo:
 
         return jsonify({
@@ -641,6 +742,7 @@ def cadastrar_modelo_documento(
                 'é obrigatório.'
         }), 400
 
+    # Aceita apenas os tipos definidos em TIPOS_PERMITIDOS.
     if tipo not in TIPOS_PERMITIDOS:
 
         return jsonify({
@@ -649,6 +751,7 @@ def cadastrar_modelo_documento(
                 'inválido.'
         }), 400
 
+    # A descrição tem limite de 500 caracteres.
     if len(descricao) > 500:
 
         return jsonify({
@@ -656,6 +759,7 @@ def cadastrar_modelo_documento(
                 'Descrição muito longa.'
         }), 400
 
+    # Recusa arquivos que não tenham nome e extensão .docx.
     if not arquivo_docx_valido(
         arquivo
     ):
@@ -666,6 +770,7 @@ def cadastrar_modelo_documento(
                 'estar no formato .docx.'
         }), 400
 
+    # Normaliza o nome informado para evitar caminhos inseguros.
     nome_arquivo = secure_filename(
         arquivo.filename
     )
@@ -676,9 +781,11 @@ def cadastrar_modelo_documento(
             'modelo.docx'
         )
 
+    # Só abre a conexão com o banco após todas as validações.
     con = conexao()
     cur = con.cursor()
 
+    # Guarda o caminho do arquivo para poder removê-lo caso haja erro.
     caminho_salvo = None
 
     try:
@@ -686,6 +793,9 @@ def cadastrar_modelo_documento(
         # Primeiro cria o registro
         # para obter o ID do modelo.
 
+        # INSERT cria o registro do modelo no banco.
+        # CURRENT_TIMESTAMP salva a data; RETURNING devolve o ID criado.
+        # Os sinais ? recebem os valores na mesma ordem da lista abaixo.
         cur.execute("""
             INSERT INTO MODELOS_DOCUMENTOS (
                 ID_ESCRITORIOS,
@@ -711,6 +821,7 @@ def cadastrar_modelo_documento(
             nome_arquivo
         ))
 
+        # fetchone()[0] lê o ID retornado na primeira coluna da consulta.
         id_modelo = (
             cur.fetchone()[0]
         )
@@ -718,17 +829,21 @@ def cadastrar_modelo_documento(
         # Agora salva fisicamente
         # usando o ID do modelo.
 
+        # Cada arquivo é guardado pelo ID do modelo, evitando nomes repetidos.
         caminho_salvo = caminho_modelo(
             id_escritorio,
             id_modelo
         )
 
+        # save grava no servidor o arquivo Word enviado pelo navegador.
         arquivo.save(
             caminho_salvo
         )
 
+        # commit confirma a inclusão no banco após salvar o arquivo.
         con.commit()
 
+        # HTTP 201 informa que o modelo foi criado e envia seus dados.
         return jsonify({
 
             'mensagem':
@@ -761,6 +876,7 @@ def cadastrar_modelo_documento(
 
         }), 201
 
+    # Se algum passo falhar, desfaz as alterações pendentes no banco.
     except Exception as erro:
 
         con.rollback()
@@ -769,6 +885,7 @@ def cadastrar_modelo_documento(
         # de o arquivo ter sido salvo,
         # removemos o arquivo.
 
+        # A verificação evita tentar excluir um arquivo que não foi salvo.
         if (
             caminho_salvo
             and
@@ -779,6 +896,7 @@ def cadastrar_modelo_documento(
 
             try:
 
+                # Remove também o .docx que tenha sido salvo parcialmente.
                 os.remove(
                     caminho_salvo
                 )
@@ -798,6 +916,7 @@ def cadastrar_modelo_documento(
                 'o modelo de documento.'
         }), 500
 
+    # Encerra cursor e conexão, independentemente do resultado.
     finally:
 
         cur.close()
@@ -808,6 +927,7 @@ def cadastrar_modelo_documento(
 # EDITAR INFORMAÇÕES DO MODELO
 # =========================================================
 
+# PUT: altera nome, tipo e descrição de um modelo já cadastrado.
 @app.route(
     '/escritorio/<int:id_escritorio>/modelos-documentos/<int:id_modelo>',
     methods=['PUT']
@@ -817,6 +937,7 @@ def editar_modelo_documento(
     id_modelo
 ):
 
+    # Exige usuário autenticado e, a seguir, permissão de proprietário.
     token_data, erro = (
         verificar_usuario()
     )
@@ -835,6 +956,8 @@ def editar_modelo_documento(
 
         return erro_acesso
 
+    # request.get_json lê o JSON recebido; silent=True não lança erro
+    # caso o corpo não seja JSON e or {} evita trabalhar com None.
     dados = (
         request.get_json(
             silent=True
@@ -842,6 +965,7 @@ def editar_modelo_documento(
         or {}
     )
 
+    # get busca a chave no dicionário; strip limpa espaços no início/fim.
     nome = (
         dados.get('nome')
         or ''
@@ -857,6 +981,7 @@ def editar_modelo_documento(
         or ''
     ).strip()
 
+    # Repete as validações essenciais antes de atualizar o registro.
     if not nome:
 
         return jsonify({
@@ -888,11 +1013,13 @@ def editar_modelo_documento(
                 'Descrição muito longa.'
         }), 400
 
+    # Prepara a conexão para localizar e alterar o modelo.
     con = conexao()
     cur = con.cursor()
 
     try:
 
+        # Verifica se o modelo existe e pertence ao escritório indicado.
         cur.execute("""
             SELECT
                 ID_MODELOS_DOCUMENTOS
@@ -904,8 +1031,10 @@ def editar_modelo_documento(
             id_escritorio
         ))
 
+        # fetchone devolve a primeira linha, ou None se não houver resultado.
         modelo = cur.fetchone()
 
+        # HTTP 404 é usado quando o registro solicitado não existe.
         if not modelo:
 
             return jsonify({
@@ -913,6 +1042,8 @@ def editar_modelo_documento(
                     'Modelo não encontrado.'
             }), 404
 
+        # UPDATE modifica os campos do modelo e registra a data da edição.
+        # O WHERE impede que um modelo de outro escritório seja alterado.
         cur.execute("""
             UPDATE MODELOS_DOCUMENTOS
             SET
@@ -933,6 +1064,7 @@ def editar_modelo_documento(
             id_escritorio
         ))
 
+        # Persiste as alterações realizadas pelo UPDATE.
         con.commit()
 
         return jsonify({
@@ -941,6 +1073,7 @@ def editar_modelo_documento(
                 'com sucesso!'
         }), 200
 
+    # rollback cancela a alteração caso a consulta apresente falha.
     except Exception as erro:
 
         con.rollback()
@@ -956,6 +1089,7 @@ def editar_modelo_documento(
                 'o modelo.'
         }), 500
 
+    # A limpeza da conexão ocorre em qualquer resultado.
     finally:
 
         cur.close()
@@ -966,6 +1100,7 @@ def editar_modelo_documento(
 # ATIVAR / INATIVAR MODELO
 # =========================================================
 
+# PUT: alterna a disponibilidade de um modelo sem apagá-lo.
 @app.route(
     '/escritorio/<int:id_escritorio>/modelos-documentos/<int:id_modelo>/status',
     methods=['PUT']
@@ -975,6 +1110,7 @@ def alterar_status_modelo_documento(
     id_modelo
 ):
 
+    # Somente usuários autenticados e proprietários podem alterar o status.
     token_data, erro = (
         verificar_usuario()
     )
@@ -993,6 +1129,7 @@ def alterar_status_modelo_documento(
 
         return erro_acesso
 
+    # Lê o JSON que contém o campo "ativo" enviado pelo frontend.
     dados = (
         request.get_json(
             silent=True
@@ -1000,10 +1137,12 @@ def alterar_status_modelo_documento(
         or {}
     )
 
+    # Obtém o status solicitado, que pode ser booleano ou 0/1.
     ativo = dados.get(
         'ativo'
     )
 
+    # Sem o campo "ativo", não é possível decidir o novo estado.
     if ativo is None:
 
         return jsonify({
@@ -1012,6 +1151,8 @@ def alterar_status_modelo_documento(
                 'do modelo.'
         }), 400
 
+    # isinstance(ativo, bool) identifica True ou False.
+    # A expressão condicional transforma True em 1 e False em 0.
     if isinstance(
         ativo,
         bool
@@ -1023,10 +1164,12 @@ def alterar_status_modelo_documento(
             else 0
         )
 
+    # Também aceita diretamente 0 ou 1, como usados no banco.
     elif ativo in [0, 1]:
 
         ativo_banco = ativo
 
+    # Outros valores são rejeitados para preservar um status consistente.
     else:
 
         return jsonify({
@@ -1039,6 +1182,7 @@ def alterar_status_modelo_documento(
 
     try:
 
+        # Procura o modelo dentro do escritório antes de modificá-lo.
         cur.execute("""
             SELECT
                 ID_MODELOS_DOCUMENTOS
@@ -1057,6 +1201,7 @@ def alterar_status_modelo_documento(
                     'Modelo não encontrado.'
             }), 404
 
+        # Atualiza ATIVO e registra quando ocorreu a mudança.
         cur.execute("""
             UPDATE MODELOS_DOCUMENTOS
             SET
@@ -1071,8 +1216,10 @@ def alterar_status_modelo_documento(
             id_escritorio
         ))
 
+        # Confirma a mudança no banco de dados.
         con.commit()
 
+        # Escolhe a mensagem conforme o novo status do modelo.
         if ativo_banco == 1:
 
             mensagem = (
@@ -1087,6 +1234,7 @@ def alterar_status_modelo_documento(
                 'com sucesso!'
             )
 
+        # Devolve o resultado com "ativo" como verdadeiro ou falso.
         return jsonify({
             'mensagem':
                 mensagem,
@@ -1096,6 +1244,7 @@ def alterar_status_modelo_documento(
 
         }), 200
 
+    # Em caso de falha, desfaz a operação e sinaliza erro interno.
     except Exception as erro:
 
         con.rollback()
@@ -1111,12 +1260,14 @@ def alterar_status_modelo_documento(
                 'o status do modelo.'
         }), 500
 
+    # Libera os recursos usados na consulta.
     finally:
 
         cur.close()
         con.close()
 
 
+# GET: disponibiliza o arquivo Word original do modelo.
 @app.route(
     '/escritorio/<int:id_escritorio>/modelos-documentos/<int:id_modelo>/download',
     methods=['GET']
@@ -1126,6 +1277,7 @@ def baixar_modelo_documento(
     id_modelo
 ):
 
+    # Valida a identidade e o vínculo do usuário com o escritório.
     token_data, erro = (
         verificar_usuario()
     )
@@ -1148,6 +1300,8 @@ def baixar_modelo_documento(
 
     try:
 
+        # Busca o nome original do arquivo para apresentá-lo no download.
+        # Os dois filtros garantem ID do modelo e ID do escritório.
         cur.execute("""
             SELECT
                 NOME_ARQUIVO
@@ -1159,6 +1313,7 @@ def baixar_modelo_documento(
             id_escritorio
         ))
 
+        # Sem registro correspondente, retorna que o modelo não existe.
         modelo = cur.fetchone()
 
         if not modelo:
@@ -1170,11 +1325,13 @@ def baixar_modelo_documento(
 
         nome_arquivo = modelo[0]
 
+        # Monta o caminho físico a partir do escritório e do ID do modelo.
         caminho = caminho_modelo(
             id_escritorio,
             id_modelo
         )
 
+        # isfile confirma que o Word ainda existe no armazenamento.
         if not os.path.isfile(
             caminho
         ):
@@ -1185,6 +1342,8 @@ def baixar_modelo_documento(
                     'não encontrado.'
             }), 404
 
+        # send_file transmite o documento; as_attachment=True solicita
+        # o download e download_name define como o arquivo será nomeado.
         return send_file(
 
             caminho,
@@ -1198,6 +1357,7 @@ def baixar_modelo_documento(
                 nome_arquivo
         )
 
+    # Trata falhas ao localizar ou enviar o arquivo.
     except Exception as erro:
 
         print(
@@ -1211,6 +1371,7 @@ def baixar_modelo_documento(
                 'o modelo.'
         }), 500
 
+    # Fecha os acessos ao banco ao finalizar a requisição.
     finally:
 
         cur.close()
@@ -1220,6 +1381,8 @@ def baixar_modelo_documento(
 # MODELOS DISPONÍVEIS PARA O PROCESSO
 # =========================================================
 
+# GET: lista somente os modelos ativos compatíveis com o escritório
+# ao qual o processo informado está vinculado.
 @app.route(
     '/processo/<int:id_processo>/modelos-documentos',
     methods=['GET']
@@ -1228,6 +1391,7 @@ def listar_modelos_processo(
     id_processo
 ):
 
+    # Confirma que a chamada parte de um usuário autorizado.
     token_data, erro = (
         verificar_usuario()
     )
@@ -1247,6 +1411,7 @@ def listar_modelos_processo(
         # BUSCA O ESCRITÓRIO DO PROCESSO
         # -------------------------------------------------
 
+        # Primeiro identifica o escritório associado ao processo no banco.
         cur.execute("""
             SELECT
                 ID_ESCRITORIOS
@@ -1257,9 +1422,11 @@ def listar_modelos_processo(
         ))
 
 
+        # fetchone captura a linha do processo, se ela existir.
         processo = cur.fetchone()
 
 
+        # Processos inexistentes não podem receber modelos.
         if not processo:
 
             return jsonify({
@@ -1268,11 +1435,13 @@ def listar_modelos_processo(
             }), 404
 
 
+        # A primeira coluna consultada contém o ID do escritório.
         id_escritorio = (
             processo[0]
         )
 
 
+        # Também impede a operação se não existir vínculo com escritório.
         if not id_escritorio:
 
             return jsonify({
@@ -1286,6 +1455,7 @@ def listar_modelos_processo(
         # VERIFICA ACESSO
         # -------------------------------------------------
 
+        # A checagem de permissão usa o escritório encontrado na consulta.
         erro_acesso = verificar_escritorio(
             token_data['id_usuarios'],
             id_escritorio
@@ -1301,6 +1471,7 @@ def listar_modelos_processo(
         # MODELOS ATIVOS DO ESCRITÓRIO
         # -------------------------------------------------
 
+        # O SELECT busca apenas modelos com ATIVO = 1 e os ordena por nome.
         cur.execute("""
             SELECT
                 ID_MODELOS_DOCUMENTOS,
@@ -1319,9 +1490,11 @@ def listar_modelos_processo(
         ))
 
 
+        # Prepara a lista de modelos disponíveis para escolha no site.
         modelos = []
 
 
+        # Converte cada resultado para o formato esperado pelo frontend.
         for row in cur.fetchall():
 
             modelos.append(
@@ -1331,6 +1504,7 @@ def listar_modelos_processo(
             )
 
 
+        # Retorna o escritório localizado e os modelos que podem ser usados.
         return jsonify({
 
             'id_escritorio':
@@ -1342,6 +1516,7 @@ def listar_modelos_processo(
         }), 200
 
 
+    # Registra possíveis falhas sem expor detalhes internos na resposta.
     except Exception as erro:
 
         print(
@@ -1357,6 +1532,7 @@ def listar_modelos_processo(
         }), 500
 
 
+    # Finaliza a consulta liberando cursor e conexão.
     finally:
 
         cur.close()
@@ -1366,6 +1542,8 @@ def listar_modelos_processo(
 # GERAR DOCUMENTO
 # =========================================================
 
+# POST: gera um .docx preenchido a partir de um modelo e de um processo.
+# Esta rota reúne autenticação, consulta de dados, preenchimento e download.
 @app.route(
     '/processo/<int:id_processo>/documentos/gerar',
     methods=['POST']
@@ -1374,6 +1552,7 @@ def gerar_documento(
     id_processo
 ):
 
+    # Bloqueia a geração se o usuário não estiver autenticado.
     token_data, erro = (
         verificar_usuario()
     )
@@ -1383,11 +1562,15 @@ def gerar_documento(
         return erro
 
 
+    # Identifica quem solicitou a geração para registrar a autoria.
     id_usuario_logado = (
         token_data['id_usuarios']
     )
 
 
+    # O frontend envia o ID do modelo em um corpo JSON.
+    # Tenta pegar os dados enviados. O 'silent=True' impede o sistema de travar
+    # caso o envio venha vazio ou com erro, devolvendo um dicionário vazio {} como plano B.
     dados = (
         request.get_json(
             silent=True
@@ -1396,11 +1579,13 @@ def gerar_documento(
     )
 
 
+    # Lê qual modelo foi escolhido pelo usuário.
     id_modelo = dados.get(
         'id_modelo'
     )
 
 
+    # Sem modelo selecionado, devolve erro de requisição (HTTP 400).
     if not id_modelo:
 
         return jsonify({
@@ -1409,6 +1594,8 @@ def gerar_documento(
         }), 400
 
 
+    # int converte o ID para número inteiro; se não for possível,
+    # a exceção é tratada e a operação é interrompida.
     try:
 
         id_modelo = int(
@@ -1423,9 +1610,11 @@ def gerar_documento(
         }), 400
 
 
+    # Abre o acesso ao banco para reunir informações e registrar o resultado.
     con = conexao()
     cur = con.cursor()
 
+    # Inicializa o caminho para permitir limpeza segura em caso de falha.
     caminho_salvo = None
 
 
@@ -1435,6 +1624,14 @@ def gerar_documento(
         # PROCESSO + CLIENTE + ADVOGADO + ESCRITÓRIO
         # =================================================
 
+        # Esta consulta reúne em uma linha tudo que será usado no Word:
+        # dados do processo, do cliente, do advogado e do escritório.
+        # INNER JOIN combina tabelas pelos IDs relacionados; os apelidos
+        # p, cliente, advogado e escritorio distinguem as colunas.
+        # Relaciona ao processo o usuário cadastrado como cliente.
+        # Relaciona ao processo o usuário cadastrado como advogado.
+        # Associa o processo ao escritório responsável.
+        # O filtro ? seleciona apenas o processo solicitado na URL.
         cur.execute("""
             SELECT
                 p.ID_ESCRITORIOS,
@@ -1501,9 +1698,11 @@ def gerar_documento(
         ))
 
 
+        # Obtém a primeira linha resultante, com os dados consolidados.
         processo = cur.fetchone()
 
 
+        # Sem essa associação completa, o documento não é gerado.
         if not processo:
 
             return jsonify({
@@ -1512,6 +1711,7 @@ def gerar_documento(
             }), 404
 
 
+        # Lê o escritório encontrado para validar a permissão de acesso.
         id_escritorio = (
             processo[0]
         )
@@ -1521,6 +1721,7 @@ def gerar_documento(
         # ACESSO AO ESCRITÓRIO
         # =================================================
 
+        # A geração só continua se o usuário pertencer ao escritório.
         erro_acesso = verificar_escritorio(
             id_usuario_logado,
             id_escritorio
@@ -1536,6 +1737,7 @@ def gerar_documento(
         # MODELO
         # =================================================
 
+        # Busca o modelo solicitado e garante que ele seja do mesmo escritório.
         cur.execute("""
             SELECT
                 NOME,
@@ -1550,6 +1752,7 @@ def gerar_documento(
         ))
 
 
+        # Lê o nome original e o status do modelo escolhido.
         modelo = cur.fetchone()
 
 
@@ -1562,12 +1765,14 @@ def gerar_documento(
             }), 404
 
 
+        # Usa "Documento" como nome alternativo se faltar nome ao modelo.
         nome_modelo = (
             modelo[0]
             or 'Documento'
         )
 
 
+        # Um modelo inativo não deve ser oferecido para gerar novos arquivos.
         if modelo[2] != 1:
 
             return jsonify({
@@ -1576,6 +1781,7 @@ def gerar_documento(
             }), 400
 
 
+        # Localiza o arquivo .docx que será preenchido.
         caminho_modelo_docx = (
             caminho_modelo(
                 id_escritorio,
@@ -1584,6 +1790,7 @@ def gerar_documento(
         )
 
 
+        # Confirma que o arquivo modelo está presente no servidor.
         if not os.path.isfile(
             caminho_modelo_docx
         ):
@@ -1594,16 +1801,23 @@ def gerar_documento(
                     'não encontrado.'
             }), 404
 
+        # Prepara a data de hoje para inseri-la no documento.
         data_atual = formatar_data_atual()
 
         # =================================================
         # DADOS DO DOCUMENTO
         # =================================================
 
+        # O contexto é um dicionário de dicionários: agrupa os dados
+        # nas categorias cliente, processo, advogado, escritório e data.
+        # No Word, os campos podem usar, por exemplo, {{ cliente.nome }}.
         contexto = {
 
+            # Campos do cliente: dados pessoais, contatos, endereço e empresa.
             'cliente': {
 
+                # Cada índice do resultado corresponde a uma coluna do SELECT;
+                # as funções auxiliares padronizam texto, CPF, telefone etc.
                 'nome':
                     valor_texto(
                         processo[9]
@@ -1701,6 +1915,7 @@ def gerar_documento(
             },
 
 
+            # Campos do processo: identificação, assunto e informações judiciais.
             'processo': {
 
                 'numero':
@@ -1745,6 +1960,7 @@ def gerar_documento(
             },
 
 
+            # Campos do advogado: nome, inscrição na OAB e contatos.
             'advogado': {
 
                 'nome':
@@ -1769,6 +1985,7 @@ def gerar_documento(
             },
 
 
+            # Campos do escritório: razão social, CNPJ, endereço e contatos.
             'escritorio': {
 
                 'nome_fantasia':
@@ -1811,6 +2028,7 @@ def gerar_documento(
                     )
             },
 
+            # A data também é enviada ao template como um grupo de campos.
             'data': data_atual
         }
 
@@ -1819,11 +2037,14 @@ def gerar_documento(
         # PREENCHE O MODELO
         # =================================================
 
+        # Abre o .docx base por meio da biblioteca docxtpl.
         documento = DocxTemplate(
             caminho_modelo_docx
         )
 
 
+        # render substitui as variáveis do Word pelos valores do contexto;
+        # autoescape=True protege caracteres especiais no texto inserido.
         documento.render(
             contexto,
             autoescape=True
@@ -1834,11 +2055,13 @@ def gerar_documento(
         # NOME DO ARQUIVO
         # =================================================
 
+        # Normaliza o nome do modelo para formar o nome do novo arquivo.
         nome_base = limpar_nome_documento(
             nome_modelo
         )
 
 
+        # Limpa também o número do processo usado como parte do nome.
         numero_processo = secure_filename(
             valor_texto(
                 processo[1]
@@ -1846,6 +2069,7 @@ def gerar_documento(
         )
 
 
+        # Na falta do número oficial, usa o ID do processo como alternativa.
         if not numero_processo:
 
             numero_processo = str(
@@ -1853,6 +2077,7 @@ def gerar_documento(
             )
 
 
+        # Combina o nome do modelo com o número do processo e .docx.
         nome_saida = (
             f'{nome_base}_'
             f'{numero_processo}.docx'
@@ -1863,6 +2088,9 @@ def gerar_documento(
         # REGISTRA NO BANCO
         # =================================================
 
+        # Grava um histórico do documento gerado: modelo, processo,
+        # usuário responsável, nome do arquivo e data da geração.
+        # RETURNING devolve o novo identificador do documento.
         cur.execute("""
             INSERT INTO DOCUMENTOS_GERADOS (
                 ID_MODELOS_DOCUMENTOS,
@@ -1886,6 +2114,7 @@ def gerar_documento(
         ))
 
 
+        # Recupera o ID criado para identificar o arquivo no armazenamento.
         id_documento = (
             cur.fetchone()[0]
         )
@@ -1895,6 +2124,7 @@ def gerar_documento(
         # SALVA O DOCX
         # =================================================
 
+        # Cada documento é salvo usando o próprio ID, evitando conflitos.
         caminho_salvo = (
             caminho_documento_gerado(
                 id_documento
@@ -1902,11 +2132,13 @@ def gerar_documento(
         )
 
 
+        # save grava a versão preenchida, sem modificar o modelo original.
         documento.save(
             caminho_salvo
         )
 
 
+        # commit confirma o registro somente após salvar o .docx com sucesso.
         con.commit()
 
 
@@ -1914,6 +2146,7 @@ def gerar_documento(
         # DEVOLVE O ARQUIVO
         # =================================================
 
+        # Envia o Word pronto para download logo após a geração.
         return send_file(
 
             caminho_salvo,
@@ -1928,10 +2161,12 @@ def gerar_documento(
         )
 
 
+    # Se surgir uma falha, cancela a operação pendente no banco.
     except Exception as erro:
 
         con.rollback()
 
+# Remove eventual arquivo de saída para não deixar conteúdo órfão.
 
         if (
             caminho_salvo
@@ -1952,23 +2187,27 @@ def gerar_documento(
                 pass
 
 
+        # Registra o problema no terminal para auxiliar o diagnóstico.
         print(
             'Erro ao gerar documento:',
             erro
         )
 
 
+        # traceback imprime a sequência das chamadas que levou ao erro.
         import traceback
 
         traceback.print_exc()
 
 
+        # Para o usuário, retorna um erro genérico HTTP 500.
         return jsonify({
             'error':
                 'Erro ao gerar documento.'
         }), 500
 
 
+    # Fecha a conexão mesmo se alguma etapa não for concluída.
     finally:
 
         cur.close()
@@ -1978,12 +2217,14 @@ def gerar_documento(
 # LISTAR DOCUMENTOS GERADOS
 # =========================================================
 
+# GET: apresenta o histórico de documentos gerados pelo usuário.
 @app.route(
     '/documentos-gerados',
     methods=['GET']
 )
 def listar_documentos_gerados():
 
+    # Confirma a identidade antes de consultar o histórico.
     token_data, erro = (
         verificar_usuario()
     )
@@ -1993,6 +2234,7 @@ def listar_documentos_gerados():
         return erro
 
 
+    # O ID do usuário será usado para filtrar seus próprios documentos.
     id_usuario = (
         token_data['id_usuarios']
     )
@@ -2004,6 +2246,13 @@ def listar_documentos_gerados():
 
     try:
 
+        # Consulta registros de documentos e reúne informações dos modelos,
+        # processos, clientes e escritórios por meio dos INNER JOINs.
+        # O filtro exige que o usuário tenha gerado o documento e mantenha
+        # um vínculo ativo com o escritório associado.
+        # Esta associação representa o vínculo ativo com o escritório.
+        # A condição seleciona documentos criados pelo usuário logado.
+        # Mostra primeiro as gerações mais recentes.
         cur.execute("""
             SELECT
                 dg.ID_DOCUMENTOS_GERADOS,
@@ -2063,11 +2312,15 @@ def listar_documentos_gerados():
         ))
 
 
+        # Lista onde serão reunidos os documentos encontrados.
         documentos = []
 
 
+        # Percorre todos os resultados retornados pela consulta SQL.
         for row in cur.fetchall():
 
+            # Prioriza nome, razão social ou nome fantasia do cliente;
+            # or escolhe a primeira informação disponível.
             nome_cliente = (
                 row[8]
                 or row[9]
@@ -2076,6 +2329,7 @@ def listar_documentos_gerados():
             )
 
 
+            # Faz o mesmo para selecionar um nome legível do escritório.
             nome_escritorio = (
                 row[12]
                 or row[13]
@@ -2083,9 +2337,11 @@ def listar_documentos_gerados():
             )
 
 
+            # Inicia a data como ausente antes de tentar formatá-la.
             data_geracao = None
 
 
+            # Se a data existe, converte para dia/mês/ano hora:minuto.
             if row[3]:
 
                 try:
@@ -2103,6 +2359,7 @@ def listar_documentos_gerados():
                     )
 
 
+            # Monta um dicionário com os dados que o frontend exibirá na lista.
             documentos.append({
 
                 'id':
@@ -2140,6 +2397,7 @@ def listar_documentos_gerados():
             })
 
 
+        # Devolve a lista e a quantidade total de registros encontrados.
         return jsonify({
 
             'documentos':
@@ -2151,6 +2409,7 @@ def listar_documentos_gerados():
         }), 200
 
 
+    # Registra no servidor uma possível falha da consulta.
     except Exception as erro:
 
         print(
@@ -2166,6 +2425,7 @@ def listar_documentos_gerados():
         }), 500
 
 
+    # Libera cursor e conexão independentemente do resultado.
     finally:
 
         cur.close()
@@ -2175,6 +2435,7 @@ def listar_documentos_gerados():
 # BAIXAR DOCUMENTO GERADO
 # =========================================================
 
+# GET: baixa novamente um documento anteriormente gerado.
 @app.route(
     '/documentos-gerados/<int:id_documento>/download',
     methods=['GET']
@@ -2183,6 +2444,7 @@ def baixar_documento_gerado(
     id_documento
 ):
 
+    # Valida quem está tentando acessar o arquivo.
     token_data, erro = (
         verificar_usuario()
     )
@@ -2192,6 +2454,7 @@ def baixar_documento_gerado(
         return erro
 
 
+    # Recupera o usuário logado para filtrar a consulta.
     id_usuario = (
         token_data['id_usuarios']
     )
@@ -2203,6 +2466,8 @@ def baixar_documento_gerado(
 
     try:
 
+        # A consulta só encontra documentos gerados pelo próprio usuário;
+        # também recupera o escritório do processo relacionado.
         cur.execute("""
             SELECT
                 dg.NOME_ARQUIVO,
@@ -2224,9 +2489,11 @@ def baixar_documento_gerado(
         ))
 
 
+        # Obtém o documento encontrado ou None quando não houver acesso.
         documento = cur.fetchone()
 
 
+        # Para IDs não encontrados, responde HTTP 404.
         if not documento:
 
             return jsonify({
@@ -2235,10 +2502,12 @@ def baixar_documento_gerado(
             }), 404
 
 
+        # Recupera o nome de download guardado no banco.
         nome_arquivo = (
             documento[0]
         )
 
+        # Recupera o escritório para uma segunda verificação de permissão.
         id_escritorio = (
             documento[1]
         )
@@ -2248,6 +2517,8 @@ def baixar_documento_gerado(
         # CONFIRMA QUE AINDA TEM ACESSO AO ESCRITÓRIO
         # -------------------------------------------------
 
+        # Mesmo que tenha gerado o documento, o usuário precisa manter
+        # acesso ativo ao escritório para poder baixá-lo.
         erro_acesso = verificar_escritorio(
             id_usuario,
             id_escritorio
@@ -2259,6 +2530,7 @@ def baixar_documento_gerado(
             return erro_acesso
 
 
+        # Localiza no disco o .docx identificado pelo ID do documento.
         caminho = (
             caminho_documento_gerado(
                 id_documento
@@ -2266,6 +2538,7 @@ def baixar_documento_gerado(
         )
 
 
+        # Se o arquivo não existir mais no servidor, informa HTTP 404.
         if not os.path.isfile(
             caminho
         ):
@@ -2276,6 +2549,7 @@ def baixar_documento_gerado(
             }), 404
 
 
+        # Envia o arquivo em formato Word como anexo para download.
         return send_file(
 
             caminho,
@@ -2290,6 +2564,7 @@ def baixar_documento_gerado(
         )
 
 
+    # Qualquer erro inesperado vira uma resposta HTTP 500.
     except Exception as erro:
 
         print(
@@ -2304,6 +2579,7 @@ def baixar_documento_gerado(
         }), 500
 
 
+    # Garante o fechamento do cursor e da conexão.
     finally:
 
         cur.close()
