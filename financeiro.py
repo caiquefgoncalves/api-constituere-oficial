@@ -101,7 +101,6 @@ def status_lancamento_manual(tipo, status_db, data_lanc, hoje):
 
     return status_db or 'A pagar'
 
-
 def dentro_periodo(data_obj, inicio, fim):
     if data_obj is None:
         return False
@@ -110,6 +109,18 @@ def dentro_periodo(data_obj, inicio, fim):
     if fim and data_obj > fim:
         return False
     return True
+
+
+def para_float(valor):
+    if valor is None:
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    try:
+        texto = str(valor).strip().replace('R$', '').replace('.', '').replace(',', '.')
+        return float(texto)
+    except:
+        return 0.0
 
 
 def processar_notificacoes_vencimento():
@@ -141,7 +152,7 @@ def processar_notificacoes_vencimento():
             id_advogado = row[0]
             num_processo = row[1] or '--'
             nome_cliente = row[2] or 'Cliente'
-            valor = float(row[3]) if row[3] else 0
+            valor = para_float(row[3])
             vencimento = row[4]
 
             venc_fmt = vencimento.strftime('%d/%m/%Y') if hasattr(vencimento, 'strftime') else str(vencimento)
@@ -261,7 +272,7 @@ def listar_lancamentos_escritorio(id_escritorio):
                     'id_real': row[0],
                     'tipo': 'despesa',
                     'descricao': row[2],
-                    'valor': float(row[3]) if row[3] else 0,
+                    'valor': para_float(row[3]),
                     'data': data_lanc.strftime('%Y-%m-%d') if hasattr(data_lanc, 'strftime') else str(data_lanc),
                     'categoria': row[5] or '',
                     'forma_pagamento': row[6] or '',
@@ -302,7 +313,7 @@ def listar_lancamentos_escritorio(id_escritorio):
                     'id_real': row[0],
                     'tipo': 'receita',
                     'descricao': row[2],
-                    'valor': float(row[3]) if row[3] else 0,
+                    'valor': para_float(row[3]),
                     'data': data_lanc.strftime('%Y-%m-%d') if hasattr(data_lanc, 'strftime') else str(data_lanc),
                     'categoria': row[5] or '',
                     'forma_pagamento': row[6] or '',
@@ -348,7 +359,7 @@ def listar_lancamentos_escritorio(id_escritorio):
 
             for row in cur.fetchall():
                 id_parc = row[0]
-                valor = float(row[1]) if row[1] else 0
+                valor = para_float(row[1])
                 venc_raw = row[2]
                 pag_raw = row[3]
                 status_db = row[4]
@@ -425,7 +436,7 @@ def listar_lancamentos_escritorio(id_escritorio):
 
             for row in cur.fetchall():
                 id_parc = row[0]
-                valor = float(row[1]) if row[1] else 0
+                valor = para_float(row[1])
                 venc_raw = row[2]
                 pag_raw = row[3]
                 status_db = row[4]
@@ -605,8 +616,6 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
         if not permitido:
             return jsonify({'error': msg}), 403
 
-        valor_despesa = 0.0
-
         cur.execute("""
             SELECT TIPO, STATUS, VALOR FROM LANCAMENTOS_FINANCEIROS
             WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1
@@ -617,132 +626,111 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
         if row:
             tipo_db = (row[0] or '').lower()
             status_db = (row[1] or '').lower()
-            valor_despesa = float(row[2]) if row[2] else 0.0
+            valor_lancamento = para_float(row[2])
 
             if tipo_db == 'receita':
-                return jsonify({'error': 'Receitas não precisam de baixa.'}), 400
+                if status_db in ('recebida', 'recebido', 'pago', 'paga'):
+                    return jsonify({'error': 'Esta receita já foi recebida.'}), 400
 
-            if status_db in ('pago', 'paga', 'recebida', 'recebido'):
-                return jsonify({'error': 'Esta despesa já foi paga.'}), 400
-
-        else:
-            cur.execute("""
-                SELECT parc.VALOR_PARCELA, parc.STATUS
-                FROM PARCELAS parc
-                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
-                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-                WHERE parc.ID_PARCELAS = ? 
-                  AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
-                      SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                  ))
-            """, (id_lancamento, id_escritorio, id_escritorio))
-
-            row_parc = cur.fetchone()
-
-            if row_parc:
-                status_db = (row_parc[1] or '').upper()
-                valor_despesa = float(row_parc[0]) if row_parc[0] else 0.0
-
-                if status_db == 'PAGA':
-                    return jsonify({'error': 'Esta parcela já foi paga.'}), 400
-
-            else:
                 cur.execute("""
-                    SELECT pe.VALOR_PARCELA, pe.STATUS
+                    UPDATE LANCAMENTOS_FINANCEIROS
+                    SET STATUS = 'Recebido'
+                    WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
+                """, (id_lancamento, id_escritorio))
+                con.commit()
+                return jsonify({'mensagem': 'Recebimento confirmado com sucesso.'}), 200
+
+            if tipo_db == 'despesa':
+                if status_db in ('pago', 'paga', 'recebida', 'recebido'):
+                    return jsonify({'error': 'Esta despesa já foi paga.'}), 400
+
+                hoje = datetime.date.today()
+                receita_recebida = 0.0
+                despesas_pagas = 0.0
+
+                cur.execute("""
+                    SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
+                    WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'receita' 
+                      AND LOWER(STATUS) IN ('recebida', 'recebido', 'pago', 'paga')
+                """, (id_escritorio,))
+                for row_rec in cur.fetchall():
+                    receita_recebida += para_float(row_rec[0])
+
+                cur.execute("""
+                    SELECT parc.VALOR_PARCELA
+                    FROM PARCELAS parc
+                    INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+                    INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+                    WHERE (p.ID_ESCRITORIOS = ? OR (
+                        p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
+                            SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                        )
+                    ))
+                    AND (UPPER(parc.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR parc.DATA_PAGAMENTO IS NOT NULL)
+                """, (id_escritorio, id_escritorio))
+                for row_pag in cur.fetchall():
+                    receita_recebida += para_float(row_pag[0])
+
+                cur.execute("""
+                    SELECT pe.VALOR_PARCELA
                     FROM PARCELAS_EXITO pe
                     INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
                     INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
                     INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-                    WHERE pe.ID_PARCELA_EXITO = ? 
-                      AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
-                          SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                      ))
-                """, (id_lancamento, id_escritorio, id_escritorio))
+                    WHERE (p.ID_ESCRITORIOS = ? OR (
+                        p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
+                            SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                        )
+                    ))
+                    AND (UPPER(pe.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR pe.DATA_PAGAMENTO IS NOT NULL)
+                """, (id_escritorio, id_escritorio))
+                for row_exito_pag in cur.fetchall():
+                    receita_recebida += para_float(row_exito_pag[0])
 
-                row_exito = cur.fetchone()
+                cur.execute("""
+                    SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
+                    WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'despesa' 
+                      AND LOWER(STATUS) IN ('pago', 'paga', 'recebida', 'recebido')
+                """, (id_escritorio,))
+                for row_desp in cur.fetchall():
+                    despesas_pagas += para_float(row_desp[0])
 
-                if row_exito:
-                    status_db = (row_exito[1] or '').upper()
-                    valor_despesa = float(row_exito[0]) if row_exito[0] else 0.0
+                saldo_atual = receita_recebida - despesas_pagas
 
-                    if status_db == 'PAGA':
-                        return jsonify({'error': 'Esta parcela de êxito já foi paga.'}), 400
-                else:
-                    return jsonify({'error': 'Lançamento não encontrado'}), 404
+                if saldo_atual <= 0:
+                    return jsonify({'error': f'Saldo insuficiente. Seu saldo atual é R$ {saldo_atual:.2f}.'}), 400
 
-        hoje = datetime.date.today()
+                if saldo_atual < valor_lancamento:
+                    return jsonify({'error': f'Saldo insuficiente para esta baixa. Saldo: R$ {saldo_atual:.2f} | Valor da despesa: R$ {valor_lancamento:.2f}.'}), 400
 
-        receita_recebida = 0.0
-        despesas = 0.0
+                cur.execute("""
+                    UPDATE LANCAMENTOS_FINANCEIROS
+                    SET STATUS = 'Recebido'
+                    WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
+                """, (id_lancamento, id_escritorio))
+                con.commit()
+                return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
 
         cur.execute("""
-            SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
-            WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'receita' 
-              AND LOWER(STATUS) IN ('recebida', 'recebido', 'pago', 'paga')
-        """, (id_escritorio,))
-        for row_rec in cur.fetchall():
-            receita_recebida += float(row_rec[0]) if row_rec[0] else 0.0
-
-        sql_parcelas_pagas = """
-            SELECT parc.VALOR_PARCELA
+            SELECT parc.VALOR_PARCELA, parc.STATUS
             FROM PARCELAS parc
             INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
             INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE (p.ID_ESCRITORIOS = ? OR (
-                p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
-                    SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                )
-            ))
-            AND (UPPER(parc.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR parc.DATA_PAGAMENTO IS NOT NULL)
-        """
-        cur.execute(sql_parcelas_pagas, (id_escritorio, id_escritorio))
-        for row_pag in cur.fetchall():
-            receita_recebida += float(row_pag[0]) if row_pag[0] else 0.0
+            WHERE parc.ID_PARCELAS = ? 
+              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
+                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+              ))
+        """, (id_lancamento, id_escritorio, id_escritorio))
 
-        sql_exito_pagas = """
-            SELECT pe.VALOR_PARCELA
-            FROM PARCELAS_EXITO pe
-            INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE (p.ID_ESCRITORIOS = ? OR (
-                p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
-                    SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                )
-            ))
-            AND (UPPER(pe.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR pe.DATA_PAGAMENTO IS NOT NULL)
-        """
-        cur.execute(sql_exito_pagas, (id_escritorio, id_escritorio))
-        for row_exito_pag in cur.fetchall():
-            receita_recebida += float(row_exito_pag[0]) if row_exito_pag[0] else 0.0
-
-        cur.execute("""
-            SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
-            WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'despesa' 
-              AND LOWER(STATUS) IN ('pago', 'paga', 'recebida', 'recebido')
-        """, (id_escritorio,))
-        for row_desp in cur.fetchall():
-            despesas += float(row_desp[0]) if row_desp[0] else 0.0
-
-        saldo_atual = receita_recebida - despesas
-
-        if saldo_atual <= 0:
-            return jsonify({'error': f'Saldo insuficiente. Seu saldo atual é R$ {saldo_atual:.2f}.'}), 400
-
-        if saldo_atual < valor_despesa:
-            return jsonify({
-                               'error': f'Saldo insuficiente para esta baixa. Saldo: R$ {saldo_atual:.2f} | Valor da despesa: R$ {valor_despesa:.2f}.'}), 400
-
-        if row:
-            cur.execute("""
-                UPDATE LANCAMENTOS_FINANCEIROS
-                SET STATUS = 'Recebido'
-                WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
-            """, (id_lancamento, id_escritorio))
-            con.commit()
-            return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
+        row_parc = cur.fetchone()
 
         if row_parc:
+            status_db = (row_parc[1] or '').upper()
+            valor_parcela = para_float(row_parc[0])
+
+            if status_db == 'PAGA':
+                return jsonify({'error': 'Esta parcela já foi paga.'}), 400
+
             data_pagamento = datetime.date.today()
             cur.execute("""
                 UPDATE PARCELAS
@@ -752,7 +740,27 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
             con.commit()
             return jsonify({'mensagem': 'Pagamento da parcela confirmado com sucesso.'}), 200
 
+        cur.execute("""
+            SELECT pe.VALOR_PARCELA, pe.STATUS
+            FROM PARCELAS_EXITO pe
+            INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+            WHERE pe.ID_PARCELA_EXITO = ? 
+              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
+                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+              ))
+        """, (id_lancamento, id_escritorio, id_escritorio))
+
+        row_exito = cur.fetchone()
+
         if row_exito:
+            status_db = (row_exito[1] or '').upper()
+            valor_exito = para_float(row_exito[0])
+
+            if status_db == 'PAGA':
+                return jsonify({'error': 'Esta parcela de êxito já foi paga.'}), 400
+
             data_pagamento = datetime.date.today()
             cur.execute("""
                 UPDATE PARCELAS_EXITO
@@ -827,7 +835,7 @@ def resumo_financeiro_escritorio(id_escritorio):
         cur.execute(sql_manual, tuple(params_manual))
 
         for tipo, status_db, valor, data_lanc in cur.fetchall():
-            v = float(valor) if valor else 0.0
+            v = para_float(valor)
             tipo = (tipo or '').lower()
 
             data_obj = data_lanc.date() if hasattr(data_lanc, 'date') else data_lanc
@@ -876,7 +884,7 @@ def resumo_financeiro_escritorio(id_escritorio):
         cur.execute(sql_parcelas, (id_escritorio, id_escritorio))
 
         for valor, venc_raw, status_db, pag_raw in cur.fetchall():
-            v = float(valor) if valor else 0.0
+            v = para_float(valor)
             venc = converter_data_pagamento(venc_raw)
             pag = converter_data_pagamento(pag_raw)
 
@@ -920,7 +928,7 @@ def resumo_financeiro_escritorio(id_escritorio):
         cur.execute(sql_exito, (id_escritorio, id_escritorio))
 
         for valor, venc_raw, status_db, pag_raw in cur.fetchall():
-            v = float(valor) if valor else 0.0
+            v = para_float(valor)
             venc = converter_data_pagamento(venc_raw)
             pag = converter_data_pagamento(pag_raw)
 
