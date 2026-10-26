@@ -726,6 +726,36 @@ def editar_perfil():
 
 @app.route('/login', methods=['POST'])
 def login():
+    origem = request.headers.get('X-Client-Platform', '').strip().lower()
+
+    if origem != 'expo-mobile':
+        dados_req = request.get_json() or {}
+        cpf_cnpj = dados_req.get('cpf_cnpj')
+
+        if cpf_cnpj:
+            cpf_limpo = ''.join(filter(str.isdigit, str(cpf_cnpj)))
+            con = conexao()
+            cur = con.cursor()
+            try:
+                cur.execute("SELECT TIPO FROM USUARIOS WHERE CPF = ?", (cpf_limpo,))
+                usuario_db = cur.fetchone()
+
+                if usuario_db and usuario_db[0] in (2, 3):
+                    return jsonify({
+                        'error': 'Clientes não podem acessar o site pela web. Apenas advogados podem fazer login por aqui. Utilize o aplicativo Constituere.',
+                        'bloqueado_web': True
+                    }), 403
+            except Exception:
+                pass
+            finally:
+                cur.close()
+                con.close()
+
+        return jsonify({
+            'error': 'O acesso pelo site está desativado. Utilize o aplicativo Constituere para fazer login.',
+            'bloqueado_web': True
+        }), 403
+
     cpf_cnpj = request.json.get('cpf_cnpj')
     senha = request.json.get('senha')
 
@@ -2474,7 +2504,6 @@ def meu_escritorio():
     cur = con.cursor()
 
     try:
-        # A MÁGICA ACONTECE AQUI: Busca o vínculo ativo, priorizando PROPRIETARIO, mas aceitando PARCEIRO
         cur.execute("""
                     SELECT FIRST 1 ID_ESCRITORIOS
                     FROM ADVOGADO_ESCRITORIO
