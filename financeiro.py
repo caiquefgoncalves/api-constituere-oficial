@@ -101,6 +101,7 @@ def status_lancamento_manual(tipo, status_db, data_lanc, hoje):
 
     return status_db or 'A pagar'
 
+
 def dentro_periodo(data_obj, inicio, fim):
     if data_obj is None:
         return False
@@ -604,8 +605,10 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
         if not permitido:
             return jsonify({'error': msg}), 403
 
+        valor_despesa = 0.0
+
         cur.execute("""
-            SELECT TIPO, STATUS FROM LANCAMENTOS_FINANCEIROS
+            SELECT TIPO, STATUS, VALOR FROM LANCAMENTOS_FINANCEIROS
             WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1
         """, (id_lancamento, id_escritorio))
 
@@ -614,6 +617,7 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
         if row:
             tipo_db = (row[0] or '').lower()
             status_db = (row[1] or '').lower()
+            valor_despesa = float(row[2]) if row[2] else 0.0
 
             if tipo_db == 'receita':
                 return jsonify({'error': 'Receitas não precisam de baixa.'}), 400
@@ -621,73 +625,140 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
             if status_db in ('pago', 'paga', 'recebida', 'recebido'):
                 return jsonify({'error': 'Esta despesa já foi paga.'}), 400
 
+        else:
+            cur.execute("""
+                SELECT parc.VALOR_PARCELA, parc.STATUS
+                FROM PARCELAS parc
+                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+                WHERE parc.ID_PARCELAS = ? 
+                  AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
+                      SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                  ))
+            """, (id_lancamento, id_escritorio, id_escritorio))
+
+            row_parc = cur.fetchone()
+
+            if row_parc:
+                status_db = (row_parc[1] or '').upper()
+                valor_despesa = float(row_parc[0]) if row_parc[0] else 0.0
+
+                if status_db == 'PAGA':
+                    return jsonify({'error': 'Esta parcela já foi paga.'}), 400
+
+            else:
+                cur.execute("""
+                    SELECT pe.VALOR_PARCELA, pe.STATUS
+                    FROM PARCELAS_EXITO pe
+                    INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+                    INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
+                    INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+                    WHERE pe.ID_PARCELA_EXITO = ? 
+                      AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
+                          SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                      ))
+                """, (id_lancamento, id_escritorio, id_escritorio))
+
+                row_exito = cur.fetchone()
+
+                if row_exito:
+                    status_db = (row_exito[1] or '').upper()
+                    valor_despesa = float(row_exito[0]) if row_exito[0] else 0.0
+
+                    if status_db == 'PAGA':
+                        return jsonify({'error': 'Esta parcela de êxito já foi paga.'}), 400
+                else:
+                    return jsonify({'error': 'Lançamento não encontrado'}), 404
+
+        hoje = datetime.date.today()
+
+        receita_recebida = 0.0
+        despesas = 0.0
+
+        cur.execute("""
+            SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
+            WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'receita' 
+              AND LOWER(STATUS) IN ('recebida', 'recebido', 'pago', 'paga')
+        """, (id_escritorio,))
+        for row_rec in cur.fetchall():
+            receita_recebida += float(row_rec[0]) if row_rec[0] else 0.0
+
+        sql_parcelas_pagas = """
+            SELECT parc.VALOR_PARCELA
+            FROM PARCELAS parc
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+            WHERE (p.ID_ESCRITORIOS = ? OR (
+                p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
+                    SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                )
+            ))
+            AND (UPPER(parc.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR parc.DATA_PAGAMENTO IS NOT NULL)
+        """
+        cur.execute(sql_parcelas_pagas, (id_escritorio, id_escritorio))
+        for row_pag in cur.fetchall():
+            receita_recebida += float(row_pag[0]) if row_pag[0] else 0.0
+
+        sql_exito_pagas = """
+            SELECT pe.VALOR_PARCELA
+            FROM PARCELAS_EXITO pe
+            INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
+            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+            WHERE (p.ID_ESCRITORIOS = ? OR (
+                p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
+                    SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                )
+            ))
+            AND (UPPER(pe.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR pe.DATA_PAGAMENTO IS NOT NULL)
+        """
+        cur.execute(sql_exito_pagas, (id_escritorio, id_escritorio))
+        for row_exito_pag in cur.fetchall():
+            receita_recebida += float(row_exito_pag[0]) if row_exito_pag[0] else 0.0
+
+        cur.execute("""
+            SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
+            WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'despesa' 
+              AND LOWER(STATUS) IN ('pago', 'paga', 'recebida', 'recebido')
+        """, (id_escritorio,))
+        for row_desp in cur.fetchall():
+            despesas += float(row_desp[0]) if row_desp[0] else 0.0
+
+        saldo_atual = receita_recebida - despesas
+
+        if saldo_atual <= 0:
+            return jsonify({'error': f'Saldo insuficiente. Seu saldo atual é R$ {saldo_atual:.2f}.'}), 400
+
+        if saldo_atual < valor_despesa:
+            return jsonify({
+                               'error': f'Saldo insuficiente para esta baixa. Saldo: R$ {saldo_atual:.2f} | Valor da despesa: R$ {valor_despesa:.2f}.'}), 400
+
+        if row:
             cur.execute("""
                 UPDATE LANCAMENTOS_FINANCEIROS
                 SET STATUS = 'Recebido'
                 WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
             """, (id_lancamento, id_escritorio))
-
             con.commit()
             return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
 
-        cur.execute("""
-            SELECT parc.ID_PARCELAS, parc.STATUS
-            FROM PARCELAS parc
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE parc.ID_PARCELAS = ? 
-              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
-                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-              ))
-        """, (id_lancamento, id_escritorio, id_escritorio))
-
-        row_parc = cur.fetchone()
-
         if row_parc:
-            status_db = (row_parc[1] or '').upper()
-
-            if status_db == 'PAGA':
-                return jsonify({'error': 'Esta parcela já foi paga.'}), 400
-
             data_pagamento = datetime.date.today()
-
             cur.execute("""
                 UPDATE PARCELAS
                 SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
                 WHERE ID_PARCELAS = ?
             """, (data_pagamento, id_lancamento))
-
             con.commit()
             return jsonify({'mensagem': 'Pagamento da parcela confirmado com sucesso.'}), 200
 
-        cur.execute("""
-            SELECT pe.ID_PARCELA_EXITO, pe.STATUS
-            FROM PARCELAS_EXITO pe
-            INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE pe.ID_PARCELA_EXITO = ? 
-              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
-                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-              ))
-        """, (id_lancamento, id_escritorio, id_escritorio))
-
-        row_exito = cur.fetchone()
-
         if row_exito:
-            status_db = (row_exito[1] or '').upper()
-
-            if status_db == 'PAGA':
-                return jsonify({'error': 'Esta parcela de êxito já foi paga.'}), 400
-
             data_pagamento = datetime.date.today()
-
             cur.execute("""
                 UPDATE PARCELAS_EXITO
                 SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
                 WHERE ID_PARCELA_EXITO = ?
             """, (data_pagamento, id_lancamento))
-
             con.commit()
             return jsonify({'mensagem': 'Pagamento da parcela de êxito confirmado com sucesso.'}), 200
 
