@@ -1,10 +1,3 @@
-"""Aplicação Flask e pontos globais de auditoria.
-
-As rotas de negócio não precisam chamar o módulo de Log diretamente: os hooks
-abaixo preparam a comparação antes da alteração e registram somente respostas
-bem-sucedidas depois que a rota termina.
-"""
-
 from flask import Flask, send_from_directory, jsonify, request, make_response
 from flask_cors import CORS
 import os
@@ -91,11 +84,6 @@ app.config['UPLOAD_FOLDER'] = os.path.join(
 
 @app.before_request
 def preparar_auditoria():
-    """Captura o estado anterior de recursos que serão alterados.
-
-    POST não possui estado anterior para comparar. PUT, PATCH e DELETE podem
-    gerar diferenças por campo, por isso o snapshot é feito antes da rota.
-    """
     if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
         try:
             preparar_requisicao(decodificar_token())
@@ -105,12 +93,6 @@ def preparar_auditoria():
 
 @app.after_request
 def registrar_auditoria(response):
-    """Persiste o evento somente quando a operação retornou sucesso.
-
-    Além de operações mutáveis, o download de documento e a consulta Pix são
-    auditados porque podem representar a geração de PDF ou a confirmação de
-    pagamento recebida da provedora.
-    """
     deve_registrar = (
             request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}
             or (request.method == 'GET' and (

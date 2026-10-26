@@ -137,7 +137,8 @@ def processar_notificacoes_vencimento():
                 p.NUM_PROCESSO,
                 u.NOME,
                 parc.VALOR_PARCELA,
-                parc.DATA_VENCIMENTO
+                parc.DATA_VENCIMENTO,
+                parc.ID_PARCELAS
             FROM PARCELAS parc
             INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
             INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
@@ -154,6 +155,7 @@ def processar_notificacoes_vencimento():
             nome_cliente = row[2] or 'Cliente'
             valor = para_float(row[3])
             vencimento = row[4]
+            id_parcela = row[5]
 
             venc_fmt = vencimento.strftime('%d/%m/%Y') if hasattr(vencimento, 'strftime') else str(vencimento)
             titulo = 'Aviso de Vencimento'
@@ -161,9 +163,8 @@ def processar_notificacoes_vencimento():
 
             cur.execute("""
                 SELECT 1 FROM NOTIFICACOES 
-                WHERE ID_USUARIOS = ? AND TITULO = ? AND MENSAGEM = ? 
-                  AND CAST(DATA_CRIACAO AS DATE) = ?
-            """, (id_advogado, titulo, msg, hoje))
+                WHERE ID_USUARIOS = ? AND TITULO = ? AND MENSAGEM = ?
+            """, (id_advogado, titulo, msg))
 
             if not cur.fetchone():
                 cur.execute("""
