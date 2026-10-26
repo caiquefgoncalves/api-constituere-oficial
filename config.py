@@ -36,10 +36,10 @@ DB_NAME = str(
     )
 )
 DB_USER = 'SYSDBA'
-DB_PASSWORD = 'SYSDBA'
+DB_PASSWORD = 'sysdba'
 
 LOG_DB_NAME = str(Path(__file__).with_name('Log.FDB'))
 LOG_DB_USER = 'SYSDBA'
-LOG_DB_PASSWORD = 'SYSDBA'
+LOG_DB_PASSWORD = 'sysdba'
 
 UPLOAD_FOLDER = os.path.abspath(os.path.dirname(__file__))
