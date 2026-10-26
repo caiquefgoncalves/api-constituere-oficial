@@ -557,6 +557,86 @@ def _is_in_scope_request(question, history):
     )
 
 
+_WEEKDAYS = {
+    "segunda": 0,
+    "terca": 1,
+    "quarta": 2,
+    "quinta": 3,
+    "sexta": 4,
+    "sabado": 5,
+    "domingo": 6,
+}
+
+_NUMBER_WORDS = {
+    "um": 1, "uma": 1, "dois": 2, "duas": 2, "tres": 3,
+    "quatro": 4, "cinco": 5, "seis": 6, "sete": 7,
+    "oito": 8, "nove": 9, "dez": 10, "onze": 11, "doze": 12,
+}
+
+
+def _add_months(value, months):
+    """Returns the equivalent date a number of calendar months from value."""
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    next_month = datetime.date(year + (month == 12), month % 12 + 1, 1)
+    last_day = (next_month - datetime.timedelta(days=1)).day
+    return datetime.date(year, month, min(value.day, last_day))
+
+
+def _relative_date_from_question(question):
+    """Recognizes a single calendar date expressed relatively in Portuguese."""
+    normalized = _normalize_text(question)
+    today = datetime.date.today()
+
+    if re.search(r"\b(?:depois(?:\s+(?:de|do))?\s+|apos\s+|pos\s+)amanha\b", normalized):
+        return today + datetime.timedelta(days=2)
+    if re.search(r"\bamanha\b", normalized):
+        return today + datetime.timedelta(days=1)
+    if re.search(r"\bhoje\b", normalized):
+        return today
+
+    weekday_match = re.search(
+        r"\b(?:semana\s+(?:que\s+vem|seguinte|proxima)|(?:proxima|seguinte)\s+semana)"
+        r"(?:\s*,?\s*(?:na|no))?\s+(segunda|terca|quarta|quinta|sexta|sabado|domingo)"
+        r"(?:[ -]feira)?\b",
+        normalized,
+    )
+    if weekday_match:
+        next_monday = today + datetime.timedelta(days=7 - today.weekday())
+        return next_monday + datetime.timedelta(days=_WEEKDAYS[weekday_match.group(1)])
+
+    month_match = re.search(
+        r"\b(?:mes\s+(?:que\s+vem|seguinte|proximo)|(?:proximo|seguinte)\s+mes)"
+        r"(?:\s*,?\s*(?:no\s+)?dia\s+([0-3]?\d))?\b",
+        normalized,
+    )
+    quantity_match = re.search(
+        r"\b(?:daqui\s+(?:a\s+)?|em\s+)(\d+|"
+        + "|".join(_NUMBER_WORDS)
+        + r")\s+mes(?:es)?(?:\s*,?\s*(?:no\s+)?dia\s+([0-3]?\d))?\b",
+        normalized,
+    )
+
+    months = 1 if month_match else None
+    day = month_match.group(1) if month_match else None
+    if quantity_match:
+        quantity = quantity_match.group(1)
+        months = int(quantity) if quantity.isdigit() else _NUMBER_WORDS[quantity]
+        day = quantity_match.group(2)
+
+    if months is None:
+        return None
+
+    target_month = _add_months(today.replace(day=1), months)
+    if not day:
+        return None
+    try:
+        return target_month.replace(day=int(day))
+    except ValueError:
+        return None
+
+
 def _resolve_period(question):
     today = datetime.date.today()
     normalized = _normalize_text(question)
@@ -564,6 +644,15 @@ def _resolve_period(question):
 
     if explicit_dates:
         return explicit_dates[0], explicit_dates[0], "data_informada"
+
+    if re.search(r"\b(?:semana\s+(?:que\s+vem|seguinte|proxima)|(?:proxima|seguinte)\s+semana)\b", normalized):
+        start = today + datetime.timedelta(days=7 - today.weekday())
+        return start, start + datetime.timedelta(days=6), "proxima_semana"
+
+    if re.search(r"\b(?:mes\s+(?:que\s+vem|seguinte|proximo)|(?:proximo|seguinte)\s+mes)\b", normalized):
+        start = _add_months(today.replace(day=1), 1)
+        end = _add_months(start, 1) - datetime.timedelta(days=1)
+        return start, end, "proximo_mes"
 
     if "amanha" in normalized:
         tomorrow = today + datetime.timedelta(days=1)
@@ -1101,10 +1190,9 @@ def _extract_dates_from_question(question):
     dates = []
     normalized = _normalize_text(question)
 
-    if "hoje" in normalized:
-        dates.append(datetime.date.today())
-    if "amanha" in normalized:
-        dates.append(datetime.date.today() + datetime.timedelta(days=1))
+    relative_date = _relative_date_from_question(question)
+    if relative_date:
+        dates.append(relative_date)
 
     for raw_date, formats in (
         (re.findall(r"\b\d{2}/\d{2}/\d{4}\b", question), ("%d/%m/%Y",)),
@@ -1138,13 +1226,9 @@ def _extract_dates_from_question(question):
 
 def _date_for_schedule_proposal(value, question):
     """Converts relative dates to ISO before an appointment proposal is sent."""
-    normalized_question = _normalize_text(question)
-    has_explicit_date = bool(re.search(r"\b\d{2}/\d{2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", question))
-    if not has_explicit_date:
-        if "amanha" in normalized_question:
-            return (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-        if "hoje" in normalized_question:
-            return datetime.date.today().isoformat()
+    relative_date = _relative_date_from_question(question)
+    if relative_date:
+        return relative_date.isoformat()
 
     parsed_date = _as_date(value)
     return parsed_date.isoformat() if parsed_date else str(value).strip()

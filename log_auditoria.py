@@ -15,10 +15,10 @@ from flask import current_app, g, request
 from db import _cliente_firebird, conexao
 
 
-_CAMPOS_SIGILOSOS = {'senha', 'confirmar_senha', 'token', 'authorization', 'acess_token'}
-_ROTAS_CONVERSA_IA = {'/ai/veritas'}
+CAMPOS_SIGILOSOS = {'senha', 'confirmar_senha', 'token', 'authorization', 'acess_token'}
+ROTAS_CONVERSA_IA = {'/ai/veritas'}
 
-_ARTIGOS = {
+ARTIGOS = {
     'AGENDAMENTOS': ('um', 'agendamento'),
     'ATUALIZACOES': ('uma', 'atualização'),
     'MODELOS_DOCUMENTOS': ('um', 'modelo de documento'),
@@ -31,7 +31,7 @@ _ARTIGOS = {
     'SISTEMA': ('uma', 'ação no sistema'),
 }
 
-_ACOES_HUMANAS = {
+ACOES_HUMANAS = {
     'CRIAR': 'criou',
     'EDITAR': 'editou',
     'EXCLUIR': 'removeu',
@@ -50,11 +50,11 @@ _ACOES_HUMANAS = {
 }
 
 
-def _eh_conversa_ia():
-    return request.path.rstrip('/').lower() in _ROTAS_CONVERSA_IA
+def eh_conversa_ia():
+    return request.path.rstrip('/').lower() in ROTAS_CONVERSA_IA
 
 
-def _eh_rota_log():
+def eh_rota_log():
     return '/logs/' in request.path.rstrip('/').lower()
 
 
@@ -72,29 +72,29 @@ def conexao_log():
     return fdb.connect(**parametros)
 
 
-def _normalizar_valor(valor):
+def normalizar_valor(valor):
     if isinstance(valor, (datetime, date, time)):
         return valor.isoformat()
     if isinstance(valor, dict):
         return {
-            str(chave): '***' if str(chave).lower() in _CAMPOS_SIGILOSOS else _normalizar_valor(item)
+            str(chave): '***' if str(chave).lower() in CAMPOS_SIGILOSOS else normalizar_valor(item)
             for chave, item in valor.items()
         }
     if isinstance(valor, (list, tuple)):
-        return [_normalizar_valor(item) for item in valor]
+        return [normalizar_valor(item) for item in valor]
     return valor
 
 
-def _dados_requisicao():
+def dados_requisicao():
     if request.is_json:
-        return _normalizar_valor(request.get_json(silent=True) or {})
+        return normalizar_valor(request.get_json(silent=True) or {})
     if request.form:
-        return _normalizar_valor(request.form.to_dict())
+        return normalizar_valor(request.form.to_dict())
     return {}
 
 
 @lru_cache(maxsize=256)
-def _nome_maquina_por_ip(ip):
+def nome_maquina_por_ip(ip):
     if not ip or ip in {'127.0.0.1', '::1'}:
         return None
     try:
@@ -104,7 +104,7 @@ def _nome_maquina_por_ip(ip):
         return None
 
 
-def _origem_dispositivo():
+def origem_dispositivo():
     nome_dispositivo = (request.headers.get('X-Client-Device') or '').strip()
     nome_dispositivo = re.sub(r'[\r\n]+', ' ', nome_dispositivo)[:120]
     if nome_dispositivo:
@@ -117,7 +117,7 @@ def _origem_dispositivo():
     agente = (request.headers.get('User-Agent') or '').lower()
     if any(termo in agente for termo in ('android', 'iphone', 'ipad', 'mobile')):
         return 'Celular (navegador)'
-    nome_maquina = _nome_maquina_por_ip(request.remote_addr)
+    nome_maquina = nome_maquina_por_ip(request.remote_addr)
     if nome_maquina:
         return nome_maquina
     if agente:
@@ -125,7 +125,7 @@ def _origem_dispositivo():
     return socket.gethostname()
 
 
-def _identificar_escritorio(id_usuario, dados, view_args):
+def identificar_escritorio(id_usuario, dados, view_args):
     for origem in (dados, view_args or {}):
         for chave in ('id_escritorio', 'id_escritorios', 'ID_ESCRITORIO', 'ID_ESCRITORIOS'):
             valor = origem.get(chave) if isinstance(origem, dict) else None
@@ -175,7 +175,7 @@ def _identificar_escritorio(id_usuario, dados, view_args):
         con.close()
 
 
-def _nome_usuario(id_usuario):
+def nome_usuario(id_usuario):
     if not id_usuario:
         return None
 
@@ -190,11 +190,11 @@ def _nome_usuario(id_usuario):
         con.close()
 
 
-def _descricao_evento():
+def descricao_evento():
     caminho = request.path.lower()
     argumentos = request.view_args or {}
     if re.fullmatch(r'/alterar_cargo_advogado/\d+/\d+', caminho):
-        novo_cargo = str((_dados_requisicao().get('status') or '')).upper()
+        novo_cargo = str((dados_requisicao().get('status') or '')).upper()
         acao = 'PROMOVER' if novo_cargo == 'PROPRIETARIO' else 'REBAIXAR'
         return acao, 'ADVOGADO_ESCRITORIO'
     if re.fullmatch(r'/processo/\d+/atualizacoes', caminho) and request.method == 'POST':
@@ -248,7 +248,7 @@ def _descricao_evento():
     return acao_por_metodo.get(request.method, request.method), tabela
 
 
-def _id_registro(view_args):
+def id_registro(view_args):
     # Em rotas aninhadas, o último identificador é o registro modificado.
     for chave in ('id_atualizacao', 'id_modelo', 'id_agendamento', 'id_processo', 'id_cliente', 'id_advogado', 'id_escritorio'):
         valor = (view_args or {}).get(chave)
@@ -273,7 +273,7 @@ def _id_registro(view_args):
     return None
 
 
-def _alvo_snapshot():
+def alvo_snapshot():
     argumentos = request.view_args or {}
     caminho = request.path.lower()
     if 'id_atualizacao' in argumentos:
@@ -306,13 +306,13 @@ def _alvo_snapshot():
             return 'USUARIOS', 'ID_USUARIOS = ?', (token['id_usuarios'],)
     if caminho == '/editar_escritorio':
         token = getattr(g, 'auditoria_token', None) or {}
-        id_escritorio = _identificar_escritorio(token.get('id_usuarios'), {}, argumentos)
+        id_escritorio = identificar_escritorio(token.get('id_usuarios'), {}, argumentos)
         if id_escritorio:
             return 'ESCRITORIOS', 'ID_ESCRITORIOS = ?', (id_escritorio,)
     return None
 
 
-def _buscar_snapshot(alvo):
+def buscar_snapshot(alvo):
     if not alvo:
         return None
     tabela, condicao, parametros = alvo
@@ -324,7 +324,7 @@ def _buscar_snapshot(alvo):
         if not linha:
             return None
         return {
-            descricao[0].strip(): _normalizar_valor(valor)
+            descricao[0].strip(): normalizar_valor(valor)
             for descricao, valor in zip(cur.description, linha)
         }
     finally:
@@ -333,17 +333,17 @@ def _buscar_snapshot(alvo):
 
 
 def preparar_requisicao(token_data):
-    if _eh_conversa_ia() or _eh_rota_log():
+    if eh_conversa_ia() or eh_rota_log():
         return
     g.auditoria_token = token_data or {}
     if request.method not in {'PUT', 'PATCH', 'DELETE'}:
         return
-    alvo = _alvo_snapshot()
+    alvo = alvo_snapshot()
     g.auditoria_alvo = alvo
-    g.auditoria_anterior = _buscar_snapshot(alvo)
+    g.auditoria_anterior = buscar_snapshot(alvo)
 
 
-def _valor_para_log(valor):
+def valor_para_log(valor):
     if valor is None:
         return None
     if isinstance(valor, (dict, list, tuple)):
@@ -351,37 +351,37 @@ def _valor_para_log(valor):
     return str(valor)
 
 
-def _alteracoes_registradas():
+def alteracoes_registradas():
     anterior = getattr(g, 'auditoria_anterior', None)
     alvo = getattr(g, 'auditoria_alvo', None)
     if not anterior or not alvo:
         return []
-    atual = _buscar_snapshot(alvo)
+    atual = buscar_snapshot(alvo)
     if not atual:
-        return [('REGISTRO', _valor_para_log(anterior), 'Removido')]
+        return [('REGISTRO', valor_para_log(anterior), 'Removido')]
     return [
-        (campo, _valor_para_log(valor_antigo), _valor_para_log(atual.get(campo)))
+        (campo, valor_para_log(valor_antigo), valor_para_log(atual.get(campo)))
         for campo, valor_antigo in anterior.items()
         if valor_antigo != atual.get(campo)
     ]
 
 
 def registrar_requisicao(token_data):
-    if request.path.startswith('/logs') or _eh_conversa_ia() or _eh_rota_log():
+    if request.path.startswith('/logs') or eh_conversa_ia() or eh_rota_log():
         return
 
-    dados = _dados_requisicao()
+    dados = dados_requisicao()
     view_args = request.view_args or {}
     id_usuario = token_data.get('id_usuarios') if token_data else None
-    id_escritorio = _identificar_escritorio(id_usuario, dados, view_args)
+    id_escritorio = identificar_escritorio(id_usuario, dados, view_args)
     if not id_escritorio:
         return
 
-    acao, tabela = _descricao_evento()
+    acao, tabela = descricao_evento()
     anterior = getattr(g, 'auditoria_anterior', None) or {}
     if tabela == 'ADVOGADO_ESCRITORIO' and acao == 'EXCLUIR':
-        id_advogado = anterior.get('ID_USUARIOS') or _id_registro(view_args)
-        nome_advogado = _nome_usuario(id_advogado) if id_advogado else None
+        id_advogado = anterior.get('ID_USUARIOS') or id_registro(view_args)
+        nome_advogado = nome_usuario(id_advogado) if id_advogado else None
         if nome_advogado:
             dados['advogado'] = {'nome': nome_advogado}
     detalhes = json.dumps({
@@ -392,7 +392,7 @@ def registrar_requisicao(token_data):
         'dados': dados,
     }, ensure_ascii=False, default=str)
 
-    alteracoes = _alteracoes_registradas()
+    alteracoes = alteracoes_registradas()
     if not alteracoes:
         alteracoes = [('REGISTRO', None, 'Criado' if request.method == 'POST' else 'Atualizado')]
 
@@ -411,9 +411,9 @@ def registrar_requisicao(token_data):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    id_escritorio, id_usuario, _nome_usuario(id_usuario), acao,
-                    tabela, _id_registro(view_args), campo, antigo, novo, detalhes,
-                    _origem_dispositivo(), request.remote_addr,
+                    id_escritorio, id_usuario, nome_usuario(id_usuario), acao,
+                    tabela, id_registro(view_args), campo, antigo, novo, detalhes,
+                    origem_dispositivo(), request.remote_addr,
                 )
             )
         con.commit()
@@ -426,13 +426,13 @@ def registrar_requisicao(token_data):
             con.close()
 
 
-def _texto_blob(valor):
+def texto_blob(valor):
     if valor is None:
         return None
     return valor.read() if hasattr(valor, 'read') else str(valor)
 
 
-def _buscar_cargo_advogado(id_usuario, id_escritorio):
+def buscar_cargo_advogado(id_usuario, id_escritorio):
     if not id_usuario or not id_escritorio:
         return None
 
@@ -454,8 +454,8 @@ def _buscar_cargo_advogado(id_usuario, id_escritorio):
         con.close()
 
 
-def _buscar_cargo_usuario(id_usuario, id_escritorio):
-    cargo_advogado = _buscar_cargo_advogado(id_usuario, id_escritorio)
+def buscar_cargo_usuario(id_usuario, id_escritorio):
+    cargo_advogado = buscar_cargo_advogado(id_usuario, id_escritorio)
     if cargo_advogado:
         return cargo_advogado
 
@@ -476,18 +476,18 @@ def _buscar_cargo_usuario(id_usuario, id_escritorio):
         con.close()
 
 
-def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
+def descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
                       cargo=None, id_usuario=None, detalhes=None):
     nome = nome or 'O sistema'
-    acao_txt = _ACOES_HUMANAS.get((acao or '').upper(), f'{(acao or "").lower()}')
+    acao_txt = ACOES_HUMANAS.get((acao or '').upper(), f'{(acao or "").lower()}')
 
     if acao == 'LOGIN':
         return f'{nome} entrou no sistema.'
 
-    if tabela not in _ARTIGOS:
+    if tabela not in ARTIGOS:
         return f'{nome} {acao_txt} {tabela or "um registro"}.'
 
-    alvo = _alvo_com_artigo(tabela, id_registro, detalhes)
+    alvo = alvo_com_artigo(tabela, id_registro, detalhes)
 
     if acao == 'GERAR_PDF':
         return f'{nome} {acao_txt} {alvo}.'
@@ -542,8 +542,8 @@ def _descricao_humana(nome, acao, tabela, id_registro, campo, valor_novo,
     return f'{nome} {acao_txt} {alvo}.'
 
 
-def _alvo_humano(tabela, id_registro, detalhes=None):
-    _, substantivo = _ARTIGOS.get(tabela, ('um', (tabela or 'registro').lower()))
+def alvo_humano(tabela, id_registro, detalhes=None):
+    _, substantivo = ARTIGOS.get(tabela, ('um', (tabela or 'registro').lower()))
     alvo = substantivo
 
     if tabela == 'ATUALIZACOES':
@@ -553,7 +553,7 @@ def _alvo_humano(tabela, id_registro, detalhes=None):
             rota = (detalhes or {}).get('rota') or ''
             correspondencia = re.search(r'/processo/(\d+)/atualizacoes', rota)
             id_processo = correspondencia.group(1) if correspondencia else None
-        titulo_atualizacao, numero_processo = _referencia_atualizacao(
+        titulo_atualizacao, numero_processo = referencia_atualizacao(
             id_registro, id_processo
         )
         if titulo_atualizacao:
@@ -569,7 +569,7 @@ def _alvo_humano(tabela, id_registro, detalhes=None):
 
 
 @lru_cache(maxsize=512)
-def _referencia_atualizacao(id_atualizacao, id_processo):
+def referencia_atualizacao(id_atualizacao, id_processo):
     if not id_atualizacao or not id_processo:
         return None, None
 
@@ -603,7 +603,7 @@ def _referencia_atualizacao(id_atualizacao, id_processo):
 
 
 @lru_cache(maxsize=512)
-def _referencia_agendamento(id_agendamento):
+def referencia_agendamento(id_agendamento):
     if not id_agendamento:
         return None
 
@@ -626,8 +626,8 @@ def _referencia_agendamento(id_agendamento):
         return {
             'cliente': linha[0],
             'assunto': linha[1],
-            'data': _normalizar_valor(linha[2]),
-            'horario': _normalizar_valor(linha[3]),
+            'data': normalizar_valor(linha[2]),
+            'horario': normalizar_valor(linha[3]),
             'duracao': linha[4],
             'status': linha[5],
         }
@@ -645,7 +645,7 @@ def _referencia_agendamento(id_agendamento):
 
 
 @lru_cache(maxsize=512)
-def _referencia_advogado_escritorio(id_advogado, id_escritorio):
+def referencia_advogado_escritorio(id_advogado, id_escritorio):
     if not id_advogado or not id_escritorio:
         return None
 
@@ -676,13 +676,12 @@ def _referencia_advogado_escritorio(id_advogado, id_escritorio):
             con.close()
 
 
-def _alvo_com_artigo(tabela, id_registro, detalhes=None):
-    artigo, _ = _ARTIGOS.get(tabela, ('um', (tabela or 'registro').lower()))
-    return f'{artigo} {_alvo_humano(tabela, id_registro, detalhes)}'
+def alvo_com_artigo(tabela, id_registro, detalhes=None):
+    artigo, _ = ARTIGOS.get(tabela, ('um', (tabela or 'registro').lower()))
+    return f'{artigo} {alvo_humano(tabela, id_registro, detalhes)}'
 
 
-def _agrupar_eventos(todos):
-    """Reúne as mudanças criadas por uma única requisição."""
+def agrupar_eventos(todos):
     eventos = {}
     agrupados = []
 
@@ -720,7 +719,7 @@ def _agrupar_eventos(todos):
             campos = ', '.join(item['campo'].replace('_', ' ').lower() for item in alteracoes)
             log['descricao_humana'] = (
                 f"{log['nome_usuario'] or 'O sistema'} editou "
-                f"{len(alteracoes)} campos em {_alvo_com_artigo(log['tabela_afetada'], log['id_registro_afetado'], detalhes)}: "
+                f"{len(alteracoes)} campos em {alvo_com_artigo(log['tabela_afetada'], log['id_registro_afetado'], detalhes)}: "
                 f"{campos}."
             )
 
@@ -781,9 +780,9 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
             tabela_afetada = linha[4]
             id_registro_afetado = linha[5]
             campo = linha[6]
-            valor_novo = _texto_blob(linha[8])
-            cargo = _buscar_cargo_usuario(linha[1], id_escritorio)
-            detalhes_brutos = _texto_blob(linha[9])
+            valor_novo = texto_blob(linha[8])
+            cargo = buscar_cargo_usuario(linha[1], id_escritorio)
+            detalhes_brutos = texto_blob(linha[9])
             try:
                 detalhes = json.loads(detalhes_brutos or '{}')
             except (TypeError, json.JSONDecodeError):
@@ -818,7 +817,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
 
             try:
                 if tabela_afetada == 'AGENDAMENTOS':
-                    agendamento = _referencia_agendamento(id_registro_afetado)
+                    agendamento = referencia_agendamento(id_registro_afetado)
                     if agendamento:
                         dados_evento = detalhes.get('dados')
                         dados_evento = dados_evento if isinstance(dados_evento, dict) else {}
@@ -834,7 +833,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                     'ATIVAR', 'INATIVAR', 'EXCLUIR', 'PROMOVER', 'REBAIXAR'
                 }:
                     parametros = detalhes.get('parametros_rota') or {}
-                    referencia_advogado = _referencia_advogado_escritorio(
+                    referencia_advogado = referencia_advogado_escritorio(
                         id_registro_afetado, parametros.get('id_escritorio')
                     )
                     if referencia_advogado:
@@ -860,14 +859,14 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
                 'tabela_afetada': tabela_afetada,
                 'id_registro_afetado': id_registro_afetado,
                 'campo': campo,
-                'valor_antigo': _texto_blob(linha[7]),
+                'valor_antigo': texto_blob(linha[7]),
                 'valor_novo': valor_novo,
                 'detalhes': detalhes_brutos,
                 'data_hora': linha[10].isoformat() if linha[10] else None,
                 'maquina': linha[11],
                 'ip_origem': linha[12],
                 'cargo': cargo,
-                'descricao_humana': _descricao_humana(
+                'descricao_humana': descricao_humana(
                     nome_usuario, acao, tabela_afetada,
                     id_registro_afetado, campo, valor_novo,
                     cargo, linha[1], detalhes
@@ -881,7 +880,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
         if advogado:
             todos = [log for log in todos if log['nome_usuario'] == advogado]
 
-        todos = _agrupar_eventos(todos)
+        todos = agrupar_eventos(todos)
 
         total = len(todos)
         total_paginas = max(1, math.ceil(total / por_pagina)) if total > 0 else 1
@@ -906,7 +905,7 @@ def listar_logs(id_escritorio, limite=200, data_inicio=None, data_fim=None, advo
         con.close()
 
 
-def _texto_pdf_log(valor, tamanho=None):
+def texto_pdf_log(valor, tamanho=None):
     texto = '-' if valor in (None, '') else str(valor)
     texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('ascii')
     if tamanho and len(texto) > tamanho:
@@ -914,7 +913,7 @@ def _texto_pdf_log(valor, tamanho=None):
     return texto
 
 
-def _resumo_alteracoes_pdf(log):
+def resumo_alteracoes_pdf(log):
     alteracoes = log.get('alteracoes') or [{
         'campo': log.get('campo'),
         'valor_antigo': log.get('valor_antigo'),
@@ -925,14 +924,14 @@ def _resumo_alteracoes_pdf(log):
         campo_original = str(alteracao.get('campo') or '')
         if campo_original.lower() == 'id' or campo_original.lower().startswith('id_'):
             continue
-        campo = _texto_pdf_log(campo_original)
-        antigo = _texto_pdf_log(alteracao.get('valor_antigo'))
-        novo = _texto_pdf_log(alteracao.get('valor_novo'))
+        campo = texto_pdf_log(campo_original)
+        antigo = texto_pdf_log(alteracao.get('valor_antigo'))
+        novo = texto_pdf_log(alteracao.get('valor_novo'))
         partes.append(f'{campo}: {antigo} -> {novo}')
     return ' | '.join(partes)
 
 
-_ROTULOS_PDF_LOG = {
+ROTULOS_PDF_LOG = {
     'id_advogado': 'Advogado',
     'id_advogado_2': 'Segundo advogado',
     'id_cliente': 'Cliente',
@@ -957,45 +956,45 @@ _ROTULOS_PDF_LOG = {
 }
 
 
-def _rotulo_pdf_log(chave):
-    return _ROTULOS_PDF_LOG.get(
+def rotulo_pdf_log(chave):
+    return ROTULOS_PDF_LOG.get(
         str(chave), str(chave).replace('_', ' ').capitalize()
     )
 
 
-def _linhas_detalhes_pdf(valor, prefixo=''):
+def linhas_detalhes_pdf(valor, prefixo=''):
     """Converte os detalhes JSON de um log em linhas legiveis para o PDF."""
     if isinstance(valor, dict):
         linhas = []
         for chave, item in valor.items():
             chave_normalizada = str(chave).lower()
             if (
-                chave_normalizada in _CAMPOS_SIGILOSOS
+                chave_normalizada in CAMPOS_SIGILOSOS
                 or chave_normalizada == 'id_evento'
                 or chave_normalizada == 'id'
                 or chave_normalizada.startswith('id_')
             ):
                 continue
-            rotulo = _rotulo_pdf_log(chave)
+            rotulo = rotulo_pdf_log(chave)
             caminho = f'{prefixo} - {rotulo}' if prefixo else rotulo
             if isinstance(item, (dict, list, tuple)):
-                linhas.extend(_linhas_detalhes_pdf(item, caminho))
+                linhas.extend(linhas_detalhes_pdf(item, caminho))
             elif item not in (None, ''):
                 if str(chave).lower() == 'ativo':
                     item = 'Ativado' if str(item).lower() in {'1', 'true'} else 'Desativado'
-                linhas.append(f'{caminho}: {_texto_pdf_log(item, 500)}')
+                linhas.append(f'{caminho}: {texto_pdf_log(item, 500)}')
         return linhas
 
     if isinstance(valor, (list, tuple)):
         linhas = []
         for indice, item in enumerate(valor, start=1):
-            linhas.extend(_linhas_detalhes_pdf(item, f'{prefixo} {indice}'.strip()))
+            linhas.extend(linhas_detalhes_pdf(item, f'{prefixo} {indice}'.strip()))
         return linhas
 
-    return [f'{prefixo}: {_texto_pdf_log(valor, 500)}'] if valor not in (None, '') else []
+    return [f'{prefixo}: {texto_pdf_log(valor, 500)}'] if valor not in (None, '') else []
 
 
-def _detalhes_pdf_log(log):
+def detalhes_pdf_log(log):
     try:
         detalhes = json.loads(log.get('detalhes') or '{}')
     except (TypeError, json.JSONDecodeError):
@@ -1006,7 +1005,7 @@ def _detalhes_pdf_log(log):
     linhas = []
     dados = detalhes.get('dados')
     if isinstance(dados, dict):
-        linhas.extend(_linhas_detalhes_pdf(dados))
+        linhas.extend(linhas_detalhes_pdf(dados))
     return linhas
 
 
@@ -1044,7 +1043,7 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
     pdf.set_fill_color(237, 244, 255)
     pdf.set_text_color(0, 71, 171)
     pdf.set_font('Helvetica', 'B', 11)
-    pdf.cell(0, 8, _texto_pdf_log(titulo, 80), fill=True, new_x='LMARGIN', new_y='NEXT')
+    pdf.cell(0, 8, texto_pdf_log(titulo, 80), fill=True, new_x='LMARGIN', new_y='NEXT')
     pdf.set_text_color(35, 35, 35)
     pdf.ln(4)
 
@@ -1083,7 +1082,7 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
         data_hora = log.get('data_hora') or ''
         data = f'{data_hora[8:10]}/{data_hora[5:7]}/{data_hora[:4]}' if len(data_hora) >= 10 else '-'
         hora = data_hora[11:16] if len(data_hora) >= 16 else '-'
-        registro = _alvo_humano(
+        registro = alvo_humano(
             log.get('tabela_afetada'),
             log.get('id_registro_afetado'),
         )
@@ -1092,7 +1091,7 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
             log.get('acao'),
             registro,
             f'{data} {hora}',
-            log.get('descricao_humana') or _resumo_alteracoes_pdf(log),
+            log.get('descricao_humana') or resumo_alteracoes_pdf(log),
             log.get('ip_origem'),
         ]
 
@@ -1101,7 +1100,7 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
         else:
             pdf.set_fill_color(255, 255, 255)
         for (_, largura, limite), valor in zip(colunas, valores):
-            pdf.cell(largura, 8, _texto_pdf_log(valor, limite), border=1, fill=True)
+            pdf.cell(largura, 8, texto_pdf_log(valor, limite), border=1, fill=True)
         pdf.ln()
 
     pdf.add_page()
@@ -1118,14 +1117,14 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
             f'{data_hora[8:10]}/{data_hora[5:7]}/{data_hora[:4]} {data_hora[11:16]}'
             if len(data_hora) >= 16 else '-'
         )
-        registro = _alvo_humano(
+        registro = alvo_humano(
             log.get('tabela_afetada'), log.get('id_registro_afetado')
         )
-        alteracoes = _resumo_alteracoes_pdf(log)
-        detalhes = _detalhes_pdf_log(log)
+        alteracoes = resumo_alteracoes_pdf(log)
+        detalhes = detalhes_pdf_log(log)
         cabecalho = (
             f'Ação {indice} | {log.get("acao") or "Acao"} | '
-            f'{_texto_pdf_log(log.get("nome_usuario") or "Sistema", 80)}'
+            f'{texto_pdf_log(log.get("nome_usuario") or "Sistema", 80)}'
         )
         altura_estimada = 34 + min(90, 4 * (len(detalhes) + max(1, len(alteracoes) // 105)))
         if pdf.get_y() + altura_estimada > 186:
@@ -1134,18 +1133,18 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
         pdf.set_fill_color(0, 71, 171)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font('Helvetica', 'B', 8)
-        pdf.cell(0, 6, _texto_pdf_log(cabecalho, 180), fill=True, new_x='LMARGIN', new_y='NEXT')
+        pdf.cell(0, 6, texto_pdf_log(cabecalho, 180), fill=True, new_x='LMARGIN', new_y='NEXT')
         pdf.set_text_color(35, 35, 35)
         pdf.set_font('Helvetica', '', 8)
         resumo = log.get('descricao_humana') or 'Acao registrada no sistema.'
         pdf.multi_cell(
-            0, 4.5, f'Resumo: {_texto_pdf_log(resumo, 900)}', border=1,
+            0, 4.5, f'Resumo: {texto_pdf_log(resumo, 900)}', border=1,
             new_x='LMARGIN', new_y='NEXT',
         )
         pdf.multi_cell(
             0,
             4.5,
-            _texto_pdf_log(
+            texto_pdf_log(
                 f'Registro afetado: {registro}\n'
                 f'Data e hora: {data_hora_legivel}\n'
                 f'Cargo: {log.get("cargo") or "--"}\n'
@@ -1162,7 +1161,7 @@ def gerar_pdf_logs(logs, titulo='Log do escritorio'):
             pdf.cell(0, 5, 'Alteracoes registradas', border='LTR', new_x='LMARGIN', new_y='NEXT')
             pdf.set_font('Helvetica', '', 8)
             pdf.multi_cell(
-                0, 4.5, _texto_pdf_log(alteracoes, 1400), border='LBR',
+                0, 4.5, texto_pdf_log(alteracoes, 1400), border='LBR',
                 new_x='LMARGIN', new_y='NEXT',
             )
         if detalhes:
