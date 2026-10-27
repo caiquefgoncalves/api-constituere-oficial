@@ -13,8 +13,8 @@ def conexao():
 
             token_data = decodificar_token()
 
-            if isinstance(token_data, dict):
-                autor_id = token_data.get('id_usuarios')
+            if token_data:
+                autor_id = token_data['id_usuarios']
 
         except Exception as erro:
             current_app.logger.warning(

@@ -1,4 +1,4 @@
-from flask import Flask, send_from_directory, jsonify, request, make_response
+from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
 import os
 from flask_socketio import SocketIO, join_room, leave_room, emit
@@ -59,17 +59,6 @@ socketio = SocketIO(
     async_mode="threading",
     transports=["polling"]
 )
-
-@app.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        response = make_response()
-        response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', ''))
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Allow-Headers',
-                             'Content-Type, Authorization, X-Requested-With, X-Access-Token, X-Client-Platform, X-Client-Device')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        return response
 
 app.config.from_pyfile('config.py')
 
