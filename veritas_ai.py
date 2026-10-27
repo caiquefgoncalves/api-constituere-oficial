@@ -43,6 +43,25 @@ DOMINIOS_JURIDICOS_OFICIAIS = {
     "tst.jus.br", "jurisprudencia.tst.jus.br", "tse.jus.br", "jurisprudencia.tse.jus.br",
     "cnj.jus.br", "www.cnj.jus.br", "lexml.gov.br", "www.lexml.gov.br",
 }
+PROGRAMMING_KEYWORDS = (
+    "codigo", "programacao", "programar", "python", "javascript", "typescript",
+    "html", "css", "sql", "script", "função", "funcao", "classe", "class ",
+    "algoritmo", "api ", "endpoint", "react", "flask", "node.js", "nodejs",
+)
+
+OUT_OF_SCOPE_MESSAGE = (
+    "Posso ajudar somente com perguntas jurídicas e com os serviços autorizados "
+    "do Constituere, como consultar e administrar agendamentos, clientes e parceiros."
+)
+
+LEGAL_SCOPE_KEYWORDS = (
+    "juridico", "juridica", "juridicos", "juridicas", "direito", "direitos",
+    "lei", "leis", "legal", "tribunal", "juiz", "juiza", "audiencia",
+    "sentenca", "acordao", "jurisprudencia", "sumula", "peticao", "recurso",
+    "prazo", "contrato", "contratos", "clt", "constituicao", "processar",
+    "indenizacao", "divorcio", "heranca", "inventario", "trabalhista",
+)
+
 SCHEDULE_TOOLS = [
     {"type": "function", "function": {"name": "gerar_pagamento_pix", "description": "Propõe gerar uma cobrança Pix para uma parcela em aberto do próprio cliente.", "parameters": {"type": "object", "properties": {"id_parcela": {"type": "integer"}, "tipo_parcela": {"type": "string", "enum": ["prolabore", "exito"]}}, "required": ["id_parcela", "tipo_parcela"]}}},
     {"type": "function", "function": {"name": "cadastrar_cliente", "description": "Propõe cadastrar cliente pessoa física ou jurídica para o advogado ou proprietário. Para pessoa física, data_nascimento e sexo também são obrigatórios. Para pessoa jurídica, razao_social e nome_fantasia também são obrigatórios.", "parameters": {"type": "object", "properties": {"tipo": {"type": "integer", "enum": [2, 3]}, "nome": {"type": "string"}, "email": {"type": "string"}, "telefone": {"type": "string"}, "cpf_cnpj": {"type": "string"}, "senha": {"type": "string"}, "confirmar_senha": {"type": "string"}, "data_nascimento": {"type": "string"}, "sexo": {"type": "string"}, "razao_social": {"type": "string"}, "nome_fantasia": {"type": "string"}}, "required": ["tipo", "nome", "email", "telefone", "cpf_cnpj", "senha", "confirmar_senha"]}}},
@@ -371,6 +390,11 @@ def _contains_any_word(text, keywords):
     )
 
 
+def _is_programming_request(question):
+    normalized = _normalize_text(question)
+    return any(keyword in normalized for keyword in PROGRAMMING_KEYWORDS)
+
+
 def _is_duration_reply(question):
     """Recognizes common standalone duration formats used in appointment flows."""
     normalized = _normalize_text(question)
@@ -500,6 +524,36 @@ def _is_pending_workflow_reply(question, history):
         "previsao", "previsão", "receita",
     )
     return not _contains_any_word(normalized, unrelated_requests)
+
+
+def _is_in_scope_request(question, history):
+    """Rejects casual requests before they reach the language model."""
+    normalized = _normalize_text(question)
+    is_system_request = (
+        _question_mentions_schedule(question)
+        or _question_requests_schedule_mutation(question)
+        or _question_mentions_cases(question)
+        or _question_mentions_contacts(question)
+        or _question_mentions_payments(question)
+        or _question_requests_log_pdf(question)
+        or _question_requests_log_deletion(question)
+        or _question_requests_office_lawyer_addition(question)
+        or _question_requests_lawyer_deactivation(question)
+        or _question_requests_lawyer_activation(question)
+        or _question_requests_lawyer_triage(question)
+        or _question_requests_office_edit(question)
+        or _question_requests_office_overview(question)
+        or _question_requests_own_profile_edit(question)
+        or _contains_any_word(normalized, ("relatorio", "relatorios", "fatura", "faturas", "cpf", "cnpj", "email", "e-mail"))
+    )
+    return (
+        is_system_request
+        or _contains_any_word(normalized, LEGAL_SCOPE_KEYWORDS)
+        or _is_schedule_detail_reply(question, history)
+        or _is_schedule_reason_reply(question, history)
+        or _is_client_registration_detail_reply(question, history)
+        or _is_pending_workflow_reply(question, history)
+    )
 
 
 _WEEKDAYS = {
@@ -3010,7 +3064,6 @@ Quando parcelas_pagaveis estiver disponível, o cliente pode pedir para pagar um
 Quando houver resumo_geral_escritorio, apresente ao proprietário somente os totais agregados do escritório, sem expor dados pessoais ou financeiros individuais.
 Responda em portugues brasileiro, com linguagem clara e objetiva.
 Use texto simples e linhas numeradas em listas. Você pode usar **texto** para dar ênfase; os asteriscos duplos serão exibidos em negrito. Não use parênteses vazios. Ao listar clientes, escreva o nome seguido de “— CPF/CNPJ: ” e o documento formatado, se disponível.
-Antes de responder, avalie silenciosamente o sentido completo do pedido, sem depender de listas fixas de palavras. Considere dentro do escopo qualquer pergunta, explicação ou orientação jurídica, mesmo que use termos técnicos, expressões em latim ou nomes de medidas judiciais, além das operações autorizadas do Constituere. Considere fora do escopo pedidos casuais, entretenimento, conteúdo pessoal, programação ou instruções técnicas. Não exponha esse raciocínio interno: responda diretamente à pergunta jurídica ou recuse brevemente o pedido fora do escopo.
 Seu escopo é exclusivamente responder perguntas jurídicas e operar os serviços autorizados do Constituere. Recuse, de forma breve, qualquer pedido casual ou de entretenimento que não se relacione a esse escopo, incluindo emojis, mensagens pessoais, jogos, histórias, traduções e recomendações gerais.
 Nunca forneça código, trechos de programação, scripts, SQL, HTML, CSS, configurações técnicas ou instruções de desenvolvimento, mesmo que o usuário insista. Para esses pedidos, informe brevemente que estão fora do seu escopo.
 Voce pode explicar conceitos juridicos, organizar raciocinios e apontar proximos passos.
@@ -3136,8 +3189,14 @@ def perguntar_veritas():
     if len(question) > 4000:
         return jsonify({"error": "Pergunta ultrapassa o limite permitido"}), 400
 
+    if _is_programming_request(question):
+        return jsonify({"assistant": ASSISTANT_NAME, "resposta": OUT_OF_SCOPE_MESSAGE}), 200
+
     try:
         history = _sanitize_history(payload.get("historico"))
+        if not _is_in_scope_request(question, history):
+            return jsonify({"assistant": ASSISTANT_NAME, "resposta": OUT_OF_SCOPE_MESSAGE}), 200
+
         context_question = _question_with_history(question, history)
         context_started = time.perf_counter()
         authorized_context = _build_authorized_context(

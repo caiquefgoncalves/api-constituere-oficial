@@ -5948,6 +5948,59 @@ def confirmar_pagamento_pix(id_parcela, tipo_parcela):
         cur.close()
         con.close()
 
+@app.route('/cliente/pagamento/conta', methods=['GET'])
+def verificar_conta():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    if not ARKHE_CLIENT_ID or not ARKHE_CLIENT_SECRET:
+        return jsonify({'error': 'Pagamento Pix não configurado'}), 503
+
+    id_cliente = token_data['id_usuarios']
+
+    con = conexao()
+    cur = con.cursor()
+
+    cur.execute("""SELECT CPF FROM USUARIOS WHERE ID_USUARIOS = ?""", (id_cliente,))
+    cpf = str(cur.fetchone()[0])
+    cpf = f"{cpf[:3]}.{cpf[3:6]}.{cpf[6:9]}-{cpf[9:]}"
+
+    if not cpf:
+        return jsonify({'error': 'CPF é obrigatório'}), 400
+
+    try:
+        resposta = requests.post(
+            f"{ARKHE_URL}/contas/verificar-cpf",
+            headers=headers_arkhe(),
+            json={"cpf": cpf},
+            timeout=15
+        )
+
+        if resposta.status_code >= 400:
+            print(resposta)
+            return jsonify({'error': f'Erro ao verificar a conta ({resposta.status_code})'}), 400
+
+        dados_arkhe = resposta.json()
+        sucesso = dados_arkhe.get('possui_conta')
+        print(dados_arkhe)
+
+        return jsonify({'sucesso': sucesso
+        }), 200
+
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Tempo esgotado ao conectar com a Arkhé'}), 504
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Erro interno'}), 500
+
+
 
 @app.route('/cliente/pagamento/pix', methods=['POST'])
 def criar_cobranca_pix():

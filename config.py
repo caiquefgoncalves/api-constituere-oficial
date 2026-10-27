@@ -6,12 +6,12 @@ DEBUG = True
 
 DB_HOST = 'localhost'
 DB_USER = 'sysdba'
-DB_PASSWORD = 'SYSDBA'
+DB_PASSWORD = 'sysdba'
 
 DB_NAME = str(Path(__file__).with_name('BANCO_CONSTITUERE.FDB'))
 
 LOG_DB_NAME = str(Path(__file__).with_name('Log.FDB'))
 LOG_DB_USER = 'sysdba'
-LOG_DB_PASSWORD = 'SYSDBA'
+LOG_DB_PASSWORD = 'sysdba'
 
 UPLOAD_FOLDER = os.path.abspath(os.path.dirname(__file__))

@@ -5,16 +5,16 @@ from flask import current_app, has_request_context, g
 def conexao():
     autor_id = None
 
-    if has_request_context() and not getattr(g, '_lendo_token_auditoria', False):
+    if has_request_context() and not getattr(g, 'lendo_token_auditoria', False):
         try:
-            g._lendo_token_auditoria = True
+            g.lendo_token_auditoria = True
 
             from funcao import decodificar_token
 
             token_data = decodificar_token()
 
-            if token_data:
-                autor_id = token_data['id_usuarios']
+            if isinstance(token_data, dict):
+                autor_id = token_data.get('id_usuarios')
 
         except Exception as erro:
             current_app.logger.warning(
@@ -22,7 +22,7 @@ def conexao():
             )
 
         finally:
-            g._lendo_token_auditoria = False
+            g.lendo_token_auditoria = False
 
     con = fdb.connect(
         host=current_app.config['DB_HOST'],
