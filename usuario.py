@@ -2,7 +2,7 @@ from flask import jsonify, request, make_response, send_file
 from funcao import *
 from flask_bcrypt import generate_password_hash, check_password_hash
 from main import app, socketio
-from db import conexao
+from db import conexao, conexao_log
 import os
 import datetime
 from io import BytesIO
@@ -10,143 +10,512 @@ import concurrent.futures
 import time
 from consulta_cnsa import consultar_cnsa
 from consulta_oab import consultar_oab
-from log_auditoria import gerar_pdf_logs, listar_logs
+from fpdf import FPDF
+from io import BytesIO
+import unicodedata
+
+
+
 
 @app.route('/escritorio/<int:id_escritorio>/logs', methods=['GET'])
 def listar_logs_escritorio(id_escritorio):
     token_data = decodificar_token()
-    if token_data == False:
+
+    if not token_data:
         return jsonify({'error': 'Token necessário'}), 401
 
     if token_data['tipo'] != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
-    con = conexao()
-    cur = con.cursor()
+    con_principal = None
+    cur_principal = None
+    con_log = None
+    cur_log = None
+
     try:
-        cur.execute(
-            """
+        con_principal = conexao()
+        cur_principal = con_principal.cursor()
+
+        cur_principal.execute("""
             SELECT 1
             FROM ADVOGADO_ESCRITORIO
             WHERE ID_USUARIOS = ?
               AND ID_ESCRITORIOS = ?
               AND STATUS = 'PROPRIETARIO'
               AND ATIVO = 1
-            """,
-            (token_data['id_usuarios'], id_escritorio)
-        )
-        if not cur.fetchone():
-            return jsonify({'error': 'Apenas o proprietário pode consultar os logs'}), 403
+        """, (
+            token_data['id_usuarios'],
+            id_escritorio
+        ))
+
+        if not cur_principal.fetchone():
+            return jsonify({
+                'error': 'Apenas o proprietário pode consultar os logs'
+            }), 403
+
+        con_log = conexao_log()
+        cur_log = con_log.cursor()
+
+        cur_log.execute("""
+            SELECT FIRST 500
+                ID_LOG,
+                ID_USUARIO,
+                NOME_USUARIO,
+                ACAO,
+                TABELA_AFETADA,
+                ID_REGISTRO_AFETADO,
+                CAMPO,
+                VALOR_ANTIGO,
+                VALOR_NOVO,
+                DETALHES,
+                DATA_HORA,
+                MAQUINA,
+                IP_ORIGEM
+            FROM LOG_AUDITORIA
+            WHERE ID_ESCRITORIO = ?
+            ORDER BY DATA_HORA DESC, ID_LOG DESC
+        """, (id_escritorio,))
+
+        rows = cur_log.fetchall()
+
+        def texto(valor):
+            if valor is None:
+                return ''
+
+            if hasattr(valor, 'read'):
+                valor = valor.read()
+
+            if isinstance(valor, bytes):
+                return valor.decode('utf-8', errors='replace')
+
+            return str(valor)
+
+        def parse_valores(valor):
+            resultado = {}
+
+            ignorados = {
+                'ID_USUARIOS',
+                'ID_USUARIO_RESPONSAVEL',
+                'DATA_CADASTRO',
+                'PRIMEIRO_ACESSO',
+                'SENHA'
+            }
+
+            conteudo = texto(valor)
+
+            for parte in conteudo.replace('\r', '').replace('\n', ' ').split(' | '):
+                parte = parte.strip()
+
+                if ':' not in parte:
+                    continue
+
+                chave, valor_campo = parte.split(':', 1)
+
+                chave = chave.strip().upper()
+                valor_campo = valor_campo.strip()
+
+                if chave in ignorados:
+                    continue
+
+                if valor_campo == '[PROTEGIDO]':
+                    continue
+
+                if not valor_campo or valor_campo.upper() == 'NULL':
+                    valor_campo = '(Vazio)'
+
+                resultado[chave] = valor_campo
+
+            return resultado
+
+        def obter_mudancas(antigo, novo):
+            mudancas = []
+
+            campos = list(dict.fromkeys([
+                *antigo.keys(),
+                *novo.keys()
+            ]))
+
+            for campo in campos:
+                antes = antigo.get(campo, '(Vazio)')
+                depois = novo.get(campo, '(Vazio)')
+
+                if antes != depois:
+                    mudancas.append({
+                        'campo': campo,
+                        'antes': antes,
+                        'depois': depois
+                    })
+
+            return mudancas
+
+        def obter_autor_id(detalhes):
+            for linha in detalhes.replace('\r', '').split('\n'):
+                chave, separador, valor = linha.partition(':')
+
+                if separador and chave.strip().upper() == 'AUTOR_ID':
+                    try:
+                        autor_id = int(valor.strip())
+
+                        if autor_id > 0:
+                            return autor_id
+
+                    except (ValueError, TypeError):
+                        pass
+
+            return None
+
+        dados_logs = []
+        ids_usuarios = set()
+
+        for row in rows:
+            detalhes = texto(row[9])
+            autor_id = obter_autor_id(detalhes)
+            tabela = texto(row[4]).strip().upper()
+
+            dados_logs.append({
+                'row': row,
+                'detalhes': detalhes,
+                'autor_id': autor_id,
+                'tabela': tabela
+            })
+
+            if tabela == 'USUARIOS' and row[5] is not None:
+                ids_usuarios.add(row[5])
+
+            if autor_id:
+                ids_usuarios.add(autor_id)
+
+        nomes = {}
+
+        lista_ids = sorted(ids_usuarios)
+
+        for inicio in range(0, len(lista_ids), 200):
+            lote = lista_ids[inicio:inicio + 200]
+
+            placeholders = ','.join('?' for _ in lote)
+
+            cur_principal.execute(f"""
+                SELECT ID_USUARIOS, NOME
+                FROM USUARIOS
+                WHERE ID_USUARIOS IN ({placeholders})
+            """, tuple(lote))
+
+            for registro in cur_principal.fetchall():
+                nomes[registro[0]] = registro[1]
+
+        logs = []
+
+        for item in dados_logs:
+            row = item['row']
+            detalhes = item['detalhes']
+            autor_id = item['autor_id']
+            tabela = item['tabela']
+
+            id_registro = row[5]
+            acao = texto(row[3]).upper() or 'DESCONHECIDO'
+
+            origem_sistema = 'ORIGEM: SISTEMA' in detalhes
+            origem_banco = 'ORIGEM: BANCO_DIRETO' in detalhes
+
+            if origem_banco:
+                nome_usuario = 'Alterado diretamente no banco'
+                cargo = 'Banco de dados'
+                id_usuario = 0
+                origem = 'BANCO_DIRETO'
+
+            elif origem_sistema:
+                id_usuario = autor_id or 0
+                cargo = 'Sistema'
+                origem = 'SISTEMA'
+
+                if autor_id:
+                    nome_usuario = nomes.get(
+                        autor_id,
+                        f'Usuário #{autor_id}'
+                    )
+                else:
+                    nome_usuario = 'Sistema (autor não identificado)'
+
+            else:
+                nome_usuario = 'Origem não identificada'
+                cargo = 'Não identificado'
+                id_usuario = 0
+                origem = 'DESCONHECIDA'
+
+            if tabela == 'USUARIOS':
+                nome_alvo = (
+                    nomes.get(id_registro)
+                    or texto(row[2])
+                    or f'Registro #{id_registro}'
+                )
+            else:
+                nome_alvo = f'Registro #{id_registro}'
+
+            antigo = parse_valores(row[7])
+            novo = parse_valores(row[8])
+
+            mudancas = obter_mudancas(antigo, novo)
+
+            ip_banco = texto(row[12]) or '--'
+
+            if ip_banco == '::1':
+                ip_banco = '127.0.0.1'
+
+            logs.append({
+                'id_log': row[0],
+                'id_usuario': id_usuario,
+                'nome_usuario': nome_usuario,
+                'acao': acao,
+                'origem': origem,
+                'tabela_afetada': texto(
+                    row[4]
+                ).replace('_', ' ').title(),
+                'id_registro_afetado': id_registro,
+                'nome_registro_afetado': nome_alvo,
+                'campo': texto(row[6]) or 'TODOS',
+                'mudancas': mudancas,
+                'data_hora': (
+                    row[10].isoformat()
+                    if row[10] else None
+                ),
+                'maquina': texto(row[11]) or '--',
+                'ip_origem': ip_banco,
+                'cargo': cargo,
+                'alerta_banco': origem_banco
+            })
+
+        return jsonify({
+            'logs': logs,
+            'pagina': 1,
+            'por_pagina': 500,
+            'total': len(logs),
+            'total_paginas': 1,
+            'tem_mais': False
+        }), 200
+
+    except Exception:
+        app.logger.exception('Erro ao consultar logs de auditoria')
+
+        return jsonify({
+            'error': 'Erro ao consultar os logs de auditoria'
+        }), 500
+
     finally:
-        cur.close()
-        con.close()
+        if cur_log is not None:
+            cur_log.close()
 
-    try:
-        limite = min(max(int(request.args.get('limite', 200)), 1), 500)
-    except ValueError:
-        return jsonify({'error': 'Limite inválido'}), 400
+        if con_log is not None:
+            con_log.close()
 
-    try:
-        pagina = max(int(request.args.get('page', 1)), 1)
-    except ValueError:
-        pagina = 1
+        if cur_principal is not None:
+            cur_principal.close()
 
-    try:
-        por_pagina = max(int(request.args.get('por_pagina', 6)), 1)
-    except ValueError:
-        por_pagina = 6
-
-    try:
-        resultado = listar_logs(
-            id_escritorio,
-            limite=limite,
-            data_inicio=request.args.get('data_inicio'),
-            data_fim=request.args.get('data_fim'),
-            advogado=request.args.get('advogado'),
-            pagina=pagina,
-            por_pagina=por_pagina,
-        )
-        return jsonify(resultado), 200
-    except Exception as erro:
-        return jsonify({'error': f'Não foi possível consultar os logs: {erro}'}), 500
+        if con_principal is not None:
+            con_principal.close()
 
 
 @app.route('/escritorio/<int:id_escritorio>/logs/pdf', methods=['GET'])
-def gerar_pdf_logs_escritorio(id_escritorio):
+def gerar_relatorio_logs_pdf(id_escritorio):
     token_data = decodificar_token()
-    if token_data == False:
-        return jsonify({'error': 'Token necessario'}), 401
-    if token_data['tipo'] != 0:
-        return jsonify({'error': 'Acesso nao autorizado'}), 403
+    if not token_data or token_data['tipo'] != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
 
     con = conexao()
     cur = con.cursor()
+
     try:
-        cur.execute(
-            """
-            SELECT 1 FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
-              AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
-            """,
-            (token_data['id_usuarios'], id_escritorio)
-        )
-        if not cur.fetchone():
-            return jsonify({'error': 'Apenas o proprietario pode baixar o Log'}), 403
+        cur.execute("SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?", (token_data['id_usuarios'],))
+        res_adv = cur.fetchone()
+        nome_adv_logado = res_adv[0] if res_adv else "Advogado Logado"
+
+        con_log = conexao_log()
+        cur_log = con_log.cursor()
+
+        cur_log.execute("""
+            SELECT FIRST 500
+                ID_LOG, ID_USUARIO, NOME_USUARIO, ACAO, TABELA_AFETADA,
+                ID_REGISTRO_AFETADO, CAMPO, VALOR_ANTIGO, VALOR_NOVO,
+                DETALHES, DATA_HORA, MAQUINA, IP_ORIGEM
+            FROM LOG_AUDITORIA
+            WHERE ID_ESCRITORIO = ?
+            ORDER BY DATA_HORA DESC, ID_LOG DESC
+        """, (id_escritorio,))
+        rows = cur_log.fetchall()
+        cur_log.close()
+        con_log.close()
+
+        if not rows:
+            return jsonify({'error': 'Nenhum log encontrado para gerar o PDF'}), 404
+
+        def texto(valor, limite=None):
+            valor = '-' if valor in (None, '') else str(valor)
+            valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
+            if limite and len(valor) > limite:
+                return valor[:limite - 3] + '...'
+            return valor
+
+        def parse_valores(valor):
+            resultado = {}
+            ignorados = {'ID_USUARIOS', 'ID_USUARIO_RESPONSAVEL', 'DATA_CADASTRO', 'PRIMEIRO_ACESSO', 'SENHA'}
+            for parte in texto(valor).replace('\r', '').replace('\n', ' ').split(' | '):
+                if ':' in parte:
+                    chave, val = parte.split(':', 1)
+                    chave, val = chave.strip().upper(), val.strip()
+                    if chave not in ignorados and val != '[PROTEGIDO]':
+                        resultado[chave] = '(Vazio)' if not val or val.upper() == 'NULL' else val
+            return resultado
+
+        def obter_mudancas(antigo, novo):
+            mudancas = []
+            for chave in dict.fromkeys([*antigo, *novo]):
+                antes, depois = antigo.get(chave, '(Vazio)'), novo.get(chave, '(Vazio)')
+                if antes != depois:
+                    mudancas.append({'campo': chave, 'antes': antes, 'depois': depois})
+            return mudancas
+
+        class RelatorioLogsPDF(FPDF):
+            def header(self):
+                self.set_fill_color(0, 71, 171)
+                self.rect(0, 0, 297, 20, 'F')
+                self.set_text_color(255, 255, 255)
+                self.set_font('Helvetica', 'B', 15)
+                self.set_xy(16, 6)
+                self.cell(0, 8, 'Constituere | Historico de Alteracoes')
+                self.set_text_color(35, 35, 35)
+                self.set_y(28)
+
+            def footer(self):
+                self.set_y(-12)
+                self.set_draw_color(220, 228, 238)
+                self.line(16, self.get_y(), 281, self.get_y())
+                self.set_y(-9)
+                self.set_font('Helvetica', '', 8)
+                self.set_text_color(100, 100, 100)
+                self.cell(0, 5, f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}',
+                          align='C')
+
+        pdf = RelatorioLogsPDF(orientation='L', unit='mm', format='A4')
+        pdf.set_auto_page_break(auto=True, margin=18)
+        pdf.set_margins(16, 16, 16)
+        pdf.add_page()
+
+        pdf.set_fill_color(237, 244, 255)
+        pdf.set_text_color(0, 71, 171)
+        pdf.set_font('Helvetica', 'B', 12)
+        pdf.cell(0, 10, '  Historico de Alteracoes do Escritorio', fill=True, new_x='LMARGIN', new_y='NEXT')
+        pdf.ln(2)
+
+        total_banco = sum(1 for r in rows if 'ORIGEM: BANCO_DIRETO' in texto(r[9]))
+        total_sistema = len(rows) - total_banco
+
+        def desenhar_card(x, y, titulo, valor, cor_titulo, cor_valor):
+            pdf.set_fill_color(248, 250, 252)
+            pdf.rect(x, y, 80, 18, 'F')
+
+            pdf.set_fill_color(*cor_titulo)
+            pdf.rect(x, y, 2, 18, 'F')
+
+            pdf.set_text_color(90, 90, 90)
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.set_xy(x + 5, y + 3)
+            pdf.cell(0, 5, titulo.upper())
+
+            pdf.set_text_color(*cor_valor)
+            pdf.set_font('Helvetica', 'B', 16)
+            pdf.set_xy(x + 5, y + 8)
+            pdf.cell(0, 8, str(valor))
+
+        y_cards = pdf.get_y()
+        desenhar_card(16, y_cards, 'Total de Ações', len(rows), (59, 130, 246), (30, 58, 138))
+        desenhar_card(101, y_cards, 'Pelo Sistema', total_sistema, (34, 197, 94), (22, 101, 52))
+        desenhar_card(186, y_cards, 'Direto no Banco', total_banco, (239, 68, 68), (153, 27, 27))
+
+        pdf.set_y(y_cards + 22)
+        pdf.ln(6)
+
+        colunas = [
+            ('Data/Hora', 32),
+            ('Autor', 40),
+            ('Quem sofreu', 35),
+            ('Ação', 40),
+            ('Valor Antigo', 45),
+            ('Valor Novo', 45),
+            ('Origem', 18),
+            ('IP', 20)
+        ]
+
+        pdf.set_fill_color(237, 244, 255)
+        pdf.set_text_color(0, 71, 171)
+        pdf.set_font('Helvetica', 'B', 8)
+        for nome, largura in colunas:
+            pdf.cell(largura, 8, nome, border=0, fill=True, align='C')
+        pdf.ln()
+
+        pdf.set_font('Helvetica', '', 7.5)
+        for indice, row in enumerate(rows):
+            if pdf.get_y() + 10 > 190:
+                pdf.add_page()
+                pdf.set_fill_color(237, 244, 255)
+                pdf.set_text_color(0, 71, 171)
+                pdf.set_font('Helvetica', 'B', 8)
+                for nome, largura in colunas:
+                    pdf.cell(largura, 8, nome, border=0, fill=True, align='C')
+                pdf.ln()
+                pdf.set_font('Helvetica', '', 7.5)
+
+            data_hora = row[10].strftime('%d/%m/%Y %H:%M') if row[10] else '-'
+            detalhes = texto(row[9])
+            foi_banco = 'ORIGEM: BANCO_DIRETO' in detalhes
+
+            autor = 'Sist. (Direto)' if foi_banco else texto(nome_adv_logado, 20)
+            alvo = texto(row[2]) or 'Registro'
+
+            mudancas = obter_mudancas(parse_valores(row[7]), parse_valores(row[8]))
+
+            if mudancas:
+                m = mudancas[0]
+                acao = f"Editou {m['campo'].replace('_', ' ').title()}"
+                val_antigo = texto(m['antes'], 22)
+                val_novo = texto(m['depois'], 22)
+            else:
+                acao = texto(row[3])
+                val_antigo = '-'
+                val_novo = '-'
+
+            ip = texto(row[12], 15)
+            origem = 'Banco' if foi_banco else 'Sistema'
+
+            valores = [data_hora, autor, alvo, acao, val_antigo, val_novo, origem, ip]
+
+            pdf.set_fill_color(250, 252, 255) if indice % 2 else pdf.set_fill_color(255, 255, 255)
+
+            for i, ((_, largura), valor) in enumerate(zip(colunas, valores)):
+                if i == 4 and valor != '-':
+                    pdf.set_text_color(153, 27, 27)
+                    pdf.set_font('Helvetica', 'B', 7.5)
+                elif i == 5 and valor != '-':
+                    pdf.set_text_color(22, 101, 52)
+                    pdf.set_font('Helvetica', 'B', 7.5)
+                else:
+                    pdf.set_text_color(35, 35, 35)
+                    pdf.set_font('Helvetica', '', 7.5)
+
+                pdf.cell(largura, 8, str(valor), border=0, fill=True, align='C')
+
+            pdf.ln()
+
+        return send_file(BytesIO(bytes(pdf.output())), mimetype='application/pdf', as_attachment=True,
+                         download_name='historico-alteracoes.pdf')
+
+    except Exception as erro:
+        print(f"Erro ao gerar PDF de logs: {erro}")
+        return jsonify({'error': f'Nao foi possivel gerar o relatorio: {erro}'}), 500
     finally:
         cur.close()
         con.close()
-
-    try:
-        logs = listar_logs(
-            id_escritorio, 500,
-            request.args.get('data_inicio'), request.args.get('data_fim'),
-            request.args.get('advogado')
-        )
-        return send_file(
-            BytesIO(gerar_pdf_logs(logs['logs'], 'Log do escritorio')),
-            mimetype='application/pdf', as_attachment=True,
-            download_name='log-escritorio.pdf'
-        )
-    except Exception as erro:
-        return jsonify({'error': f'Nao foi possivel gerar o PDF do Log: {erro}'}), 500
-
-
-@app.route('/escritorio/<int:id_escritorio>/logs/<int:id_log>', methods=['DELETE'])
-def excluir_log_escritorio(id_escritorio, id_log):
-    token_data = decodificar_token()
-    if token_data == False:
-        return jsonify({'error': 'Token necessario'}), 401
-    if token_data['tipo'] != 0:
-        return jsonify({'error': 'Acesso nao autorizado'}), 403
-
-    con = conexao()
-    cur = con.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT 1 FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
-              AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
-            """,
-            (token_data['id_usuarios'], id_escritorio),
-        )
-        if not cur.fetchone():
-            return jsonify({'error': 'Apenas o proprietario pode excluir registros do Log'}), 403
-    finally:
-        cur.close()
-        con.close()
-
-    try:
-        if not excluir_log(id_escritorio, id_log):
-            return jsonify({'error': 'Registro de Log nao encontrado'}), 404
-        return jsonify({'message': 'Registro de Log excluido com sucesso'}), 200
-    except Exception as erro:
-        return jsonify({'error': f'Nao foi possivel excluir o registro do Log: {erro}'}), 500
-
 
 @app.route('/escritorio/<int:id_escritorio>/informacoes', methods=['PUT'])
 def editar_informacao_escritorio_ia(id_escritorio):
-    """Atualiza um campo do escritório, exclusivamente para seu proprietário."""
     token_data = decodificar_token()
     if token_data == False:
         return jsonify({'error': 'Token necessario'}), 401
@@ -401,14 +770,14 @@ def criar_usuarios():
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         RETURNING ID_USUARIOS
                     """, (
-                        nome, email, senha_cripto, cpf, telefone, tipo,
-                        rg, orgao_expedidor, num_oab, uf_oab, area_atuacao,
-                        nacionalidade, estado_civil, data_nascimento_salvar,
-                        sexo, profissao, cnpj, razao_social, nome_fantasia,
-                        cep, logradouro, numero, complemento, bairro,
-                        cidade, estado, carteira_trabalho, serie_carteira,
-                        datetime.datetime.now(), 1, id_usuario_logado
-                    ))
+            nome, email, senha_cripto, cpf, telefone, tipo,
+            rg, orgao_expedidor, num_oab, uf_oab, area_atuacao,
+            nacionalidade, estado_civil, data_nascimento_salvar,
+            sexo, profissao, cnpj, razao_social, nome_fantasia,
+            cep, logradouro, numero, complemento, bairro,
+            cidade, estado, carteira_trabalho, serie_carteira,
+            datetime.datetime.now(), 1, id_usuario_logado
+        ))
 
         id_usuario = cur.fetchone()[0]
         con.commit()
@@ -453,6 +822,8 @@ def criar_usuarios():
     finally:
         cur.close()
         con.close()
+
+
 @app.route('/editar_perfil', methods=['PUT'])
 def editar_perfil():
     token_data = decodificar_token()
@@ -559,8 +930,8 @@ def editar_perfil():
         senha_cripto = None
 
     nome_alterado = (
-        nome_atual is None
-        or nome.strip().upper() != (nome_atual or '').strip().upper()
+            nome_atual is None
+            or nome.strip().upper() != (nome_atual or '').strip().upper()
     )
 
     oab_alterada = (num_oab != oab_atual) or (uf_oab != uf_oab_atual)
@@ -763,14 +1134,12 @@ def login():
 
         origem = request.headers.get('X-Client-Platform', '').strip().lower()
 
-        # Regra 1: Bloqueio da Web para Clientes
         if origem != 'expo-mobile' and tipo in (2, 3):
             return jsonify({
                 'error': 'Clientes não podem acessar o site pela web. Apenas advogados podem fazer login por aqui. Utilize o aplicativo Constituere.',
                 'bloqueado_web': True
             }), 403
 
-        # Regra 2: Bloqueio do App para Advogados/Escritórios
         if origem == 'expo-mobile' and tipo in (0, 1):
             return jsonify({
                 'error': 'Advogados e escritórios não podem acessar o aplicativo. Utilize o site oficial para fazer login.',
@@ -979,9 +1348,6 @@ def detalhes_escritorio(id_escritorio):
     finally:
         cur.close()
         con.close()
-
-
-
 
 
 @app.route('/meus_escritorios', methods=['GET'])
@@ -1293,23 +1659,23 @@ def criar_escritorio():
                                              DATA_CADASTRO)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID_ESCRITORIOS
                     """, (
-                        razao_social.strip(),
-                        nome_fantasia.strip(),
-                        registro_oab.strip(),
-                        uf_oab.strip().upper(),
-                        telefone_numeros,
-                        email.strip(),
-                        cnpj_numeros,
-                        cep_numeros,
-                        logradouro.strip(),
-                        numero,
-                        complemento,
-                        bairro.strip(),
-                        cidade.strip(),
-                        estado.strip().upper(),
-                        senha_cripto,
-                        datetime.datetime.now()
-                    ))
+            razao_social.strip(),
+            nome_fantasia.strip(),
+            registro_oab.strip(),
+            uf_oab.strip().upper(),
+            telefone_numeros,
+            email.strip(),
+            cnpj_numeros,
+            cep_numeros,
+            logradouro.strip(),
+            numero,
+            complemento,
+            bairro.strip(),
+            cidade.strip(),
+            estado.strip().upper(),
+            senha_cripto,
+            datetime.datetime.now()
+        ))
 
         id_escritorio = cur.fetchone()[0]
 
@@ -1319,10 +1685,10 @@ def criar_escritorio():
                                                      STATUS)
                     VALUES (?, ?, ?)
                     """, (
-                        id_usuario,
-                        id_escritorio,
-                        'PROPRIETARIO'
-                    ))
+            id_usuario,
+            id_escritorio,
+            'PROPRIETARIO'
+        ))
 
         con.commit()
 
@@ -1354,6 +1720,7 @@ def criar_escritorio():
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/adicionar_advogado_escritorio', methods=['POST'])
 def adicionar_advogado_escritorio():
@@ -1468,8 +1835,8 @@ def adicionar_advogado_escritorio():
             }), 403
 
         if (
-            not status_usuario
-            or status_usuario.upper() != 'PROPRIETARIO'
+                not status_usuario
+                or status_usuario.upper() != 'PROPRIETARIO'
         ):
             return jsonify({
                 'sucesso': False,
@@ -1497,9 +1864,9 @@ def adicionar_advogado_escritorio():
             }), 404
 
         nome_escritorio = (
-            escritorio_dados[1]
-            or escritorio_dados[2]
-            or 'Escritório'
+                escritorio_dados[1]
+                or escritorio_dados[2]
+                or 'Escritório'
         )
 
         cursor.execute("""
@@ -1702,9 +2069,9 @@ def adicionar_advogado_escritorio():
         if conexao_db:
             conexao_db.close()
 
+
 @app.route('/representante', methods=['POST'])
 def criar_representante():
-
     token_data = decodificar_token()
     if token_data == False:
         return jsonify({'error': 'Token necessário'}), 401
@@ -1744,7 +2111,8 @@ def criar_representante():
         if not cur.fetchone():
             return jsonify({'error': 'Cliente jurídico não encontrado'}), 404
 
-        cur.execute("SELECT ID_REPRESENTANTE FROM REPRESENTANTES WHERE CPF = ? AND ID_CLIENTE_JURIDICO = ?", (cpf, id_cliente))
+        cur.execute("SELECT ID_REPRESENTANTE FROM REPRESENTANTES WHERE CPF = ? AND ID_CLIENTE_JURIDICO = ?",
+                    (cpf, id_cliente))
         if cur.fetchone():
             return jsonify({'error': 'Este CPF já está cadastrado como representante para este cliente'}), 400
 
@@ -1944,7 +2312,6 @@ def listar_clientes():
         con.close()
 
 
-
 @app.route('/cliente/<int:id_cliente>', methods=['GET'])
 def buscar_cliente(id_cliente):
     token_data = decodificar_token()
@@ -1993,7 +2360,9 @@ def buscar_cliente(id_cliente):
             'razao_social': row[7] or '',
             'nome_fantasia': row[8] or '',
             'cnpj': row[9] or '',
-            'data_cadastro': (row[10].strftime('%d/%m/%Y') if hasattr(row[10], 'strftime') else (str(row[10]) if row[10] else None)),            'rg': row[11] or '',
+            'data_cadastro': (
+                row[10].strftime('%d/%m/%Y') if hasattr(row[10], 'strftime') else (str(row[10]) if row[10] else None)),
+            'rg': row[11] or '',
             'orgao_expedidor': row[12] or '',
             'nacionalidade': row[13] or '',
             'estado_civil': row[14] or '',
@@ -2006,7 +2375,9 @@ def buscar_cliente(id_cliente):
             'cidade': row[21] or '',
             'estado': row[22] or '',
             'sexo': row[23] or '',
-            'data_nascimento': (row[24].strftime('%d/%m/%Y') if hasattr(row[24], 'strftime') else (str(row[24]) if row[24] else '')),            'carteira_trabalho': row[25] or '',
+            'data_nascimento': (
+                row[24].strftime('%d/%m/%Y') if hasattr(row[24], 'strftime') else (str(row[24]) if row[24] else '')),
+            'carteira_trabalho': row[25] or '',
             'serie_carteira': row[26] or ''
         }
 
@@ -2041,7 +2412,6 @@ def buscar_cliente(id_cliente):
     finally:
         cur.close()
         con.close()
-
 
 
 @app.route('/cliente/<int:id_cliente>', methods=['PUT'])
@@ -2091,11 +2461,9 @@ def atualizar_cliente(id_cliente):
         ), row[2:]))
 
         def valor_atualizado(campo):
-            """Preserva o dado existente quando o cliente não o enviou."""
             if campo not in dados or dados.get(campo) in (None, ''):
                 return valores_atuais[campo]
             return dados.get(campo)
-
 
         if tipo_cliente == 2:
             cpf = dados.get('cpf')
@@ -2253,7 +2621,6 @@ def atualizar_cliente(id_cliente):
         con.close()
 
 
-
 @app.route('/cliente/<int:id_cliente>/inativar', methods=['PUT'])
 def inativar_cliente(id_cliente):
     token_data = decodificar_token()
@@ -2324,9 +2691,6 @@ def ativar_cliente(id_cliente):
     finally:
         cur.close()
         con.close()
-
-
-
 
 
 @app.route('/editar_escritorio', methods=['PUT'])
@@ -2408,11 +2772,13 @@ def editar_escritorio():
 
         id_escritorio = escritorio[0]
 
-        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE CNPJ = ? AND ID_ESCRITORIOS != ?", (cnpj_numeros, id_escritorio))
+        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE CNPJ = ? AND ID_ESCRITORIOS != ?",
+                    (cnpj_numeros, id_escritorio))
         if cur.fetchone():
             return jsonify({"error": "CNPJ já cadastrado em outro escritório"}), 400
 
-        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE EMAIL = ? AND ID_ESCRITORIOS != ?", (email, id_escritorio))
+        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE EMAIL = ? AND ID_ESCRITORIOS != ?",
+                    (email, id_escritorio))
         if cur.fetchone():
             return jsonify({"error": "E-mail já cadastrado em outro escritório"}), 400
 
@@ -2557,6 +2923,8 @@ def meu_escritorio():
     finally:
         cur.close()
         con.close()
+
+
 @app.route('/listar_advogados', methods=['GET'])
 def listar_advogados():
     token_data = decodificar_token()
@@ -2696,9 +3064,9 @@ def listar_advogados():
             ativo_logado = row[11]
 
             pode_gerenciar = (
-                status_logado is not None
-                and status_logado.upper() == 'PROPRIETARIO'
-                and ativo_logado == 1
+                    status_logado is not None
+                    and status_logado.upper() == 'PROPRIETARIO'
+                    and ativo_logado == 1
             )
 
             advogados_dict[
@@ -2707,18 +3075,18 @@ def listar_advogados():
                 'id': row[5],
 
                 'nome': (
-                    row[6]
-                    or row[7]
-                    or '--'
+                        row[6]
+                        or row[7]
+                        or '--'
                 ),
 
                 'status': (
-                    row[8]
-                    or '--'
+                        row[8]
+                        or '--'
                 ),
 
                 'ativo': (
-                    row[9] == 1
+                        row[9] == 1
                 ),
 
                 'pode_gerenciar':
@@ -2756,6 +3124,7 @@ def listar_advogados():
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/filtro_escritorios_advogados', methods=['GET'])
 def filtro_escritorios_advogados():
@@ -2810,6 +3179,7 @@ def filtro_escritorios_advogados():
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/alterar_cargo_advogado/<int:id_advogado>/<int:id_escritorio>', methods=['PUT'])
 def alterar_cargo_advogado(id_advogado, id_escritorio):
@@ -2921,9 +3291,9 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
             }), 404
 
         nome_escritorio = (
-            escritorio[0]
-            or escritorio[1]
-            or 'Escritório'
+                escritorio[0]
+                or escritorio[1]
+                or 'Escritório'
         )
 
         nomes_cargos = {
@@ -3026,6 +3396,7 @@ def alterar_cargo_advogado(id_advogado, id_escritorio):
         cur.close()
         con.close()
 
+
 @app.route('/filtro_cargos_advogados', methods=['GET'])
 def filtro_cargos_advogados():
     token_data = decodificar_token()
@@ -3052,6 +3423,7 @@ def filtro_cargos_advogados():
     return jsonify({
         'cargos': cargos
     }), 200
+
 
 @app.route('/advogado/<int:id_advogado>/escritorio/<int:id_escritorio>/inativar', methods=['PUT'])
 def inativar_advogado_escritorio(id_advogado, id_escritorio):
@@ -3137,8 +3509,8 @@ def inativar_advogado_escritorio(id_advogado, id_escritorio):
             }), 400
 
         if (
-            status_advogado
-            and status_advogado.upper() == 'PROPRIETARIO'
+                status_advogado
+                and status_advogado.upper() == 'PROPRIETARIO'
         ):
             return jsonify({
                 'error': 'Não é possível inativar outro proprietário'
@@ -3162,9 +3534,9 @@ def inativar_advogado_escritorio(id_advogado, id_escritorio):
             }), 404
 
         nome_escritorio = (
-            escritorio[0]
-            or escritorio[1]
-            or 'Escritório'
+                escritorio[0]
+                or escritorio[1]
+                or 'Escritório'
         )
 
         mensagem_notificacao = (
@@ -3336,9 +3708,9 @@ def ativar_advogado_escritorio(id_advogado, id_escritorio):
             }), 404
 
         nome_escritorio = (
-            escritorio[0]
-            or escritorio[1]
-            or 'Escritório'
+                escritorio[0]
+                or escritorio[1]
+                or 'Escritório'
         )
 
         mensagem_notificacao = (
@@ -3415,6 +3787,7 @@ def ativar_advogado_escritorio(id_advogado, id_escritorio):
         cur.close()
         con.close()
 
+
 @app.route('/advogado_escritorio/<int:id_advogado>/<int:id_escritorio>', methods=['DELETE'])
 def remover_advogado_escritorio(id_advogado, id_escritorio):
     token_data = decodificar_token()
@@ -3458,8 +3831,8 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
             }), 403
 
         if (
-            not status_logado
-            or status_logado.upper() != 'PROPRIETARIO'
+                not status_logado
+                or status_logado.upper() != 'PROPRIETARIO'
         ):
             return jsonify({
                 'error': 'Somente proprietários podem remover advogados'
@@ -3497,8 +3870,8 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
         nome_advogado = vinculo_advogado[2]
 
         if (
-            status_advogado
-            and status_advogado.upper() == 'PROPRIETARIO'
+                status_advogado
+                and status_advogado.upper() == 'PROPRIETARIO'
         ):
             cur.execute("""
                 SELECT COUNT(*)
@@ -3535,9 +3908,9 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
             }), 404
 
         nome_escritorio = (
-            escritorio[0]
-            or escritorio[1]
-            or 'Escritório'
+                escritorio[0]
+                or escritorio[1]
+                or 'Escritório'
         )
 
         titulo_notificacao = 'Removido do escritório'
@@ -3613,7 +3986,6 @@ def remover_advogado_escritorio(id_advogado, id_escritorio):
     finally:
         cur.close()
         con.close()
-
 
 
 @app.route('/notificacoes', methods=['GET'])
@@ -3737,6 +4109,7 @@ def marcar_todas_notificacoes_lidas():
     finally:
         cur.close()
         con.close()
+
 
 @app.route('/logout', methods=['POST'])
 def logout():

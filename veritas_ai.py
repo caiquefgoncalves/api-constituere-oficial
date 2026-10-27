@@ -28,7 +28,6 @@ DEFAULT_OPENROUTER_MODELS = (
 )
 DEFAULT_PROVIDER_PRIORITY = "OPENROUTER"
 
-# Fontes primárias que podem ser apresentadas pela Veritas em respostas jurídicas.
 FONTES_JURIDICAS_OFICIAIS = (
     ("Legislação federal — Presidência da República", "https://www.planalto.gov.br/ccivil_03/"),
     ("Legislação e normas consolidadas — Portal Normas", "https://www.normas.leg.br/"),
@@ -2092,8 +2091,38 @@ def _build_authorized_context(question, token_data, contextual_question=None):
             if _question_requests_log_deletion(question) or _question_requests_log_deletion(contextual_question):
                 office_id = context["dados"]["escritorio_proprietario"]
                 if office_id:
-                    from log_auditoria import listar_logs
-                    context["dados"]["logs_alvo"] = listar_logs(office_id, limite=100)
+                    from db import conexao_log
+                    con = conexao_log()
+                    cur = con.cursor()
+                    try:
+                        cur.execute("""
+                                SELECT FIRST 100 
+                                    ID_LOG, ID_USUARIO, ACAO, TABELA_AFETADA, 
+                                    ID_REGISTRO_AFETADO, CAMPO, VALOR_ANTIGO, VALOR_NOVO, 
+                                    DETALHES, DATA_HORA, MAQUINA, IP_ORIGEM
+                                FROM LOG_AUDITORIA
+                                ORDER BY DATA_HORA DESC
+                            """)
+                        logs = []
+                        for row in cur.fetchall():
+                            logs.append({
+                                'id_log': row[0],
+                                'nome_usuario': f'Usuário #{row[1]}' if row[1] else 'Sistema',
+                                'acao': row[2],
+                                'tabela_afetada': row[3],
+                                'id_registro_afetado': row[4],
+                                'campo': row[5],
+                                'valor_antigo': row[6],
+                                'valor_novo': row[7],
+                                'detalhes': row[8],
+                                'data_hora': row[9].isoformat() if row[9] else None,
+                                'maquina': row[10],
+                                'ip_origem': row[11],
+                            })
+                        context["dados"]["logs_alvo"] = logs
+                    finally:
+                        cur.close()
+                        con.close()
         else:
             context["restricoes"].append(
                 "O PDF de Log está disponível apenas para advogado proprietário do escritório."

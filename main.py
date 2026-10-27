@@ -3,7 +3,6 @@ from flask_cors import CORS
 import os
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from funcao import decodificar_token
-from log_auditoria import preparar_requisicao, registrar_requisicao
 import threading
 import time
 import datetime as dt
@@ -61,7 +60,6 @@ socketio = SocketIO(
     transports=["polling"]
 )
 
-
 @app.before_request
 def handle_options():
     if request.method == 'OPTIONS':
@@ -73,40 +71,12 @@ def handle_options():
         response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         return response
 
-
 app.config.from_pyfile('config.py')
 
 app.config['UPLOAD_FOLDER'] = os.path.join(
     os.path.abspath(os.path.dirname(__file__)),
     'uploads'
 )
-
-
-@app.before_request
-def preparar_auditoria():
-    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
-        try:
-            preparar_requisicao(decodificar_token())
-        except Exception as erro:
-            app.logger.error('Erro ao preparar auditoria: %s', erro)
-
-
-@app.after_request
-def registrar_auditoria(response):
-    deve_registrar = (
-            request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}
-            or (request.method == 'GET' and (
-                request.path.endswith('/documento')
-                or request.path.startswith('/cliente/pagamento/pix/')
-            ))
-    )
-    if deve_registrar and 200 <= response.status_code < 300:
-        try:
-            registrar_requisicao(decodificar_token())
-        except Exception as erro:
-            app.logger.error('Erro inesperado na auditoria: %s', erro)
-    return response
-
 
 os.makedirs(
     app.config['UPLOAD_FOLDER'],
@@ -121,7 +91,6 @@ os.makedirs(
     exist_ok=True
 )
 
-
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
     return send_from_directory(
@@ -129,16 +98,13 @@ def uploaded_file(filename):
         filename
     )
 
-
 @socketio.on('connect')
 def socket_connect():
     print('Cliente conectado ao Socket.IO')
 
-
 @socketio.on('disconnect')
 def socket_disconnect():
     print('Cliente desconectado do Socket.IO')
-
 
 @socketio.on('entrar_usuario')
 def entrar_usuario(data):
@@ -153,7 +119,6 @@ def entrar_usuario(data):
     except Exception as e:
         print(f'Erro ao colocar usuário na sala: {e}')
 
-
 @socketio.on('sair_usuario')
 def sair_usuario(data):
     try:
@@ -166,7 +131,6 @@ def sair_usuario(data):
     except Exception as e:
         print(f'Erro ao remover usuário da sala: {e}')
 
-
 from usuario import *
 from processos import *
 from agendamentos import *
@@ -175,7 +139,6 @@ from veritas_ai import *
 from financeiro import *
 from dm import *
 from google_calendar import *
-
 
 def agendador_notificacoes():
     print("\n>>> [AGENDADOR] THREAD INICIADA COM SUCESSO! <<<\n", flush=True)
@@ -193,7 +156,6 @@ def agendador_notificacoes():
             print(f"[AGENDADOR] Erro: {e}", flush=True)
 
         time.sleep(30)
-
 
 if __name__ == '__main__':
     thread_agendador = threading.Thread(target=agendador_notificacoes, daemon=True)
