@@ -43,25 +43,6 @@ DOMINIOS_JURIDICOS_OFICIAIS = {
     "tst.jus.br", "jurisprudencia.tst.jus.br", "tse.jus.br", "jurisprudencia.tse.jus.br",
     "cnj.jus.br", "www.cnj.jus.br", "lexml.gov.br", "www.lexml.gov.br",
 }
-PROGRAMMING_KEYWORDS = (
-    "codigo", "programacao", "programar", "python", "javascript", "typescript",
-    "html", "css", "sql", "script", "função", "funcao", "classe", "class ",
-    "algoritmo", "api ", "endpoint", "react", "flask", "node.js", "nodejs",
-)
-
-OUT_OF_SCOPE_MESSAGE = (
-    "Posso ajudar somente com perguntas jurídicas e com os serviços autorizados "
-    "do Constituere, como consultar e administrar agendamentos, clientes e parceiros."
-)
-
-LEGAL_SCOPE_KEYWORDS = (
-    "juridico", "juridica", "juridicos", "juridicas", "direito", "direitos",
-    "lei", "leis", "legal", "tribunal", "juiz", "juiza", "audiencia",
-    "sentenca", "acordao", "jurisprudencia", "sumula", "peticao", "recurso",
-    "prazo", "contrato", "contratos", "clt", "constituicao", "processar",
-    "indenizacao", "divorcio", "heranca", "inventario", "trabalhista",
-)
-
 SCHEDULE_TOOLS = [
     {"type": "function", "function": {"name": "gerar_pagamento_pix", "description": "Propõe gerar uma cobrança Pix para uma parcela em aberto do próprio cliente.", "parameters": {"type": "object", "properties": {"id_parcela": {"type": "integer"}, "tipo_parcela": {"type": "string", "enum": ["prolabore", "exito"]}}, "required": ["id_parcela", "tipo_parcela"]}}},
     {"type": "function", "function": {"name": "cadastrar_cliente", "description": "Propõe cadastrar cliente pessoa física ou jurídica para o advogado ou proprietário. Para pessoa física, data_nascimento e sexo também são obrigatórios. Para pessoa jurídica, razao_social e nome_fantasia também são obrigatórios.", "parameters": {"type": "object", "properties": {"tipo": {"type": "integer", "enum": [2, 3]}, "nome": {"type": "string"}, "email": {"type": "string"}, "telefone": {"type": "string"}, "cpf_cnpj": {"type": "string"}, "senha": {"type": "string"}, "confirmar_senha": {"type": "string"}, "data_nascimento": {"type": "string"}, "sexo": {"type": "string"}, "razao_social": {"type": "string"}, "nome_fantasia": {"type": "string"}}, "required": ["tipo", "nome", "email", "telefone", "cpf_cnpj", "senha", "confirmar_senha"]}}},
@@ -390,11 +371,6 @@ def _contains_any_word(text, keywords):
     )
 
 
-def _is_programming_request(question):
-    normalized = _normalize_text(question)
-    return any(keyword in normalized for keyword in PROGRAMMING_KEYWORDS)
-
-
 def _is_duration_reply(question):
     """Recognizes common standalone duration formats used in appointment flows."""
     normalized = _normalize_text(question)
@@ -524,36 +500,6 @@ def _is_pending_workflow_reply(question, history):
         "previsao", "previsão", "receita",
     )
     return not _contains_any_word(normalized, unrelated_requests)
-
-
-def _is_in_scope_request(question, history):
-    """Rejects casual requests before they reach the language model."""
-    normalized = _normalize_text(question)
-    is_system_request = (
-        _question_mentions_schedule(question)
-        or _question_requests_schedule_mutation(question)
-        or _question_mentions_cases(question)
-        or _question_mentions_contacts(question)
-        or _question_mentions_payments(question)
-        or _question_requests_log_pdf(question)
-        or _question_requests_log_deletion(question)
-        or _question_requests_office_lawyer_addition(question)
-        or _question_requests_lawyer_deactivation(question)
-        or _question_requests_lawyer_activation(question)
-        or _question_requests_lawyer_triage(question)
-        or _question_requests_office_edit(question)
-        or _question_requests_office_overview(question)
-        or _question_requests_own_profile_edit(question)
-        or _contains_any_word(normalized, ("relatorio", "relatorios", "fatura", "faturas", "cpf", "cnpj", "email", "e-mail"))
-    )
-    return (
-        is_system_request
-        or _contains_any_word(normalized, LEGAL_SCOPE_KEYWORDS)
-        or _is_schedule_detail_reply(question, history)
-        or _is_schedule_reason_reply(question, history)
-        or _is_client_registration_detail_reply(question, history)
-        or _is_pending_workflow_reply(question, history)
-    )
 
 
 _WEEKDAYS = {
@@ -710,6 +656,13 @@ def _question_requests_schedule_mutation(question):
     return (
         _question_mentions_schedule(question)
         and _contains_any_word(normalized, ("quero", "preciso", "gostaria", "poderia", "posso"))
+    )
+
+
+def _question_uses_schedule_ordinal_reference(question):
+    return _contains_any_word(
+        _normalize_text(question),
+        ("primeira", "primeiro", "segunda", "segundo", "ambas", "ambos"),
     )
 
 
@@ -1059,6 +1012,198 @@ def _pending_schedule_action_proposal(question, contextual_question, authorized_
     }
 
 
+def _ordinal_schedule_action_message(question, authorized_context):
+    """Handles a confirm/cancel request that refers to agenda positions."""
+    normalized = _normalize_text(question)
+    if not (
+        _question_uses_schedule_ordinal_reference(question)
+        and _contains_any_word(normalized, ("confirma", "confirmar"))
+        and _contains_any_word(normalized, ("cancela", "cancelar", "desmarca", "desmarcar"))
+    ):
+        return None
+
+    appointments = authorized_context.get("dados", {}).get(
+        "agendamentos_alvo", []
+    )
+    if len(appointments) < 2:
+        return None
+
+    first = appointments[0]
+    second = appointments[1]
+    return (
+        f"Identifiquei o primeiro agendamento: {first['data']} as "
+        f"{first['horario']}, {first['assunto']} com {first['cliente']}. "
+        f"E o segundo: {second['data']} as {second['horario']}, "
+        f"{second['assunto']} com {second['cliente']}. "
+        "Posso confirmar o primeiro. Para cancelar o segundo, informe o motivo "
+        "do cancelamento."
+    )
+
+
+def _agenda_summary_answer(question, authorized_context):
+    """Formats the agenda from the authorized records instead of the model."""
+    normalized = _normalize_text(question)
+    if not (
+        _question_mentions_schedule(question)
+        and _contains_any_word(
+            normalized,
+            ("resumo", "listar", "liste", "mostrar", "mostre", "minha", "meus"),
+        )
+        and not _contains_any_word(
+            normalized,
+            ("confirmar", "confirma", "cancelar", "cancela", "desmarcar", "desmarca"),
+        )
+    ):
+        return None
+
+    agenda = authorized_context.get("dados", {}).get("agendamentos")
+    if not agenda:
+        return None
+
+    appointments = agenda.get("agendamentos", [])
+    if not appointments:
+        return "NÃ£o encontrei agendamentos no perÃ­odo consultado."
+
+    lines = ["Resumo da sua agenda:"]
+    for index, appointment in enumerate(appointments, start=1):
+        lines.append(
+            f"{index}. {appointment['data']} as {appointment['horario']} â€” "
+            f"{appointment['assunto']} com {appointment['cliente']}; "
+            f"duraÃ§Ã£o {appointment['duracao']}; status {appointment['status']}."
+        )
+    return "\n".join(lines)
+
+
+def _add_second_lawyer_to_appointment_proposal(
+    question, contextual_question, authorized_context
+):
+    """Prepares an appointment edit when a unique second lawyer is identified."""
+    normalized_context = _normalize_text(contextual_question)
+    if not (
+        _question_requests_schedule_mutation(contextual_question)
+        and _contains_any_word(
+            normalized_context,
+            ("advogado", "advogada", "adv", "segundo"),
+        )
+    ):
+        return None
+
+    appointments = authorized_context.get("dados", {}).get(
+        "agendamentos_alvo", []
+    )
+    if len(appointments) != 1:
+        return None
+
+    lawyers = authorized_context.get("dados", {}).get("advogados", [])
+    matches = []
+    context_tokens = set(re.findall(r"\b[a-z]+\b", normalized_context))
+    for lawyer in lawyers:
+        name_tokens = [
+            token for token in _normalize_text(lawyer.get("nome", "")).split()
+            if len(token) >= 3
+        ]
+        full_name_matches = len(name_tokens) >= 2 and all(
+            token in normalized_context for token in name_tokens
+        )
+        first_name_and_initial_match = (
+            len(name_tokens) >= 2
+            and name_tokens[0] in context_tokens
+            and any(
+                surname[0] in context_tokens
+                for surname in name_tokens[1:]
+            )
+        )
+        if full_name_matches or first_name_and_initial_match:
+            matches.append(lawyer)
+
+    if len(matches) != 1:
+        return None
+
+    appointment = appointments[0]
+    lawyer = matches[0]
+    logged_lawyer_id = authorized_context.get("usuario_logado", {}).get("id")
+    if (
+        lawyer["id"] == logged_lawyer_id
+        or lawyer["id"] == appointment.get("id_advogado_2")
+    ):
+        return None
+
+    data = {
+        "id_cliente": appointment["id_cliente"],
+        "cliente": appointment["cliente"],
+        "assunto": appointment["assunto"],
+        "data": appointment["data_iso"],
+        "horario": appointment["horario"],
+        "duracao": appointment["duracao"],
+        "id_advogado_2": lawyer["id"],
+    }
+    return {
+        "tipo": "editar",
+        "descricao": (
+            f"Adicionar {lawyer['nome']} como segundo advogado no agendamento "
+            f"com {appointment['cliente']} em {appointment['data']} "
+            f"as {appointment['horario']}."
+        ),
+        "endpoint": f"/agendamento/{appointment['id']}",
+        "metodo": "PUT",
+        "dados": data,
+    }
+
+
+def _edit_appointment_time_proposal(question, authorized_context):
+    """Prepares a time-only edit for the single appointment in context."""
+    normalized = _normalize_text(question)
+    if not _contains_any_word(
+        normalized, ("passar", "mudar", "alterar", "editar", "reagendar")
+    ):
+        return None
+
+    time_match = re.search(
+        r"\b(?:as|para\s+(?:as\s+)?)\s*(\d{1,2})(?:\s*(?::|h)\s*(\d{2})?)?\b",
+        normalized,
+    )
+    if not time_match:
+        return None
+
+    hour = int(time_match.group(1))
+    minute = int(time_match.group(2) or 0)
+    if hour > 23 or minute > 59:
+        return None
+
+    appointments = authorized_context.get("dados", {}).get(
+        "agendamentos_alvo", []
+    )
+    if len(appointments) != 1:
+        return None
+
+    appointment = appointments[0]
+    new_time = f"{hour:02d}:{minute:02d}"
+    if appointment["horario"] == new_time:
+        return None
+
+    data = {
+        "id_cliente": appointment["id_cliente"],
+        "cliente": appointment["cliente"],
+        "assunto": appointment["assunto"],
+        "data": appointment["data_iso"],
+        "horario": new_time,
+        "duracao": appointment["duracao"],
+    }
+    if appointment.get("id_advogado_2"):
+        data["id_advogado_2"] = appointment["id_advogado_2"]
+
+    return {
+        "tipo": "editar",
+        "descricao": (
+            f"Alterar o horÃ¡rio do agendamento com {appointment['cliente']} em "
+            f"{appointment['data']} de {appointment['horario']} para {new_time}."
+        ),
+        "endpoint": f"/agendamento/{appointment['id']}",
+        "metodo": "PUT",
+        "dados": data,
+    }
+
+
 def _question_mentions_contacts(question):
     return _contains_any_word(
         _normalize_text(question),
@@ -1118,8 +1263,64 @@ def _question_mentions_payments(question):
         "recebidos", "quitado", "quitados", "concluido", "concluidos",
         "debito", "debitos", "divida", "dividas", "cobranca", "cobrancas",
         "fatura", "faturas", "em aberto", "pix", "pagar", "pague", "pagamento",
+        "calote", "caloteiro", "caloteiros",
     )
     return _contains_any_word(normalized, payment_words)
+
+
+def _question_requests_debtors(question):
+    """Returns true for requests to list clients with open debts."""
+    normalized = _normalize_text(question)
+    return (
+        _contains_any_word(normalized, ("cliente", "clientes"))
+        and _contains_any_word(
+            normalized,
+            (
+                "calote", "caloteiro", "caloteiros", "inadimplente",
+                "inadimplentes", "atrasado", "atrasados", "pendente",
+                "pendentes", "devendo", "devedor", "devedores",
+            ),
+        )
+    )
+
+
+def _debtors_answer(question, authorized_context):
+    """Lists the lawyer's clients that have overdue or open installments."""
+    if (
+        authorized_context.get("usuario_logado", {}).get("tipo") != 0
+        or not _question_requests_debtors(question)
+    ):
+        return None
+
+    summaries = authorized_context.get("dados", {}).get(
+        "resumo_pagamentos_clientes"
+    )
+    if summaries is None:
+        return None
+
+    debtors = [
+        item for item in summaries
+        if item.get("parcelas_atrasadas", 0) or item.get("parcelas_pendentes", 0)
+    ]
+    if not debtors:
+        return "NÃ£o encontrei clientes com parcelas em atraso ou em aberto."
+
+    lines = ["Clientes com pagamentos pendentes:"]
+    for index, client in enumerate(debtors, start=1):
+        parts = []
+        if client["parcelas_atrasadas"]:
+            parts.append(
+                f"{client['parcelas_atrasadas']} parcela(s) em atraso "
+                f"(R$ {client['total_atrasado']:.2f})"
+            )
+        if client["parcelas_pendentes"]:
+            parts.append(
+                f"{client['parcelas_pendentes']} parcela(s) em aberto "
+                f"(R$ {client['total_pendente']:.2f})"
+            )
+        lines.append(f"{index}. {client['cliente']} â€” " + "; ".join(parts) + ".")
+
+    return "\n".join(lines)
 
 
 def _fetch_lawyer_appointments(id_lawyer, question):
@@ -1241,6 +1442,9 @@ def _find_appointments_by_client_and_date(question, id_lawyer):
     matches = []
     normalized_question = _normalize_text(question)
     request_is_for_own_agenda = _is_own_agenda_request(question)
+    request_is_date_specific_change = (
+        bool(dates) and _question_requests_schedule_mutation(question)
+    )
 
     try:
         if dates:
@@ -1321,6 +1525,7 @@ def _find_appointments_by_client_and_date(question, id_lawyer):
                 )
                 if (
                     not request_is_for_own_agenda
+                    and not request_is_date_specific_change
                     and (
                         not name_tokens
                         or not client_is_mentioned
@@ -2184,7 +2389,11 @@ def _build_authorized_context(question, token_data, contextual_question=None):
             )
             if schedule_mutation_in_progress:
                 context["dados"]["clientes"] = _fetch_lawyer_clients(user_id)
-                context["dados"]["advogados"] = _fetch_active_lawyers()
+                context["dados"]["advogados"] = [
+                    lawyer
+                    for lawyer in _fetch_active_lawyers()
+                    if lawyer["id"] != user_id
+                ]
                 parties = _find_schedule_parties(contextual_question, user_id)
                 context["dados"]["clientes_identificados"] = parties["clientes"]
                 context["dados"]["advogados_identificados"] = parties["advogados"]
@@ -2457,11 +2666,39 @@ def _question_with_history(question, history):
         or _is_schedule_reason_reply(question, history)
         or _is_client_registration_detail_reply(question, history)
         or _is_pending_workflow_reply(question, history)
+        or (
+            _question_requests_schedule_mutation(question)
+            and _question_uses_schedule_ordinal_reference(question)
+            and _question_mentions_schedule("\n".join(recent_messages))
+        )
     )
     if is_follow_up:
         for index in range(len(recent_messages) - 1, -1, -1):
             if _question_requests_schedule_mutation(recent_messages[index]):
-                return "\n".join(recent_messages[index:] + [question])
+                contextual_question = "\n".join(
+                    recent_messages[index:] + [question]
+                )
+                uses_previous_appointment = (
+                    _contains_any_word(
+                        _normalize_text(question),
+                        ("esse", "essa", "nesse", "nessa"),
+                    )
+                    or _question_uses_schedule_ordinal_reference(question)
+                )
+                last_assistant_message = next(
+                    (
+                        item["content"]
+                        for item in reversed(history)
+                        if item["role"] == "assistant"
+                    ),
+                    "",
+                )
+                assistant_dates = re.findall(
+                    r"\b\d{2}/\d{2}/\d{4}\b", last_assistant_message
+                )
+                if uses_previous_appointment and 1 <= len(set(assistant_dates)) <= 2:
+                    return contextual_question + "\n" + last_assistant_message
+                return contextual_question
 
     return question
 
@@ -3064,6 +3301,7 @@ Quando parcelas_pagaveis estiver disponível, o cliente pode pedir para pagar um
 Quando houver resumo_geral_escritorio, apresente ao proprietário somente os totais agregados do escritório, sem expor dados pessoais ou financeiros individuais.
 Responda em portugues brasileiro, com linguagem clara e objetiva.
 Use texto simples e linhas numeradas em listas. Você pode usar **texto** para dar ênfase; os asteriscos duplos serão exibidos em negrito. Não use parênteses vazios. Ao listar clientes, escreva o nome seguido de “— CPF/CNPJ: ” e o documento formatado, se disponível.
+Antes de responder, avalie silenciosamente o sentido completo do pedido, sem depender de listas fixas de palavras. Considere dentro do escopo qualquer pergunta, explicação ou orientação jurídica, mesmo que use termos técnicos, expressões em latim ou nomes de medidas judiciais, além das operações autorizadas do Constituere. Considere fora do escopo pedidos casuais, entretenimento, conteúdo pessoal, programação ou instruções técnicas. Não exponha esse raciocínio interno: responda diretamente à pergunta jurídica ou recuse brevemente o pedido fora do escopo.
 Seu escopo é exclusivamente responder perguntas jurídicas e operar os serviços autorizados do Constituere. Recuse, de forma breve, qualquer pedido casual ou de entretenimento que não se relacione a esse escopo, incluindo emojis, mensagens pessoais, jogos, histórias, traduções e recomendações gerais.
 Nunca forneça código, trechos de programação, scripts, SQL, HTML, CSS, configurações técnicas ou instruções de desenvolvimento, mesmo que o usuário insista. Para esses pedidos, informe brevemente que estão fora do seu escopo.
 Voce pode explicar conceitos juridicos, organizar raciocinios e apontar proximos passos.
@@ -3189,14 +3427,8 @@ def perguntar_veritas():
     if len(question) > 4000:
         return jsonify({"error": "Pergunta ultrapassa o limite permitido"}), 400
 
-    if _is_programming_request(question):
-        return jsonify({"assistant": ASSISTANT_NAME, "resposta": OUT_OF_SCOPE_MESSAGE}), 200
-
     try:
         history = _sanitize_history(payload.get("historico"))
-        if not _is_in_scope_request(question, history):
-            return jsonify({"assistant": ASSISTANT_NAME, "resposta": OUT_OF_SCOPE_MESSAGE}), 200
-
         context_question = _question_with_history(question, history)
         context_started = time.perf_counter()
         authorized_context = _build_authorized_context(
@@ -3206,7 +3438,13 @@ def perguntar_veritas():
         )
         context_seconds = time.perf_counter() - context_started
         model_started = time.perf_counter()
-        answer = _missing_schedule_reason_message(question, authorized_context)
+        answer = _debtors_answer(question, authorized_context)
+        if answer is None:
+            answer = _agenda_summary_answer(question, authorized_context)
+        if answer is None:
+            answer = _ordinal_schedule_action_message(question, authorized_context)
+        if answer is None:
+            answer = _missing_schedule_reason_message(question, authorized_context)
         proposal = None
         if answer is None:
             proposal = _pending_schedule_action_proposal(
@@ -3214,8 +3452,19 @@ def perguntar_veritas():
                 context_question,
                 authorized_context,
             )
+        if proposal is None and answer is None:
+            proposal = _add_second_lawyer_to_appointment_proposal(
+                question,
+                context_question,
+                authorized_context,
+            )
+        if proposal is None and answer is None:
+            proposal = _edit_appointment_time_proposal(
+                question,
+                authorized_context,
+            )
         if proposal:
-            answer = "Preparei a solicitação. Confirme a ação para enviar."
+            answer = proposal["descricao"] + " Confirme a ação para enviar."
         elif answer is None:
             answer, proposal = _log_pdf_proposal(question, authorized_context)
             if answer is None:
