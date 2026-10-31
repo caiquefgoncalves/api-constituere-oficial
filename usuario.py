@@ -60,10 +60,28 @@ def listar_logs_escritorio(id_escritorio):
         rows = cur_log.fetchall()
 
         def texto(valor):
-            if valor is None: return ''
-            if hasattr(valor, 'read'): valor = valor.read()
-            if isinstance(valor, bytes): return valor.decode('utf-8', errors='replace')
+            if valor is None:
+                return ''
+            if hasattr(valor, 'read'):
+                valor = valor.read()
+            if isinstance(valor, bytes):
+                return valor.decode('utf-8', errors='replace')
             return str(valor)
+
+        def extrair_id(conteudo, chave):
+            for parte in conteudo.replace('\r', '').replace('\n', ' ').split(' | '):
+                parte = parte.strip()
+                if ':' not in parte:
+                    continue
+                k, v = parte.split(':', 1)
+                if k.strip().upper() == chave:
+                    v = v.strip()
+                    if v and v.upper() != 'NULL' and v != '(Vazio)':
+                        try:
+                            return int(float(v))
+                        except Exception:
+                            return None
+            return None
 
         def parse_valores(valor, tabela):
             resultado = {}
@@ -79,24 +97,31 @@ def listar_logs_escritorio(id_escritorio):
             if tabela in ['AGENDAMENTOS', 'NOTIFICACOES']:
                 ignorados.add('TIPO')
 
+            if tabela == 'MENSAGENS':
+                ignorados.update({'ID_MENSAGEM', 'ID_REMETENTE', 'ID_CONVERSA'})
+            elif tabela == 'CONVERSAS':
+                ignorados.update({'ID_CONVERSA', 'ID_ADVOGADO', 'ID_CLIENTE'})
+
             conteudo = texto(valor)
 
             for parte in conteudo.replace('\r', '').replace('\n', ' ').split(' | '):
                 parte = parte.strip()
-                if ':' not in parte: continue
+                if ':' not in parte:
+                    continue
 
                 chave, valor_campo = parte.split(':', 1)
                 chave = chave.strip().upper()
                 valor_campo = valor_campo.strip()
 
-                if chave in ignorados or valor_campo == '[PROTEGIDO]': continue
-                if not valor_campo or valor_campo.upper() == 'NULL': valor_campo = '(Vazio)'
+                if chave in ignorados or valor_campo == '[PROTEGIDO]':
+                    continue
+                if not valor_campo or valor_campo.upper() == 'NULL':
+                    valor_campo = '(Vazio)'
 
                 if chave == 'LIDA':
                     valor_campo = 'Lido' if valor_campo == '1' else 'Não Lido'
                 elif chave == 'ATIVO':
-                    # Tratamento para não ignorar o ATIVO de modelos de documentos
-                    if tabela not in ['MODELOS_DOCUMENTOS']:
+                    if tabela not in ['MODELOS_DOCUMENTOS', 'REPRESENTANTES']:
                         continue
                     valor_campo = 'Ativo' if valor_campo == '1' else 'Inativo'
                 else:
@@ -106,7 +131,7 @@ def listar_logs_escritorio(id_escritorio):
                             valor_campo = str(int(num))
                         else:
                             valor_campo = f"{num:.2f}".replace('.', ',')
-                    except:
+                    except Exception:
                         pass
 
                 resultado[chave] = valor_campo
@@ -132,10 +157,14 @@ def listar_logs_escritorio(id_escritorio):
         ids_notificacoes = set()
         ids_documentos = set()
         ids_modelos = set()
+        ids_conversas = set()
+        ids_mensagens = set()
 
         for row in rows:
             detalhes = texto(row[9])
             tabela = texto(row[4]).strip().upper()
+            antigo_txt = texto(row[7])
+            novo_txt = texto(row[8])
 
             dados_logs.append({'row': row, 'detalhes': detalhes, 'tabela': tabela})
 
@@ -149,7 +178,7 @@ def listar_logs_escritorio(id_escritorio):
                 if id_cliente and id_cliente != '(Vazio)':
                     try:
                         ids_clientes_juridicos.add(int(id_cliente))
-                    except:
+                    except Exception:
                         pass
             elif tabela == 'PARTE_CONTRARIA' and row[5] is not None:
                 ids_partes_contrarias.add(row[5])
@@ -159,6 +188,21 @@ def listar_logs_escritorio(id_escritorio):
                 ids_documentos.add(row[5])
             elif tabela == 'MODELOS_DOCUMENTOS' and row[5] is not None:
                 ids_modelos.add(row[5])
+            elif tabela == 'MENSAGENS':
+                id_mensagem = extrair_id(novo_txt, 'ID_MENSAGEM') or extrair_id(antigo_txt, 'ID_MENSAGEM')
+                if id_mensagem:
+                    ids_mensagens.add(id_mensagem)
+                id_conversa = extrair_id(novo_txt, 'ID_CONVERSA') or extrair_id(antigo_txt, 'ID_CONVERSA')
+                if id_conversa:
+                    ids_conversas.add(id_conversa)
+                if row[1] is not None:
+                    ids_usuarios.add(row[1])
+            elif tabela == 'CONVERSAS':
+                id_conversa = extrair_id(novo_txt, 'ID_CONVERSA') or extrair_id(antigo_txt, 'ID_CONVERSA')
+                if id_conversa:
+                    ids_conversas.add(id_conversa)
+                if row[1] is not None:
+                    ids_usuarios.add(row[1])
 
         nomes = {}
         cnpjs = {}
@@ -166,14 +210,18 @@ def listar_logs_escritorio(id_escritorio):
         notificacoes_info = {}
         documentos_info = {}
         modelos_info = {}
+        conversas_info = {}
+        mensagens_info = {}
 
         if ids_usuarios:
             lista_ids = sorted(ids_usuarios)
             for inicio in range(0, len(lista_ids), 200):
                 lote = lista_ids[inicio:inicio + 200]
                 placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(f"SELECT ID_USUARIOS, NOME FROM USUARIOS WHERE ID_USUARIOS IN ({placeholders})",
-                                      tuple(lote))
+                cur_principal.execute(
+                    f"SELECT ID_USUARIOS, NOME FROM USUARIOS WHERE ID_USUARIOS IN ({placeholders})",
+                    tuple(lote)
+                )
                 for registro in cur_principal.fetchall():
                     nomes[registro[0]] = registro[1]
 
@@ -184,7 +232,8 @@ def listar_logs_escritorio(id_escritorio):
                 placeholders = ','.join('?' for _ in lote)
                 cur_principal.execute(
                     f"SELECT ID_REPRESENTANTE, NOME_COMPLETO FROM REPRESENTANTES WHERE ID_REPRESENTANTE IN ({placeholders})",
-                    tuple(lote))
+                    tuple(lote)
+                )
                 for registro in cur_principal.fetchall():
                     nomes[registro[0]] = registro[1]
 
@@ -195,7 +244,8 @@ def listar_logs_escritorio(id_escritorio):
                 placeholders = ','.join('?' for _ in lote)
                 cur_principal.execute(
                     f"SELECT ID_USUARIOS, CNPJ, RAZAO_SOCIAL FROM USUARIOS WHERE ID_USUARIOS IN ({placeholders})",
-                    tuple(lote))
+                    tuple(lote)
+                )
                 for registro in cur_principal.fetchall():
                     cnpjs[registro[0]] = {'cnpj': registro[1], 'razao': registro[2]}
 
@@ -206,7 +256,8 @@ def listar_logs_escritorio(id_escritorio):
                 placeholders = ','.join('?' for _ in lote)
                 cur_principal.execute(
                     f"SELECT ID_PARTE_CONTRARIA, NOME FROM PARTE_CONTRARIA WHERE ID_PARTE_CONTRARIA IN ({placeholders})",
-                    tuple(lote))
+                    tuple(lote)
+                )
                 for registro in cur_principal.fetchall():
                     partes_info[registro[0]] = registro[1]
 
@@ -217,7 +268,8 @@ def listar_logs_escritorio(id_escritorio):
                 placeholders = ','.join('?' for _ in lote)
                 cur_principal.execute(
                     f"SELECT ID_NOTIFICACAO, TITULO FROM NOTIFICACOES WHERE ID_NOTIFICACAO IN ({placeholders})",
-                    tuple(lote))
+                    tuple(lote)
+                )
                 for registro in cur_principal.fetchall():
                     notificacoes_info[registro[0]] = registro[1]
 
@@ -228,7 +280,8 @@ def listar_logs_escritorio(id_escritorio):
                 placeholders = ','.join('?' for _ in lote)
                 cur_principal.execute(
                     f"SELECT ID_DOCUMENTOS_GERADOS, NOME_ARQUIVO FROM DOCUMENTOS_GERADOS WHERE ID_DOCUMENTOS_GERADOS IN ({placeholders})",
-                    tuple(lote))
+                    tuple(lote)
+                )
                 for registro in cur_principal.fetchall():
                     documentos_info[registro[0]] = registro[1]
 
@@ -239,9 +292,74 @@ def listar_logs_escritorio(id_escritorio):
                 placeholders = ','.join('?' for _ in lote)
                 cur_principal.execute(
                     f"SELECT ID_MODELOS_DOCUMENTOS, NOME FROM MODELOS_DOCUMENTOS WHERE ID_MODELOS_DOCUMENTOS IN ({placeholders})",
-                    tuple(lote))
+                    tuple(lote)
+                )
                 for registro in cur_principal.fetchall():
                     modelos_info[registro[0]] = registro[1]
+
+        if ids_conversas:
+            lista_ids = sorted(ids_conversas)
+            for inicio in range(0, len(lista_ids), 200):
+                lote = lista_ids[inicio:inicio + 200]
+                placeholders = ','.join('?' for _ in lote)
+                cur_principal.execute(
+                    f"SELECT ID_CONVERSA, ID_ADVOGADO, ID_CLIENTE FROM CONVERSAS WHERE ID_CONVERSA IN ({placeholders})",
+                    tuple(lote)
+                )
+                for registro in cur_principal.fetchall():
+                    conversas_info[registro[0]] = {'id_advogado': registro[1], 'id_cliente': registro[2]}
+                    if registro[1] is not None:
+                        ids_usuarios.add(registro[1])
+                    if registro[2] is not None:
+                        ids_usuarios.add(registro[2])
+
+        if ids_mensagens:
+            lista_ids = sorted(ids_mensagens)
+            for inicio in range(0, len(lista_ids), 200):
+                lote = lista_ids[inicio:inicio + 200]
+                placeholders = ','.join('?' for _ in lote)
+                cur_principal.execute(
+                    f"SELECT ID_MENSAGEM, ID_CONVERSA, ID_REMETENTE, MENSAGEM FROM MENSAGENS WHERE ID_MENSAGEM IN ({placeholders})",
+                    tuple(lote)
+                )
+                for registro in cur_principal.fetchall():
+                    mensagens_info[registro[0]] = {
+                        'id_conversa': registro[1],
+                        'id_remetente': registro[2],
+                        'mensagem': registro[3]
+                    }
+                    if registro[1] is not None:
+                        ids_conversas.add(registro[1])
+                    if registro[2] is not None:
+                        ids_usuarios.add(registro[2])
+
+        if ids_conversas and not conversas_info:
+            lista_ids = sorted(ids_conversas)
+            for inicio in range(0, len(lista_ids), 200):
+                lote = lista_ids[inicio:inicio + 200]
+                placeholders = ','.join('?' for _ in lote)
+                cur_principal.execute(
+                    f"SELECT ID_CONVERSA, ID_ADVOGADO, ID_CLIENTE FROM CONVERSAS WHERE ID_CONVERSA IN ({placeholders})",
+                    tuple(lote)
+                )
+                for registro in cur_principal.fetchall():
+                    conversas_info[registro[0]] = {'id_advogado': registro[1], 'id_cliente': registro[2]}
+                    if registro[1] is not None:
+                        ids_usuarios.add(registro[1])
+                    if registro[2] is not None:
+                        ids_usuarios.add(registro[2])
+
+        faltantes = [i for i in ids_usuarios if i not in nomes]
+        if faltantes:
+            for inicio in range(0, len(faltantes), 200):
+                lote = faltantes[inicio:inicio + 200]
+                placeholders = ','.join('?' for _ in lote)
+                cur_principal.execute(
+                    f"SELECT ID_USUARIOS, NOME FROM USUARIOS WHERE ID_USUARIOS IN ({placeholders})",
+                    tuple(lote)
+                )
+                for registro in cur_principal.fetchall():
+                    nomes[registro[0]] = registro[1]
 
         logs = []
 
@@ -257,8 +375,14 @@ def listar_logs_escritorio(id_escritorio):
             id_registro = row[5]
             acao_original = texto(row[3]).upper() or 'DESCONHECIDO'
             acao = acao_original
+            antigo_txt = texto(row[7])
+            novo_txt = texto(row[8])
 
-            origem_banco = 'ORIGEM: BANCO_DIRETO' in detalhes and 'ORIGEM: SISTEMA' not in detalhes and 'ORIGEM: APP' not in detalhes
+            origem_banco = (
+                'ORIGEM: BANCO_DIRETO' in detalhes
+                and 'ORIGEM: SISTEMA' not in detalhes
+                and 'ORIGEM: APP' not in detalhes
+            )
 
             if origem_banco:
                 nome_usuario = 'Alterado diretamente no banco'
@@ -285,6 +409,42 @@ def listar_logs_escritorio(id_escritorio):
             elif tabela == 'MODELOS_DOCUMENTOS':
                 nome_modelo = modelos_info.get(id_registro)
                 nome_alvo = f"Modelo: {nome_modelo}" if nome_modelo else f"Modelo #{id_registro}"
+            elif tabela == 'MENSAGENS':
+                id_mensagem_int = extrair_id(novo_txt, 'ID_MENSAGEM') or extrair_id(antigo_txt, 'ID_MENSAGEM')
+                info_mensagem = mensagens_info.get(id_mensagem_int) if id_mensagem_int else None
+
+                if info_mensagem:
+                    info_conversa = conversas_info.get(info_mensagem['id_conversa'])
+                    if info_conversa:
+                        id_remetente = info_mensagem['id_remetente']
+                        if id_remetente == info_conversa['id_advogado']:
+                            id_outro = info_conversa['id_cliente']
+                        elif id_remetente == info_conversa['id_cliente']:
+                            id_outro = info_conversa['id_advogado']
+                        else:
+                            id_outro = info_conversa['id_advogado'] or info_conversa['id_cliente']
+                        nome_outro = nomes.get(id_outro)
+                        nome_alvo = f"Mensagem #{id_mensagem_int} (conversa com {nome_outro})" if nome_outro else f"Mensagem #{id_mensagem_int}"
+                    else:
+                        nome_alvo = f"Mensagem #{id_mensagem_int}"
+                else:
+                    nome_alvo = f"Mensagem #{id_mensagem_int or id_registro}"
+            elif tabela == 'CONVERSAS':
+                id_conversa_int = extrair_id(novo_txt, 'ID_CONVERSA') or extrair_id(antigo_txt, 'ID_CONVERSA')
+                info_conversa = conversas_info.get(id_conversa_int) if id_conversa_int else None
+                if info_conversa:
+                    nome_adv = nomes.get(info_conversa['id_advogado'])
+                    nome_cli = nomes.get(info_conversa['id_cliente'])
+                    if nome_adv and nome_cli:
+                        nome_alvo = f"Conversa #{id_conversa_int} ({nome_adv} x {nome_cli})"
+                    elif nome_adv:
+                        nome_alvo = f"Conversa #{id_conversa_int} ({nome_adv})"
+                    elif nome_cli:
+                        nome_alvo = f"Conversa #{id_conversa_int} ({nome_cli})"
+                    else:
+                        nome_alvo = f"Conversa #{id_conversa_int}"
+                else:
+                    nome_alvo = f"Conversa #{id_conversa_int or id_registro}"
             else:
                 nome_alvo = nomes.get(id_registro) or texto(row[2]) or f'Registro #{id_registro}'
 
@@ -296,17 +456,12 @@ def listar_logs_escritorio(id_escritorio):
                         info_cliente = cnpjs.get(int(id_cliente))
                         if info_cliente and info_cliente['cnpj']:
                             nome_alvo = f"{nome_alvo} (CNPJ: {info_cliente['cnpj']})"
-                    except:
+                    except Exception:
                         pass
 
             antigo = parse_valores(row[7], tabela)
             novo = parse_valores(row[8], tabela)
             mudancas = obter_mudancas(antigo, novo)
-
-            if tabela == 'REPRESENTANTES':
-                campos_ignorados_rep = ['CPF', 'RG', 'ORGAO_EXPEDIDOR', 'NACIONALIDADE', 'ESTADO_CIVIL', 'PROFISSAO',
-                                        'SEXO', 'ID_CLIENTE_JURIDICO']
-                mudancas = [m for m in mudancas if m['campo'].upper() not in campos_ignorados_rep]
 
             if tabela == 'NOTIFICACOES' and acao_original == 'UPDATE':
                 if len(mudancas) == 1 and mudancas[0]['campo'] == 'LIDA':
@@ -317,8 +472,13 @@ def listar_logs_escritorio(id_escritorio):
                 else:
                     acao = 'UPDATE'
 
+            if tabela in ('CONVERSAS', 'MENSAGENS') and acao_original == 'UPDATE':
+                if len(mudancas) == 0:
+                    continue
+
             ip_banco = texto(row[12]) or '--'
-            if ip_banco == '::1': ip_banco = '127.0.0.1'
+            if ip_banco == '::1':
+                ip_banco = '127.0.0.1'
 
             logs.append({
                 'id_log': row[0],
@@ -337,18 +497,28 @@ def listar_logs_escritorio(id_escritorio):
             })
 
         return jsonify({
-            'logs': logs, 'pagina': 1, 'por_pagina': 500,
-            'total': len(logs), 'total_paginas': 1, 'tem_mais': False
+            'logs': logs,
+            'pagina': 1,
+            'por_pagina': 500,
+            'total': len(logs),
+            'total_paginas': 1,
+            'tem_mais': False
         }), 200
 
     except Exception:
         app.logger.exception('Erro ao consultar logs de auditoria')
         return jsonify({'error': 'Erro ao consultar os logs de auditoria'}), 500
     finally:
-        if cur_log: cur_log.close()
-        if con_log: con_log.close()
-        if cur_principal: cur_principal.close()
-        if con_principal: con_principal.close()
+        if cur_log:
+            cur_log.close()
+        if con_log:
+            con_log.close()
+        if cur_principal:
+            cur_principal.close()
+        if con_principal:
+            con_principal.close()
+
+
 
 @app.route('/escritorio/<int:id_escritorio>/logs/pdf', methods=['GET'])
 def gerar_relatorio_logs_pdf(id_escritorio):
