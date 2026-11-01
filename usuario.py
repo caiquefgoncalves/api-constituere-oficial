@@ -17,483 +17,495 @@ import unicodedata
 
 @app.route('/escritorio/<int:id_escritorio>/logs', methods=['GET'])
 def listar_logs_escritorio(id_escritorio):
-    token_data = decodificar_token()
+    token = decodificar_token()
 
-    if not token_data:
+    if not token:
         return jsonify({'error': 'Token necessário'}), 401
 
-    if token_data['tipo'] != 0:
+    if token.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
-    con_principal = None
-    cur_principal = None
-    con_log = None
+    principal = None
+    auditoria = None
+    cur = None
     cur_log = None
 
-    try:
-        con_principal = conexao()
-        cur_principal = con_principal.cursor()
+    def texto(valor):
+        if valor is None:
+            return ''
 
-        cur_principal.execute("""
+        if hasattr(valor, 'read'):
+            valor = valor.read()
+
+        if isinstance(valor, bytes):
+            return valor.decode('utf-8', errors='replace')
+
+        return str(valor)
+
+    def inteiro(valor):
+        try:
+            return int(valor)
+        except (TypeError, ValueError):
+            return None
+
+    def extrair_campos(valor):
+        resultado = {}
+
+        for parte in re.split(
+            r'\s+\|\s+|\x1e',
+            texto(valor).replace('\r', '')
+        ):
+            chave, separador, conteudo = parte.partition(':')
+
+            if not separador:
+                continue
+
+            chave = chave.strip().upper().replace(' ', '_')
+
+            if not re.fullmatch(r'[A-Z0-9_]+', chave):
+                continue
+
+            resultado[chave] = conteudo.strip()
+
+        return resultado
+
+    try:
+        principal = conexao()
+        cur = principal.cursor()
+
+        cur.execute("""
             SELECT 1
             FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
-              AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
-        """, (token_data['id_usuarios'], id_escritorio))
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+              AND STATUS = 'PROPRIETARIO'
+              AND ATIVO = 1
+        """, (
+            token['id_usuarios'],
+            id_escritorio
+        ))
 
-        if not cur_principal.fetchone():
-            return jsonify({'error': 'Apenas o proprietário pode consultar os logs'}), 403
+        if not cur.fetchone():
+            return jsonify({
+                'error': 'Apenas o proprietário pode consultar os logs.'
+            }), 403
 
-        con_log = conexao_log()
-        cur_log = con_log.cursor()
+        auditoria = conexao_log()
+        cur_log = auditoria.cursor()
 
         cur_log.execute("""
             SELECT FIRST 500
-                ID_LOG, ID_USUARIO, NOME_USUARIO, ACAO, TABELA_AFETADA,
-                ID_REGISTRO_AFETADO, CAMPO, VALOR_ANTIGO, VALOR_NOVO,
-                DETALHES, DATA_HORA, MAQUINA, IP_ORIGEM
+                ID_LOG,
+                ID_USUARIO,
+                NOME_USUARIO,
+                ACAO,
+                TABELA_AFETADA,
+                ID_REGISTRO_AFETADO,
+                CAMPO,
+                VALOR_ANTIGO,
+                VALOR_NOVO,
+                DETALHES,
+                DATA_HORA,
+                MAQUINA,
+                IP_ORIGEM
             FROM LOG_AUDITORIA
             WHERE ID_ESCRITORIO = ?
             ORDER BY DATA_HORA DESC, ID_LOG DESC
         """, (id_escritorio,))
 
-        rows = cur_log.fetchall()
+        registros = cur_log.fetchall()
+        cache = {}
 
-        def texto(valor):
-            if valor is None:
-                return ''
-            if hasattr(valor, 'read'):
-                valor = valor.read()
-            if isinstance(valor, bytes):
-                return valor.decode('utf-8', errors='replace')
-            return str(valor)
+        def consultar(sql, parametros):
+            chave = (sql, tuple(parametros))
 
-        def extrair_id(conteudo, chave):
-            for parte in conteudo.replace('\r', '').replace('\n', ' ').split(' | '):
-                parte = parte.strip()
-                if ':' not in parte:
-                    continue
-                k, v = parte.split(':', 1)
-                if k.strip().upper() == chave:
-                    v = v.strip()
-                    if v and v.upper() != 'NULL' and v != '(Vazio)':
-                        try:
-                            return int(float(v))
-                        except Exception:
-                            return None
-            return None
+            if chave not in cache:
+                cur.execute(sql, tuple(parametros))
+                cache[chave] = cur.fetchone()
 
-        def parse_valores(valor, tabela):
-            resultado = {}
-            ignorados = {
-                'ID_USUARIOS', 'ID_USUARIO_RESPONSAVEL', 'DATA_CADASTRO', 'PRIMEIRO_ACESSO',
-                'SENHA', 'ID_REPRESENTANTE', 'ID_CLIENTE_JURIDICO',
-                'ID_PAGAMENTO', 'ID_PAGAMENTO_EXITO', 'ID_PARCELA', 'ID_PARCELA_EXITO', 'ID_PROCESSO',
-                'ID_PROCESSOS', 'QUANTIDADE', 'ID_USUARIOS_ADVOGADO', 'ID_USUARIOS_CLIENTE', 'ID_ESCRITORIOS',
-                'ID_PARTE_CONTRARIA', 'ID_NOTIFICACAO', 'ID_DOCUMENTOS_GERADOS', 'ID_MODELOS_DOCUMENTOS',
-                'ID_USUARIOS_GERADOR'
-            }
+            return cache[chave]
 
-            if tabela in ['AGENDAMENTOS', 'NOTIFICACOES']:
-                ignorados.add('TIPO')
+        def nome_usuario(id_usuario):
+            if id_usuario is None:
+                return None
 
-            if tabela == 'MENSAGENS':
-                ignorados.update({'ID_MENSAGEM', 'ID_REMETENTE', 'ID_CONVERSA'})
-            elif tabela == 'CONVERSAS':
-                ignorados.update({'ID_CONVERSA', 'ID_ADVOGADO', 'ID_CLIENTE'})
+            linha = consultar(
+                'SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?',
+                (id_usuario,)
+            )
 
-            conteudo = texto(valor)
+            return linha[0] if linha else None
 
-            for parte in conteudo.replace('\r', '').replace('\n', ' ').split(' | '):
-                parte = parte.strip()
-                if ':' not in parte:
-                    continue
+        def nome_alvo(tabela, identificador, antigo, novo):
+            atributos = {**antigo, **novo}
 
-                chave, valor_campo = parte.split(':', 1)
-                chave = chave.strip().upper()
-                valor_campo = valor_campo.strip()
+            def campo(chave):
+                valor = atributos.get(chave)
 
-                if chave in ignorados or valor_campo == '[PROTEGIDO]':
-                    continue
-                if not valor_campo or valor_campo.upper() == 'NULL':
-                    valor_campo = '(Vazio)'
+                if valor is None or valor.upper() == 'NULL':
+                    return None
 
-                if chave == 'LIDA':
-                    valor_campo = 'Lido' if valor_campo == '1' else 'Não Lido'
-                elif chave == 'ATIVO':
-                    if tabela not in ['MODELOS_DOCUMENTOS', 'REPRESENTANTES']:
-                        continue
-                    valor_campo = 'Ativo' if valor_campo == '1' else 'Inativo'
-                else:
-                    try:
-                        num = float(valor_campo)
-                        if num.is_integer():
-                            valor_campo = str(int(num))
-                        else:
-                            valor_campo = f"{num:.2f}".replace('.', ',')
-                    except Exception:
-                        pass
+                return valor
 
-                resultado[chave] = valor_campo
-
-            return resultado
-
-        def obter_mudancas(antigo, novo):
-            mudancas = []
-            campos = list(dict.fromkeys([*antigo.keys(), *novo.keys()]))
-
-            for campo in campos:
-                antes = antigo.get(campo, '(Vazio)')
-                depois = novo.get(campo, '(Vazio)')
-                if antes != depois:
-                    mudancas.append({'campo': campo, 'antes': antes, 'depois': depois})
-            return mudancas
-
-        dados_logs = []
-        ids_usuarios = set()
-        ids_representantes = set()
-        ids_clientes_juridicos = set()
-        ids_partes_contrarias = set()
-        ids_notificacoes = set()
-        ids_documentos = set()
-        ids_modelos = set()
-        ids_conversas = set()
-        ids_mensagens = set()
-
-        for row in rows:
-            detalhes = texto(row[9])
-            tabela = texto(row[4]).strip().upper()
-            antigo_txt = texto(row[7])
-            novo_txt = texto(row[8])
-
-            dados_logs.append({'row': row, 'detalhes': detalhes, 'tabela': tabela})
-
-            if tabela == 'USUARIOS' and row[5] is not None:
-                ids_usuarios.add(row[5])
-            elif tabela == 'REPRESENTANTES' and row[5] is not None:
-                ids_representantes.add(row[5])
-                valores_antigos = parse_valores(row[7], tabela)
-                valores_novos = parse_valores(row[8], tabela)
-                id_cliente = valores_novos.get('ID_CLIENTE_JURIDICO') or valores_antigos.get('ID_CLIENTE_JURIDICO')
-                if id_cliente and id_cliente != '(Vazio)':
-                    try:
-                        ids_clientes_juridicos.add(int(id_cliente))
-                    except Exception:
-                        pass
-            elif tabela == 'PARTE_CONTRARIA' and row[5] is not None:
-                ids_partes_contrarias.add(row[5])
-            elif tabela == 'NOTIFICACOES' and row[5] is not None:
-                ids_notificacoes.add(row[5])
-            elif tabela == 'DOCUMENTOS_GERADOS' and row[5] is not None:
-                ids_documentos.add(row[5])
-            elif tabela == 'MODELOS_DOCUMENTOS' and row[5] is not None:
-                ids_modelos.add(row[5])
-            elif tabela == 'MENSAGENS':
-                id_mensagem = extrair_id(novo_txt, 'ID_MENSAGEM') or extrair_id(antigo_txt, 'ID_MENSAGEM')
-                if id_mensagem:
-                    ids_mensagens.add(id_mensagem)
-                id_conversa = extrair_id(novo_txt, 'ID_CONVERSA') or extrair_id(antigo_txt, 'ID_CONVERSA')
-                if id_conversa:
-                    ids_conversas.add(id_conversa)
-                if row[1] is not None:
-                    ids_usuarios.add(row[1])
-            elif tabela == 'CONVERSAS':
-                id_conversa = extrair_id(novo_txt, 'ID_CONVERSA') or extrair_id(antigo_txt, 'ID_CONVERSA')
-                if id_conversa:
-                    ids_conversas.add(id_conversa)
-                if row[1] is not None:
-                    ids_usuarios.add(row[1])
-
-        nomes = {}
-        cnpjs = {}
-        partes_info = {}
-        notificacoes_info = {}
-        documentos_info = {}
-        modelos_info = {}
-        conversas_info = {}
-        mensagens_info = {}
-
-        if ids_usuarios:
-            lista_ids = sorted(ids_usuarios)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_USUARIOS, NOME FROM USUARIOS WHERE ID_USUARIOS IN ({placeholders})",
-                    tuple(lote)
+            if tabela == 'USUARIOS':
+                return (
+                    nome_usuario(identificador)
+                    or campo('NOME')
+                    or 'Cadastro de usuário'
                 )
-                for registro in cur_principal.fetchall():
-                    nomes[registro[0]] = registro[1]
 
-        if ids_representantes:
-            lista_ids = sorted(ids_representantes)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_REPRESENTANTE, NOME_COMPLETO FROM REPRESENTANTES WHERE ID_REPRESENTANTE IN ({placeholders})",
-                    tuple(lote)
+            if tabela == 'ESCRITORIOS':
+                nome = (
+                    campo('NOME_FANTASIA')
+                    or campo('RAZAO_SOCIAL')
                 )
-                for registro in cur_principal.fetchall():
-                    nomes[registro[0]] = registro[1]
 
-        if ids_clientes_juridicos:
-            lista_ids = sorted(ids_clientes_juridicos)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_USUARIOS, CNPJ, RAZAO_SOCIAL FROM USUARIOS WHERE ID_USUARIOS IN ({placeholders})",
-                    tuple(lote)
-                )
-                for registro in cur_principal.fetchall():
-                    cnpjs[registro[0]] = {'cnpj': registro[1], 'razao': registro[2]}
+                if not nome:
+                    linha = consultar("""
+                        SELECT NOME_FANTASIA, RAZAO_SOCIAL
+                        FROM ESCRITORIOS
+                        WHERE ID_ESCRITORIOS = ?
+                    """, (identificador,))
 
-        if ids_partes_contrarias:
-            lista_ids = sorted(ids_partes_contrarias)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_PARTE_CONTRARIA, NOME FROM PARTE_CONTRARIA WHERE ID_PARTE_CONTRARIA IN ({placeholders})",
-                    tuple(lote)
-                )
-                for registro in cur_principal.fetchall():
-                    partes_info[registro[0]] = registro[1]
+                    nome = (
+                        linha[0] or linha[1]
+                        if linha
+                        else None
+                    )
 
-        if ids_notificacoes:
-            lista_ids = sorted(ids_notificacoes)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_NOTIFICACAO, TITULO FROM NOTIFICACOES WHERE ID_NOTIFICACAO IN ({placeholders})",
-                    tuple(lote)
-                )
-                for registro in cur_principal.fetchall():
-                    notificacoes_info[registro[0]] = registro[1]
+                return nome or 'Escritório'
 
-        if ids_documentos:
-            lista_ids = sorted(ids_documentos)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_DOCUMENTOS_GERADOS, NOME_ARQUIVO FROM DOCUMENTOS_GERADOS WHERE ID_DOCUMENTOS_GERADOS IN ({placeholders})",
-                    tuple(lote)
-                )
-                for registro in cur_principal.fetchall():
-                    documentos_info[registro[0]] = registro[1]
+            if tabela == 'ADVOGADO_ESCRITORIO':
+                advogado_id = inteiro(campo('ID_USUARIOS'))
 
-        if ids_modelos:
-            lista_ids = sorted(ids_modelos)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_MODELOS_DOCUMENTOS, NOME FROM MODELOS_DOCUMENTOS WHERE ID_MODELOS_DOCUMENTOS IN ({placeholders})",
-                    tuple(lote)
-                )
-                for registro in cur_principal.fetchall():
-                    modelos_info[registro[0]] = registro[1]
+                if advogado_id is None:
+                    linha = consultar("""
+                        SELECT ID_USUARIOS
+                        FROM ADVOGADO_ESCRITORIO
+                        WHERE ID = ?
+                    """, (identificador,))
 
-        if ids_conversas:
-            lista_ids = sorted(ids_conversas)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_CONVERSA, ID_ADVOGADO, ID_CLIENTE FROM CONVERSAS WHERE ID_CONVERSA IN ({placeholders})",
-                    tuple(lote)
-                )
-                for registro in cur_principal.fetchall():
-                    conversas_info[registro[0]] = {'id_advogado': registro[1], 'id_cliente': registro[2]}
-                    if registro[1] is not None:
-                        ids_usuarios.add(registro[1])
-                    if registro[2] is not None:
-                        ids_usuarios.add(registro[2])
+                    advogado_id = linha[0] if linha else None
 
-        if ids_mensagens:
-            lista_ids = sorted(ids_mensagens)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_MENSAGEM, ID_CONVERSA, ID_REMETENTE, MENSAGEM FROM MENSAGENS WHERE ID_MENSAGEM IN ({placeholders})",
-                    tuple(lote)
+                return (
+                    nome_usuario(advogado_id)
+                    or 'Advogado vinculado'
                 )
-                for registro in cur_principal.fetchall():
-                    mensagens_info[registro[0]] = {
-                        'id_conversa': registro[1],
-                        'id_remetente': registro[2],
-                        'mensagem': registro[3]
-                    }
-                    if registro[1] is not None:
-                        ids_conversas.add(registro[1])
-                    if registro[2] is not None:
-                        ids_usuarios.add(registro[2])
 
-        if ids_conversas and not conversas_info:
-            lista_ids = sorted(ids_conversas)
-            for inicio in range(0, len(lista_ids), 200):
-                lote = lista_ids[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_CONVERSA, ID_ADVOGADO, ID_CLIENTE FROM CONVERSAS WHERE ID_CONVERSA IN ({placeholders})",
-                    tuple(lote)
-                )
-                for registro in cur_principal.fetchall():
-                    conversas_info[registro[0]] = {'id_advogado': registro[1], 'id_cliente': registro[2]}
-                    if registro[1] is not None:
-                        ids_usuarios.add(registro[1])
-                    if registro[2] is not None:
-                        ids_usuarios.add(registro[2])
+            if tabela == 'ATUALIZACOES':
+                titulo = campo('TITULO')
 
-        faltantes = [i for i in ids_usuarios if i not in nomes]
-        if faltantes:
-            for inicio in range(0, len(faltantes), 200):
-                lote = faltantes[inicio:inicio + 200]
-                placeholders = ','.join('?' for _ in lote)
-                cur_principal.execute(
-                    f"SELECT ID_USUARIOS, NOME FROM USUARIOS WHERE ID_USUARIOS IN ({placeholders})",
-                    tuple(lote)
+                if not titulo:
+                    linha = consultar("""
+                        SELECT TITULO
+                        FROM ATUALIZACOES
+                        WHERE ID_ATUALIZACOES = ?
+                    """, (identificador,))
+
+                    titulo = linha[0] if linha else None
+
+                return titulo or 'Atualização do processo'
+
+            if tabela == 'AGENDAMENTOS':
+                assunto = campo('ASSUNTO')
+                cliente = campo('CLIENTE')
+
+                if not assunto and not cliente:
+                    linha = consultar("""
+                        SELECT ASSUNTO, CLIENTE
+                        FROM AGENDAMENTOS
+                        WHERE ID_AGENDAMENTOS = ?
+                    """, (identificador,))
+
+                    if linha:
+                        assunto, cliente = linha
+
+                if not cliente:
+                    cliente = nome_usuario(
+                        inteiro(campo('ID_USUARIOS_CLIENTE'))
+                    )
+
+                if assunto and cliente:
+                    return f'{assunto} ({cliente})'
+
+                return assunto or cliente or 'Agendamento'
+
+            if tabela == 'LANCAMENTOS_FINANCEIROS':
+                descricao = campo('DESCRICAO')
+
+                if not descricao:
+                    linha = consultar("""
+                        SELECT DESCRICAO
+                        FROM LANCAMENTOS_FINANCEIROS
+                        WHERE ID_LANCAMENTOS = ?
+                    """, (identificador,))
+
+                    descricao = linha[0] if linha else None
+
+                return descricao or 'Lançamento financeiro'
+
+            if tabela == 'GOOGLE_CALENDAR':
+                return 'Google Agenda'
+
+            if tabela == 'PROCESSOS':
+                linha = consultar("""
+                    SELECT NUM_PROCESSO
+                    FROM PROCESSOS
+                    WHERE ID_PROCESSOS = ?
+                """, (identificador,))
+
+                if linha and linha[0]:
+                    return f'Processo {linha[0]}'
+
+                return 'Processo'
+
+            if tabela == 'NOTIFICACOES':
+                linha = consultar("""
+                    SELECT TITULO
+                    FROM NOTIFICACOES
+                    WHERE ID_NOTIFICACAO = ?
+                """, (identificador,))
+
+                return linha[0] if linha and linha[0] else 'Notificação'
+
+            if tabela == 'PARTE_CONTRARIA':
+                linha = consultar("""
+                    SELECT NOME
+                    FROM PARTE_CONTRARIA
+                    WHERE ID_PARTE_CONTRARIA = ?
+                """, (identificador,))
+
+                return linha[0] if linha and linha[0] else 'Parte contrária'
+
+            if tabela == 'DOCUMENTOS_GERADOS':
+                linha = consultar("""
+                    SELECT NOME_ARQUIVO
+                    FROM DOCUMENTOS_GERADOS
+                    WHERE ID_DOCUMENTOS_GERADOS = ?
+                """, (identificador,))
+
+                return linha[0] if linha and linha[0] else 'Documento'
+
+            if tabela == 'MODELOS_DOCUMENTOS':
+                linha = consultar("""
+                    SELECT NOME
+                    FROM MODELOS_DOCUMENTOS
+                    WHERE ID_MODELOS_DOCUMENTOS = ?
+                """, (identificador,))
+
+                return linha[0] if linha and linha[0] else 'Modelo de documento'
+
+            if tabela == 'REPRESENTANTES':
+                linha = consultar("""
+                    SELECT NOME_COMPLETO
+                    FROM REPRESENTANTES
+                    WHERE ID_REPRESENTANTE = ?
+                """, (identificador,))
+
+                return linha[0] if linha and linha[0] else 'Representante'
+
+            if tabela in ('MENSAGENS', 'CONVERSAS'):
+                conversa_id = inteiro(campo('ID_CONVERSA'))
+                mensagem_id = inteiro(campo('ID_MENSAGEM'))
+
+                if tabela == 'MENSAGENS' and conversa_id is None:
+                    linha = consultar("""
+                        SELECT ID_CONVERSA
+                        FROM MENSAGENS
+                        WHERE ID_MENSAGEM = ?
+                    """, (mensagem_id or identificador,))
+
+                    conversa_id = linha[0] if linha else None
+
+                if tabela == 'CONVERSAS':
+                    conversa_id = conversa_id or identificador
+
+                if conversa_id:
+                    linha = consultar("""
+                        SELECT ID_ADVOGADO, ID_CLIENTE
+                        FROM CONVERSAS
+                        WHERE ID_CONVERSA = ?
+                    """, (conversa_id,))
+
+                    if linha:
+                        nome1 = nome_usuario(linha[0])
+                        nome2 = nome_usuario(linha[1])
+
+                        if tabela == 'MENSAGENS':
+                            if nome2 or nome1:
+                                return (
+                                    f'Mensagem (conversa com '
+                                    f'{nome2 or nome1})'
+                                )
+
+                            return 'Mensagem'
+
+                        return (
+                            f'Conversa ({nome1 or "Advogado"} '
+                            f'x {nome2 or "Cliente"})'
+                        )
+
+                return (
+                    'Mensagem'
+                    if tabela == 'MENSAGENS'
+                    else 'Conversa'
                 )
-                for registro in cur_principal.fetchall():
-                    nomes[registro[0]] = registro[1]
+
+            return (
+                campo('NOME')
+                or campo('DESCRICAO')
+                or campo('TITULO')
+                or 'Registro'
+            )
+
+        campos_protegidos = {
+            'SENHA',
+            'REFRESH_TOKEN',
+            'ACCESS_TOKEN',
+            'CLIENT_SECRET',
+            'ID_TOKEN',
+            'TOKEN',
+            'GOOGLE_EVENT_ID'
+        }
 
         logs = []
 
-        cur_principal.execute("SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?", (token_data['id_usuarios'],))
-        res_adv = cur_principal.fetchone()
-        nome_adv_logado = res_adv[0] if res_adv else 'Advogado'
-
-        for item in dados_logs:
-            row = item['row']
-            detalhes = item['detalhes']
-            tabela = item['tabela']
-
-            id_registro = row[5]
-            acao_original = texto(row[3]).upper() or 'DESCONHECIDO'
-            acao = acao_original
-            antigo_txt = texto(row[7])
-            novo_txt = texto(row[8])
-
-            origem_banco = (
-                'ORIGEM: BANCO_DIRETO' in detalhes
-                and 'ORIGEM: SISTEMA' not in detalhes
-                and 'ORIGEM: APP' not in detalhes
+        for row in registros:
+            tabela = (
+                texto(row[4])
+                .strip()
+                .upper()
+                .replace(' ', '_')
             )
 
-            if origem_banco:
-                nome_usuario = 'Alterado diretamente no banco'
-                cargo = 'Banco de dados'
-                id_usuario = 0
-            else:
-                nome_usuario = nome_adv_logado
-                cargo = 'Sistema'
-                id_usuario = token_data['id_usuarios']
+            acao = texto(row[3]).strip().upper()
+            detalhes = texto(row[9])
+            antigo = extrair_campos(row[7])
+            novo = extrair_campos(row[8])
 
-            if tabela in ['PAGAMENTOS', 'PARCELAS', 'PAGAMENTO_EXITO', 'PARCELAS_EXITO']:
-                nome_alvo = f"Financeiro ({texto(row[2])})"
-            elif tabela == 'PROCESSOS':
-                nome_alvo = f"Processo #{id_registro}"
-            elif tabela == 'PARTE_CONTRARIA':
-                nome_parte = partes_info.get(id_registro)
-                nome_alvo = f"Parte Contrária: {nome_parte}" if nome_parte else f"Parte Contrária #{id_registro}"
-            elif tabela == 'NOTIFICACOES':
-                titulo_notificacao = notificacoes_info.get(id_registro)
-                nome_alvo = f'"{titulo_notificacao}"' if titulo_notificacao else f'Notificação #{id_registro}'
-            elif tabela == 'DOCUMENTOS_GERADOS':
-                nome_doc = documentos_info.get(id_registro)
-                nome_alvo = f"Documento: {nome_doc}" if nome_doc else f"Documento #{id_registro}"
-            elif tabela == 'MODELOS_DOCUMENTOS':
-                nome_modelo = modelos_info.get(id_registro)
-                nome_alvo = f"Modelo: {nome_modelo}" if nome_modelo else f"Modelo #{id_registro}"
-            elif tabela == 'MENSAGENS':
-                id_mensagem_int = extrair_id(novo_txt, 'ID_MENSAGEM') or extrair_id(antigo_txt, 'ID_MENSAGEM')
-                info_mensagem = mensagens_info.get(id_mensagem_int) if id_mensagem_int else None
+            mudancas = []
 
-                if info_mensagem:
-                    info_conversa = conversas_info.get(info_mensagem['id_conversa'])
-                    if info_conversa:
-                        id_remetente = info_mensagem['id_remetente']
-                        if id_remetente == info_conversa['id_advogado']:
-                            id_outro = info_conversa['id_cliente']
-                        elif id_remetente == info_conversa['id_cliente']:
-                            id_outro = info_conversa['id_advogado']
-                        else:
-                            id_outro = info_conversa['id_advogado'] or info_conversa['id_cliente']
-                        nome_outro = nomes.get(id_outro)
-                        nome_alvo = f"Mensagem #{id_mensagem_int} (conversa com {nome_outro})" if nome_outro else f"Mensagem #{id_mensagem_int}"
-                    else:
-                        nome_alvo = f"Mensagem #{id_mensagem_int}"
-                else:
-                    nome_alvo = f"Mensagem #{id_mensagem_int or id_registro}"
-            elif tabela == 'CONVERSAS':
-                id_conversa_int = extrair_id(novo_txt, 'ID_CONVERSA') or extrair_id(antigo_txt, 'ID_CONVERSA')
-                info_conversa = conversas_info.get(id_conversa_int) if id_conversa_int else None
-                if info_conversa:
-                    nome_adv = nomes.get(info_conversa['id_advogado'])
-                    nome_cli = nomes.get(info_conversa['id_cliente'])
-                    if nome_adv and nome_cli:
-                        nome_alvo = f"Conversa #{id_conversa_int} ({nome_adv} x {nome_cli})"
-                    elif nome_adv:
-                        nome_alvo = f"Conversa #{id_conversa_int} ({nome_adv})"
-                    elif nome_cli:
-                        nome_alvo = f"Conversa #{id_conversa_int} ({nome_cli})"
-                    else:
-                        nome_alvo = f"Conversa #{id_conversa_int}"
-                else:
-                    nome_alvo = f"Conversa #{id_conversa_int or id_registro}"
-            else:
-                nome_alvo = nomes.get(id_registro) or texto(row[2]) or f'Registro #{id_registro}'
-
-            if tabela == 'REPRESENTANTES':
-                valores = parse_valores(row[8], tabela)
-                id_cliente = valores.get('ID_CLIENTE_JURIDICO')
-                if id_cliente:
-                    try:
-                        info_cliente = cnpjs.get(int(id_cliente))
-                        if info_cliente and info_cliente['cnpj']:
-                            nome_alvo = f"{nome_alvo} (CNPJ: {info_cliente['cnpj']})"
-                    except Exception:
-                        pass
-
-            antigo = parse_valores(row[7], tabela)
-            novo = parse_valores(row[8], tabela)
-            mudancas = obter_mudancas(antigo, novo)
-
-            if tabela == 'NOTIFICACOES' and acao_original == 'UPDATE':
-                if len(mudancas) == 1 and mudancas[0]['campo'] == 'LIDA':
-                    if novo.get('LIDA') == 'Lido':
-                        acao = 'LIDO'
-                    else:
-                        acao = 'NAO_LIDO'
-                else:
-                    acao = 'UPDATE'
-
-            if tabela in ('CONVERSAS', 'MENSAGENS') and acao_original == 'UPDATE':
-                if len(mudancas) == 0:
+            for campo in dict.fromkeys([*antigo, *novo]):
+                if (
+                    campo.startswith('ID_')
+                    or campo in campos_protegidos
+                ):
                     continue
 
-            ip_banco = texto(row[12]) or '--'
-            if ip_banco == '::1':
-                ip_banco = '127.0.0.1'
+                antes = antigo.get(campo, '')
+                depois = novo.get(campo, '')
+
+                if antes == depois:
+                    continue
+
+                mudancas.append({
+                    'campo': campo,
+                    'antes': (
+                        '(Vazio)'
+                        if not antes or antes.upper() == 'NULL'
+                        else antes
+                    ),
+                    'depois': (
+                        '(Vazio)'
+                        if not depois or depois.upper() == 'NULL'
+                        else depois
+                    )
+                })
+
+            if (
+                tabela == 'NOTIFICACOES'
+                and acao == 'UPDATE'
+                and len(mudancas) == 1
+                and mudancas[0]['campo'] == 'LIDA'
+            ):
+                acao = (
+                    'LIDO'
+                    if mudancas[0]['depois'] in ('1', 'Lido')
+                    else 'NAO_LIDO'
+                )
+
+            if acao == 'UPDATE' and antigo == novo:
+                continue
+
+            autor = re.search(
+                r'(?im)^AUTOR_ID:\s*(\d+)\s*$',
+                detalhes
+            )
+
+            autor_id = (
+                inteiro(autor.group(1))
+                if autor
+                else None
+            )
+
+            sistema = (
+                'ORIGEM: SISTEMA' in detalhes
+                or 'ORIGEM: APP' in detalhes
+            )
+
+            banco = (
+                'ORIGEM: BANCO_DIRETO' in detalhes
+                or not sistema
+            )
+
+            if sistema:
+                nome_autor = (
+                    nome_usuario(autor_id)
+                    if autor_id and autor_id > 0
+                    else None
+                )
+
+                nome_realizador = (
+                    nome_autor
+                    or 'Ação realizada pelo sistema'
+                )
+
+                cargo = (
+                    'Advogado'
+                    if nome_autor
+                    else 'Sistema'
+                )
+
+                id_realizador = (
+                    autor_id
+                    if nome_autor
+                    else None
+                )
+            else:
+                nome_realizador = 'Alterado diretamente no banco'
+                cargo = 'Banco de dados'
+                id_realizador = None
+
+            alvo = nome_alvo(
+                tabela,
+                row[5],
+                antigo,
+                novo
+            )
+
+            ip = texto(row[12]) or '--'
+
+            if ip == '::1':
+                ip = '127.0.0.1'
 
             logs.append({
                 'id_log': row[0],
-                'id_usuario': id_usuario,
-                'nome_usuario': nome_usuario,
+                'id_usuario': id_realizador,
+                'nome_usuario': nome_realizador,
                 'acao': acao,
-                'tabela_afetada': texto(row[4]).replace('_', ' ').title(),
-                'id_registro_afetado': id_registro,
-                'nome_registro_afetado': nome_alvo,
+                'tabela_afetada': tabela.replace('_', ' ').title(),
+                'id_registro_afetado': row[5],
+                'nome_registro_afetado': alvo,
                 'mudancas': mudancas,
-                'data_hora': row[10].isoformat() if row[10] else None,
+                'data_hora': (
+                    row[10].isoformat()
+                    if row[10]
+                    else None
+                ),
                 'maquina': texto(row[11]) or '--',
-                'ip_origem': ip_banco,
+                'ip_origem': ip,
                 'cargo': cargo,
-                'alerta_banco': origem_banco
+                'alerta_banco': banco
             })
 
         return jsonify({
@@ -506,17 +518,26 @@ def listar_logs_escritorio(id_escritorio):
         }), 200
 
     except Exception:
-        app.logger.exception('Erro ao consultar logs de auditoria')
-        return jsonify({'error': 'Erro ao consultar os logs de auditoria'}), 500
+        app.logger.exception(
+            'Erro ao consultar logs de auditoria'
+        )
+
+        return jsonify({
+            'error': 'Erro ao consultar logs de auditoria.'
+        }), 500
+
     finally:
-        if cur_log:
+        if cur_log is not None:
             cur_log.close()
-        if con_log:
-            con_log.close()
-        if cur_principal:
-            cur_principal.close()
-        if con_principal:
-            con_principal.close()
+
+        if auditoria is not None:
+            auditoria.close()
+
+        if cur is not None:
+            cur.close()
+
+        if principal is not None:
+            principal.close()
 
 
 

@@ -1,201 +1,262 @@
-from flask import jsonify, request, send_file
-from funcao import decodificar_token, converter_data_pagamento, formatar_valor_br
-from main import app, socketio
-from db import conexao
+
 import datetime
-from io import BytesIO
-from fpdf import FPDF
 import unicodedata
+from decimal import Decimal, InvalidOperation
+from io import BytesIO
+
+from flask import jsonify, request, send_file
+from fpdf import FPDF
+
+from db import conexao
+from funcao import decodificar_token, converter_data_pagamento
+from main import app, socketio
 
 
 def converter_data(valor):
-    if not valor:
-        return None
+    if isinstance(valor, datetime.datetime):
+        return valor.date()
     if isinstance(valor, datetime.date):
         return valor
-    if isinstance(valor, str):
-        for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
+    if valor:
+        for formato in ('%Y-%m-%d', '%d/%m/%Y'):
             try:
-                return datetime.datetime.strptime(valor, fmt).date()
-            except:
-                continue
+                return datetime.datetime.strptime(str(valor), formato).date()
+            except ValueError:
+                pass
     return None
 
 
 def periodo_para_datas(periodo, data_ini=None, data_fim=None):
     hoje = datetime.date.today()
-
     if periodo == 'mes':
-        inicio = hoje.replace(day=1)
-        fim = hoje
-    elif periodo == 'mesAnterior':
-        primeiro_mes_atual = hoje.replace(day=1)
-        fim = primeiro_mes_atual - datetime.timedelta(days=1)
-        inicio = fim.replace(day=1)
-    elif periodo == '30dias':
-        inicio = hoje - datetime.timedelta(days=30)
-        fim = hoje
-    elif periodo == '90dias':
-        inicio = hoje - datetime.timedelta(days=90)
-        fim = hoje
-    elif periodo == 'personalizado':
-        inicio = converter_data(data_ini)
-        fim = converter_data(data_fim)
-    else:
-        inicio = hoje.replace(day=1)
-        fim = hoje
-
-    return inicio, fim
+        return hoje.replace(day=1), hoje
+    if periodo == 'mesAnterior':
+        fim = hoje.replace(day=1) - datetime.timedelta(days=1)
+        return fim.replace(day=1), fim
+    if periodo == '30dias':
+        return hoje - datetime.timedelta(days=30), hoje
+    if periodo == '90dias':
+        return hoje - datetime.timedelta(days=90), hoje
+    if periodo == 'personalizado':
+        return converter_data(data_ini), converter_data(data_fim)
+    return hoje.replace(day=1), hoje
 
 
 def verificar_acesso_escritorio(cur, id_usuario, id_escritorio):
-    cur.execute("""
+    cur.execute('''
         SELECT STATUS, ATIVO
         FROM ADVOGADO_ESCRITORIO
         WHERE ID_USUARIOS = ? AND ID_ESCRITORIOS = ?
-    """, (id_usuario, id_escritorio))
-
+    ''', (id_usuario, id_escritorio))
     row = cur.fetchone()
-
     if not row:
         return False, 'Você não possui acesso a este escritório.'
-
     if row[1] != 1:
         return False, 'Seu acesso a este escritório está inativo.'
-
     if row[0] != 'PROPRIETARIO':
         return False, 'Apenas o proprietário do escritório pode acessar o financeiro.'
-
     return True, row[0]
 
 
 def status_parcela(data_venc, status_db, hoje, data_pagamento=None):
-    status_db = (status_db or '').strip().upper()
-
-    if data_pagamento or status_db in ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO', 'QUITADA', 'QUITADO'):
+    status = (status_db or '').strip().upper()
+    if data_pagamento or status in ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO', 'QUITADA', 'QUITADO'):
         return 'Recebido'
-
     if data_venc and data_venc < hoje:
         return 'Atrasado'
-
     return 'A pagar'
 
 
 def status_lancamento_manual(tipo, status_db, data_lanc, hoje):
-    tipo = (tipo or '').lower()
-    status_db = (status_db or '').lower()
+    status = (status_db or '').strip().lower()
+    if status in ('recebida', 'recebido', 'pago', 'paga', 'quitada', 'quitado'):
+        return 'Recebido'
+    if data_lanc and data_lanc < hoje:
+        return 'Atrasado'
+    return 'A pagar'
 
-    if tipo == 'receita':
-        if status_db in ('recebida', 'recebido', 'pago', 'paga'):
-            return 'Recebido'
-        if data_lanc and data_lanc < hoje:
-            return 'Atrasado'
-        return 'A pagar'
-
-    if tipo == 'despesa':
-        if status_db in ('pago', 'paga', 'recebida', 'recebido'):
-            return 'Recebido'
-        if data_lanc and data_lanc < hoje:
-            return 'Atrasado'
-        return 'A pagar'
-
-    return status_db or 'A pagar'
 
 def dentro_periodo(data_obj, inicio, fim):
-    if data_obj is None:
-        return False
-    if inicio and data_obj < inicio:
-        return False
-    if fim and data_obj > fim:
-        return False
-    return True
+    return data_obj is not None and (not inicio or data_obj >= inicio) and (not fim or data_obj <= fim)
+
+
+def numero_decimal(valor):
+    if valor is None or isinstance(valor, bool):
+        raise ValueError('Valor inválido')
+    if isinstance(valor, (int, float, Decimal)):
+        resultado = Decimal(str(valor))
+    else:
+        texto = str(valor).strip().replace('R$', '').replace(' ', '')
+        if '.' in texto and ',' in texto:
+            if texto.rfind(',') > texto.rfind('.'):
+                texto = texto.replace('.', '').replace(',', '.')
+            else:
+                texto = texto.replace(',', '')
+        elif ',' in texto:
+            texto = texto.replace(',', '.')
+        resultado = Decimal(texto)
+    if not resultado.is_finite():
+        raise ValueError('Valor inválido')
+    return resultado
 
 
 def para_float(valor):
-    if valor is None:
-        return 0.0
-    if isinstance(valor, (int, float)):
-        return float(valor)
     try:
-        texto = str(valor).strip().replace('R$', '').replace('.', '').replace(',', '.')
-        return float(texto)
-    except:
+        return float(numero_decimal(valor))
+    except (ValueError, TypeError, InvalidOperation):
         return 0.0
+
+
+def montar_lancamentos(cur, id_escritorio, inicio, fim, tipo='todos'):
+    hoje = datetime.date.today()
+    lancamentos = []
+
+    if tipo in ('todos', 'receita', 'despesa'):
+        sql = '''
+            SELECT ID_LANCAMENTOS, TIPO, DESCRICAO, VALOR, "DATA",
+                   FORMA_PAGAMENTO, STATUS
+            FROM LANCAMENTOS_FINANCEIROS
+            WHERE ID_ESCRITORIO = ? AND ATIVO = 1
+        '''
+        parametros = [id_escritorio]
+        if tipo != 'todos':
+            sql += ' AND TIPO = ?'
+            parametros.append(tipo)
+        if inicio:
+            sql += ' AND "DATA" >= ?'
+            parametros.append(inicio)
+        if fim:
+            sql += ' AND "DATA" <= ?'
+            parametros.append(fim)
+        cur.execute(sql, tuple(parametros))
+        for row in cur.fetchall():
+            data_lanc = converter_data(row[4])
+            lancamentos.append({
+                'id': f'lanc_{row[0]}',
+                'id_real': row[0],
+                'tipo': (row[1] or '').lower(),
+                'descricao': row[2] or '',
+                'valor': para_float(row[3]),
+                'data': data_lanc.isoformat() if data_lanc else None,
+                'forma_pagamento': row[5] or '',
+                'status': status_lancamento_manual(row[1], row[6], data_lanc, hoje),
+                'origem': 'manual'
+            })
+
+    if tipo in ('todos', 'receita'):
+        origens = (
+            ('parc', 'PARCELAS', 'parc', 'ID_PARCELAS', '',
+             'INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO'),
+            ('exito', 'PARCELAS_EXITO', 'pe', 'ID_PARCELA_EXITO', 'Êxito - ',
+             '''INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO''')
+        )
+        for codigo, tabela, alias, coluna_id, prefixo, join in origens:
+            sql = f'''
+                SELECT {alias}.{coluna_id}, {alias}.VALOR_PARCELA,
+                       {alias}.DATA_VENCIMENTO, {alias}.DATA_PAGAMENTO,
+                       {alias}.STATUS, {alias}.NUMERO_PARCELA,
+                       p.TIPO_PROCESSO, p.NUM_PROCESSO,
+                       u.NOME, u.RAZAO_SOCIAL, u.NOME_FANTASIA,
+                       pag.FORM_PAGAMENTO
+                FROM {tabela} {alias}
+                {join}
+                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+                INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
+                WHERE (
+                    p.ID_ESCRITORIOS = ?
+                    OR (
+                        p.ID_ESCRITORIOS IS NULL
+                        AND p.ID_USUARIOS_ADVOGADO IN (
+                            SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO
+                            WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                        )
+                    )
+                )
+                AND UPPER(COALESCE({alias}.STATUS, '')) <> 'CANCELADA'
+            '''
+            cur.execute(sql, (id_escritorio, id_escritorio))
+            for row in cur.fetchall():
+                vencimento = converter_data_pagamento(row[2])
+                pagamento = converter_data_pagamento(row[3])
+                status = status_parcela(vencimento, row[4], hoje, pagamento)
+                data_exibir = pagamento or vencimento if status == 'Recebido' else vencimento
+                if not dentro_periodo(data_exibir, inicio, fim):
+                    continue
+                numero_parcela = 'Entrada' if row[5] == 0 else f'{row[5]}ª parcela'
+                nome_cliente = row[8] or row[9] or row[10] or '--'
+                descricao = f'{row[6] or "Processo"} - {prefixo}{numero_parcela} ({nome_cliente})'
+                lancamentos.append({
+                    'id': f'{codigo}_{row[0]}',
+                    'id_real': row[0],
+                    'tipo': 'receita',
+                    'descricao': descricao,
+                    'valor': para_float(row[1]),
+                    'data': data_exibir.isoformat() if data_exibir else None,
+                    'forma_pagamento': row[11] or '--',
+                    'status': status,
+                    'origem': 'pagamento_cliente'
+                })
+
+    lancamentos.sort(key=lambda item: item['data'] or '', reverse=True)
+    return lancamentos
 
 
 def processar_notificacoes_vencimento():
     con = conexao()
     cur = con.cursor()
     hoje = datetime.date.today()
-    data_alerta = hoje + datetime.timedelta(days=3)
-    notificacoes_enviadas = 0
-
+    limite = hoje + datetime.timedelta(days=3)
+    enviadas = 0
     try:
-        cur.execute("""
-            SELECT 
-                p.ID_USUARIOS_ADVOGADO,
-                p.NUM_PROCESSO,
-                u.NOME,
-                parc.VALOR_PARCELA,
-                parc.DATA_VENCIMENTO,
-                parc.ID_PARCELAS
+        cur.execute('''
+            SELECT p.ID_USUARIOS_ADVOGADO, p.NUM_PROCESSO, u.NOME,
+                   parc.VALOR_PARCELA, parc.DATA_VENCIMENTO, parc.ID_PARCELAS
             FROM PARCELAS parc
             INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
             INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
             INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
             WHERE parc.DATA_VENCIMENTO BETWEEN ? AND ?
               AND UPPER(COALESCE(parc.STATUS, '')) NOT IN ('PAGA', 'CANCELADA')
-        """, (hoje, data_alerta))
-
+        ''', (hoje, limite))
         parcelas = cur.fetchall()
-
         for row in parcelas:
-            id_advogado = row[0]
-            num_processo = row[1] or '--'
-            nome_cliente = row[2] or 'Cliente'
-            valor = para_float(row[3])
-            vencimento = row[4]
-            id_parcela = row[5]
-
-            venc_fmt = vencimento.strftime('%d/%m/%Y') if hasattr(vencimento, 'strftime') else str(vencimento)
+            id_advogado, num_processo, nome_cliente, valor_raw, vencimento, _ = row
+            valor = para_float(valor_raw)
+            data_formatada = vencimento.strftime('%d/%m/%Y') if vencimento else '--'
             titulo = 'Aviso de Vencimento'
-            msg = f'A parcela de {nome_cliente} (Proc. {num_processo}) no valor de R$ {valor:.2f} vence em {venc_fmt}.'
-
-            cur.execute("""
-                SELECT 1 FROM NOTIFICACOES 
+            mensagem = (
+                f'A parcela de {nome_cliente or "Cliente"} (Proc. {num_processo or "--"}) '
+                f'no valor de R$ {valor:.2f} vence em {data_formatada}.'
+            )
+            cur.execute('''
+                SELECT 1 FROM NOTIFICACOES
                 WHERE ID_USUARIOS = ? AND TITULO = ? AND MENSAGEM = ?
-            """, (id_advogado, titulo, msg))
-
-            if not cur.fetchone():
-                cur.execute("""
-                    INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
-                    VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO
-                """, (id_advogado, 'FINANCEIRO_VENCIMENTO', titulo, msg))
-
-                id_notif = cur.fetchone()[0]
-                con.commit()
-
-                agora = datetime.datetime.now()
-                socketio.emit('nova_notificacao', {
-                    'id': id_notif,
-                    'tipo': 'FINANCEIRO_VENCIMENTO',
-                    'titulo': titulo,
-                    'mensagem': msg,
-                    'lida': False,
-                    'data_criacao': agora.strftime('%d/%m/%Y'),
-                    'hora_criacao': agora.strftime('%H:%M'),
-                    'data_leitura': None
-                }, room=f'usuario_{id_advogado}')
-
-                notificacoes_enviadas += 1
-
-        return notificacoes_enviadas
-
-    except Exception as e:
+            ''', (id_advogado, titulo, mensagem))
+            if cur.fetchone():
+                continue
+            cur.execute('''
+                INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
+                VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO
+            ''', (id_advogado, 'FINANCEIRO_VENCIMENTO', titulo, mensagem))
+            id_notificacao = cur.fetchone()[0]
+            con.commit()
+            agora = datetime.datetime.now()
+            socketio.emit('nova_notificacao', {
+                'id': id_notificacao,
+                'tipo': 'FINANCEIRO_VENCIMENTO',
+                'titulo': titulo,
+                'mensagem': mensagem,
+                'lida': False,
+                'data_criacao': agora.strftime('%d/%m/%Y'),
+                'hora_criacao': agora.strftime('%H:%M'),
+                'data_leitura': None
+            }, room=f'usuario_{id_advogado}')
+            enviadas += 1
+        return enviadas
+    except Exception:
         con.rollback()
-        print(f"Erro ao processar notificações de vencimento: {e}")
-        import traceback
-        traceback.print_exc()
+        app.logger.exception('Erro ao processar notificações de vencimento')
         return 0
     finally:
         cur.close()
@@ -210,277 +271,27 @@ def notificar_vencimentos():
 
 @app.route('/escritorio/<int:id_escritorio>/financeiro/lancamentos', methods=['GET'])
 def listar_lancamentos_escritorio(id_escritorio):
-    token_data = decodificar_token()
-    if token_data == False:
+    token = decodificar_token()
+    if not token:
         return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] != 0:
+    if token.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
-    id_usuario = token_data['id_usuarios']
-
-    periodo = request.args.get('periodo', 'mes')
     tipo = (request.args.get('tipo') or 'todos').lower()
-    data_ini = request.args.get('data_inicial')
-    data_fim = request.args.get('data_final')
-
-    if tipo not in ['todos', 'receita', 'despesa']:
+    if tipo not in ('todos', 'receita', 'despesa'):
         return jsonify({'error': 'Tipo inválido'}), 400
-
-    inicio, fim = periodo_para_datas(periodo, data_ini, data_fim)
-
-    hoje = datetime.date.today()
-
+    inicio, fim = periodo_para_datas(
+        request.args.get('periodo', 'mes'),
+        request.args.get('data_inicial'),
+        request.args.get('data_final')
+    )
     con = conexao()
     cur = con.cursor()
-
     try:
-        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
         if not permitido:
-            return jsonify({'error': msg}), 403
-
-        lancamentos = []
-
-        if tipo in ['todos', 'despesa']:
-            sql_desp = """
-                SELECT ID_LANCAMENTOS, TIPO, DESCRICAO, VALOR, "DATA",
-                       CATEGORIA, FORMA_PAGAMENTO, STATUS, OBSERVACOES
-                FROM LANCAMENTOS_FINANCEIROS
-                WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'despesa'
-            """
-            params_desp = [id_escritorio]
-
-            if inicio:
-                sql_desp += ' AND "DATA" >= ?'
-                params_desp.append(inicio)
-
-            if fim:
-                sql_desp += ' AND "DATA" <= ?'
-                params_desp.append(fim)
-
-            cur.execute(sql_desp, tuple(params_desp))
-
-            for row in cur.fetchall():
-                data_lanc = row[4]
-                data_obj = data_lanc.date() if hasattr(data_lanc, 'date') else data_lanc
-
-                status_calc = status_lancamento_manual(
-                    'despesa', row[7], data_obj, hoje
-                )
-
-                lancamentos.append({
-                    'id': f"lanc_{row[0]}",
-                    'id_real': row[0],
-                    'tipo': 'despesa',
-                    'descricao': row[2],
-                    'valor': para_float(row[3]),
-                    'data': data_lanc.strftime('%Y-%m-%d') if hasattr(data_lanc, 'strftime') else str(data_lanc),
-                    'categoria': row[5] or '',
-                    'forma_pagamento': row[6] or '',
-                    'status': status_calc,
-                    'observacoes': row[8] or '',
-                    'origem': 'manual'
-                })
-
-        if tipo in ['todos', 'receita']:
-            sql_receita = """
-                SELECT ID_LANCAMENTOS, TIPO, DESCRICAO, VALOR, "DATA",
-                       CATEGORIA, FORMA_PAGAMENTO, STATUS, OBSERVACOES
-                FROM LANCAMENTOS_FINANCEIROS
-                WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'receita'
-            """
-            params_rec = [id_escritorio]
-
-            if inicio:
-                sql_receita += ' AND "DATA" >= ?'
-                params_rec.append(inicio)
-
-            if fim:
-                sql_receita += ' AND "DATA" <= ?'
-                params_rec.append(fim)
-
-            cur.execute(sql_receita, tuple(params_rec))
-
-            for row in cur.fetchall():
-                data_lanc = row[4]
-                data_obj = data_lanc.date() if hasattr(data_lanc, 'date') else data_lanc
-
-                status_calc = status_lancamento_manual(
-                    'receita', row[7], data_obj, hoje
-                )
-
-                lancamentos.append({
-                    'id': f"lanc_{row[0]}",
-                    'id_real': row[0],
-                    'tipo': 'receita',
-                    'descricao': row[2],
-                    'valor': para_float(row[3]),
-                    'data': data_lanc.strftime('%Y-%m-%d') if hasattr(data_lanc, 'strftime') else str(data_lanc),
-                    'categoria': row[5] or '',
-                    'forma_pagamento': row[6] or '',
-                    'status': status_calc,
-                    'observacoes': row[8] or '',
-                    'origem': 'manual'
-                })
-
-        if tipo in ['todos', 'receita']:
-            sql_parcelas = """
-                SELECT
-                    parc.ID_PARCELAS,
-                    parc.VALOR_PARCELA,
-                    parc.DATA_VENCIMENTO,
-                    parc.DATA_PAGAMENTO,
-                    parc.STATUS,
-                    parc.NUMERO_PARCELA,
-                    p.TIPO_PROCESSO,
-                    p.NUM_PROCESSO,
-                    u.NOME,
-                    u.RAZAO_SOCIAL,
-                    u.NOME_FANTASIA,
-                    pag.FORM_PAGAMENTO
-                FROM PARCELAS parc
-                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
-                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-                INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
-                WHERE (
-                    p.ID_ESCRITORIOS = ?
-                    OR (
-                        p.ID_ESCRITORIOS IS NULL
-                        AND p.ID_USUARIOS_ADVOGADO IN (
-                            SELECT ID_USUARIOS
-                            FROM ADVOGADO_ESCRITORIO
-                            WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                        )
-                    )
-                )
-                AND UPPER(COALESCE(parc.STATUS, '')) <> 'CANCELADA'
-            """
-
-            cur.execute(sql_parcelas, (id_escritorio, id_escritorio))
-
-            for row in cur.fetchall():
-                id_parc = row[0]
-                valor = para_float(row[1])
-                venc_raw = row[2]
-                pag_raw = row[3]
-                status_db = row[4]
-                num_parc = row[5]
-                tipo_proc = row[6] or 'Processo'
-                num_proc = row[7] or '--'
-                nome_cliente = row[8] or row[9] or row[10] or '--'
-                forma = row[11] or '--'
-
-                venc = converter_data_pagamento(venc_raw)
-                pag = converter_data_pagamento(pag_raw)
-
-                status_calc = status_parcela(venc, status_db, hoje, pag)
-
-                if status_calc == 'Recebido':
-                    data_exibir = pag if pag else venc
-                else:
-                    data_exibir = venc
-
-                if not dentro_periodo(data_exibir, inicio, fim):
-                    continue
-
-                identificacao = 'Entrada' if num_parc == 0 else f'{num_parc}ª parcela'
-
-                lancamentos.append({
-                    'id': f"parc_{id_parc}",
-                    'id_real': id_parc,
-                    'tipo': 'receita',
-                    'descricao': f'{tipo_proc} - {identificacao} ({nome_cliente})',
-                    'valor': valor,
-                    'data': data_exibir.strftime('%Y-%m-%d') if data_exibir else None,
-                    'categoria': 'Honorários',
-                    'forma_pagamento': forma,
-                    'status': status_calc,
-                    'observacoes': f'Processo {num_proc}',
-                    'origem': 'pagamento_cliente'
-                })
-
-        if tipo in ['todos', 'receita']:
-            sql_exito = """
-                SELECT
-                    pe.ID_PARCELA_EXITO,
-                    pe.VALOR_PARCELA,
-                    pe.DATA_VENCIMENTO,
-                    pe.DATA_PAGAMENTO,
-                    pe.STATUS,
-                    pe.NUMERO_PARCELA,
-                    p.TIPO_PROCESSO,
-                    p.NUM_PROCESSO,
-                    u.NOME,
-                    u.RAZAO_SOCIAL,
-                    u.NOME_FANTASIA,
-                    pag.FORM_PAGAMENTO
-                FROM PARCELAS_EXITO pe
-                INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
-                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
-                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-                INNER JOIN USUARIOS u ON u.ID_USUARIOS = p.ID_USUARIOS_CLIENTE
-                WHERE (
-                    p.ID_ESCRITORIOS = ?
-                    OR (
-                        p.ID_ESCRITORIOS IS NULL
-                        AND p.ID_USUARIOS_ADVOGADO IN (
-                            SELECT ID_USUARIOS
-                            FROM ADVOGADO_ESCRITORIO
-                            WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                        )
-                    )
-                )
-                AND UPPER(COALESCE(pe.STATUS, '')) <> 'CANCELADA'
-            """
-
-            cur.execute(sql_exito, (id_escritorio, id_escritorio))
-
-            for row in cur.fetchall():
-                id_parc = row[0]
-                valor = para_float(row[1])
-                venc_raw = row[2]
-                pag_raw = row[3]
-                status_db = row[4]
-                num_parc = row[5]
-                tipo_proc = row[6] or 'Processo'
-                num_proc = row[7] or '--'
-                nome_cliente = row[8] or row[9] or row[10] or '--'
-                forma = row[11] or '--'
-
-                venc = converter_data_pagamento(venc_raw)
-                pag = converter_data_pagamento(pag_raw)
-
-                status_calc = status_parcela(venc, status_db, hoje, pag)
-
-                if status_calc == 'Recebido':
-                    data_exibir = pag if pag else venc
-                else:
-                    data_exibir = venc
-
-                if not dentro_periodo(data_exibir, inicio, fim):
-                    continue
-
-                identificacao = 'Entrada' if num_parc == 0 else f'{num_parc}ª parcela'
-
-                lancamentos.append({
-                    'id': f"exito_{id_parc}",
-                    'id_real': id_parc,
-                    'tipo': 'receita',
-                    'descricao': f'{tipo_proc} - Êxito - {identificacao} ({nome_cliente})',
-                    'valor': valor,
-                    'data': data_exibir.strftime('%Y-%m-%d') if data_exibir else None,
-                    'categoria': 'Honorários de êxito',
-                    'forma_pagamento': forma,
-                    'status': status_calc,
-                    'observacoes': f'Processo {num_proc}',
-                    'origem': 'pagamento_cliente'
-                })
-
-        lancamentos.sort(
-            key=lambda x: x['data'] or '',
-            reverse=True
-        )
-
+            return jsonify({'error': mensagem}), 403
+        lancamentos = montar_lancamentos(cur, id_escritorio, inicio, fim, tipo)
         return jsonify({
             'lancamentos': lancamentos,
             'quantidade': len(lancamentos),
@@ -489,12 +300,9 @@ def listar_lancamentos_escritorio(id_escritorio):
                 'fim': fim.strftime('%d/%m/%Y') if fim else None
             }
         }), 200
-
-    except Exception as e:
-        print(f'Erro ao listar lançamentos: {e}')
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        app.logger.exception('Erro ao listar lançamentos')
+        return jsonify({'error': 'Erro ao listar lançamentos financeiros.'}), 500
     finally:
         cur.close()
         con.close()
@@ -502,97 +310,56 @@ def listar_lancamentos_escritorio(id_escritorio):
 
 @app.route('/escritorio/<int:id_escritorio>/financeiro/lancamentos', methods=['POST'])
 def criar_lancamento_escritorio(id_escritorio):
-    token_data = decodificar_token()
-    if token_data == False:
+    token = decodificar_token()
+    if not token:
         return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] != 0:
+    if token.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
-    id_usuario = token_data['id_usuarios']
-
-    if request.is_json:
-        dados = request.get_json() or {}
-    else:
-        dados = request.form
-
-    tipo = (dados.get('tipo') or '').strip().lower()
-    descricao = (dados.get('descricao') or '').strip()
-    valor_raw = dados.get('valor')
-    data_raw = dados.get('data')
-
-    if tipo not in ['despesa', 'receita']:
+    dados = request.get_json(silent=True) if request.is_json else request.form
+    dados = dados or {}
+    tipo = str(dados.get('tipo') or '').strip().lower()
+    descricao = str(dados.get('descricao') or '').strip()
+    if tipo not in ('receita', 'despesa'):
         return jsonify({'error': 'Tipo inválido'}), 400
-
-    if not descricao:
-        return jsonify({'error': 'Descrição é obrigatória'}), 400
-
-    if len(descricao) > 254:
-        return jsonify({'error': 'Descrição deve ter no máximo 254 caracteres'}), 400
-
+    if not descricao or len(descricao) > 254:
+        return jsonify({'error': 'Descrição deve ter de 1 a 254 caracteres.'}), 400
     try:
-        valor_limpo = str(valor_raw).replace('.', '').replace(',', '.')
-        valor = float(valor_limpo)
-    except (TypeError, ValueError):
+        valor = numero_decimal(dados.get('valor'))
+        if valor <= 0 or valor.as_tuple().exponent < -2:
+            raise ValueError('Valor inválido')
+    except (ValueError, TypeError, InvalidOperation):
         return jsonify({'error': 'Valor inválido'}), 400
-
-    if valor <= 0:
-        return jsonify({'error': 'Valor deve ser maior que zero'}), 400
-
-    data_obj = converter_data(data_raw)
+    data_obj = converter_data(dados.get('data'))
     if not data_obj:
         return jsonify({'error': 'Data inválida'}), 400
-
     if data_obj > datetime.date.today():
         return jsonify({'error': 'A data não pode ser futura'}), 400
 
-    status_raw = 'recebida' if tipo == 'receita' else 'a_pagar'
-
+    status = 'recebida' if tipo == 'receita' else 'a_pagar'
     con = conexao()
     cur = con.cursor()
-
     try:
-        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
         if not permitido:
-            return jsonify({'error': msg}), 403
-
-        cur.execute("""
+            return jsonify({'error': mensagem}), 403
+        cur.execute('''
             INSERT INTO LANCAMENTOS_FINANCEIROS (
-                ID_USUARIOS_ADVOGADO,
-                ID_ESCRITORIO,
-                TIPO,
-                DESCRICAO,
-                VALOR,
-                "DATA",
-                STATUS,
-                ATIVO
+                ID_USUARIOS_ADVOGADO, ID_ESCRITORIO, TIPO, DESCRICAO,
+                VALOR, "DATA", STATUS, ATIVO
             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             RETURNING ID_LANCAMENTOS
-        """, (
-            id_usuario,
-            id_escritorio,
-            tipo,
-            descricao,
-            valor,
-            data_obj,
-            status_raw
-        ))
-
+        ''', (token['id_usuarios'], id_escritorio, tipo, descricao, valor, data_obj, status))
         id_lancamento = cur.fetchone()[0]
-
         con.commit()
-
         return jsonify({
             'mensagem': 'Lançamento cadastrado com sucesso',
             'id_lancamento': id_lancamento
         }), 201
-
-    except Exception as e:
+    except Exception:
         con.rollback()
-        print(f'Erro ao criar lançamento: {e}')
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        app.logger.exception('Erro ao criar lançamento financeiro')
+        return jsonify({'error': 'Erro ao cadastrar lançamento financeiro.'}), 500
     finally:
         cur.close()
         con.close()
@@ -600,79 +367,51 @@ def criar_lancamento_escritorio(id_escritorio):
 
 @app.route('/escritorio/<int:id_escritorio>/financeiro/lancamentos/<int:id_lancamento>/baixar', methods=['PUT'])
 def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
-    token_data = decodificar_token()
-    if token_data == False:
+    token = decodificar_token()
+    if not token:
         return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] != 0:
+    if token.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_usuario = token_data['id_usuarios']
-
     con = conexao()
     cur = con.cursor()
-
     try:
-        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
         if not permitido:
-            return jsonify({'error': msg}), 403
-
-        cur.execute("""
-            SELECT TIPO, STATUS, VALOR FROM LANCAMENTOS_FINANCEIROS
+            return jsonify({'error': mensagem}), 403
+        cur.execute('''
+            SELECT TIPO, STATUS, VALOR
+            FROM LANCAMENTOS_FINANCEIROS
             WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1
-        """, (id_lancamento, id_escritorio))
-
+        ''', (id_lancamento, id_escritorio))
         row = cur.fetchone()
-
         if row:
-            tipo_db = (row[0] or '').lower()
-            status_db = (row[1] or '').lower()
-            valor_lancamento = para_float(row[2])
-
-            if tipo_db == 'receita':
-                if status_db in ('recebida', 'recebido', 'pago', 'paga'):
-                    return jsonify({'error': 'Esta receita já foi recebida.'}), 400
-
-                cur.execute("""
-                    UPDATE LANCAMENTOS_FINANCEIROS
-                    SET STATUS = 'Recebido'
-                    WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
-                """, (id_lancamento, id_escritorio))
-                con.commit()
-                return jsonify({'mensagem': 'Recebimento confirmado com sucesso.'}), 200
-
-            if tipo_db == 'despesa':
-                if status_db in ('pago', 'paga', 'recebida', 'recebido'):
-                    return jsonify({'error': 'Esta despesa já foi paga.'}), 400
-
-                hoje = datetime.date.today()
-                receita_recebida = 0.0
-                despesas_pagas = 0.0
-
-                cur.execute("""
+            tipo, status, valor = (row[0] or '').lower(), (row[1] or '').lower(), para_float(row[2])
+            if status in ('recebida', 'recebido', 'pago', 'paga'):
+                return jsonify({'error': 'Este lançamento já foi baixado.'}), 400
+            if tipo == 'despesa':
+                saldo = 0.0
+                cur.execute('''
                     SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
-                    WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'receita' 
+                    WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'receita'
                       AND LOWER(STATUS) IN ('recebida', 'recebido', 'pago', 'paga')
-                """, (id_escritorio,))
-                for row_rec in cur.fetchall():
-                    receita_recebida += para_float(row_rec[0])
-
-                cur.execute("""
+                ''', (id_escritorio,))
+                saldo += sum(para_float(item[0]) for item in cur.fetchall())
+                cur.execute('''
                     SELECT parc.VALOR_PARCELA
                     FROM PARCELAS parc
                     INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
                     INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
                     WHERE (p.ID_ESCRITORIOS = ? OR (
                         p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
-                            SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                            SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO
+                            WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
                         )
                     ))
-                    AND (UPPER(parc.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR parc.DATA_PAGAMENTO IS NOT NULL)
-                """, (id_escritorio, id_escritorio))
-                for row_pag in cur.fetchall():
-                    receita_recebida += para_float(row_pag[0])
-
-                cur.execute("""
+                    AND (UPPER(parc.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO')
+                         OR parc.DATA_PAGAMENTO IS NOT NULL)
+                ''', (id_escritorio, id_escritorio))
+                saldo += sum(para_float(item[0]) for item in cur.fetchall())
+                cur.execute('''
                     SELECT pe.VALOR_PARCELA
                     FROM PARCELAS_EXITO pe
                     INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
@@ -680,105 +419,71 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
                     INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
                     WHERE (p.ID_ESCRITORIOS = ? OR (
                         p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
-                            SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                            SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO
+                            WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
                         )
                     ))
-                    AND (UPPER(pe.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO') OR pe.DATA_PAGAMENTO IS NOT NULL)
-                """, (id_escritorio, id_escritorio))
-                for row_exito_pag in cur.fetchall():
-                    receita_recebida += para_float(row_exito_pag[0])
-
-                cur.execute("""
+                    AND (UPPER(pe.STATUS) IN ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO')
+                         OR pe.DATA_PAGAMENTO IS NOT NULL)
+                ''', (id_escritorio, id_escritorio))
+                saldo += sum(para_float(item[0]) for item in cur.fetchall())
+                cur.execute('''
                     SELECT VALOR FROM LANCAMENTOS_FINANCEIROS
-                    WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'despesa' 
+                    WHERE ID_ESCRITORIO = ? AND ATIVO = 1 AND TIPO = 'despesa'
                       AND LOWER(STATUS) IN ('pago', 'paga', 'recebida', 'recebido')
-                """, (id_escritorio,))
-                for row_desp in cur.fetchall():
-                    despesas_pagas += para_float(row_desp[0])
+                ''', (id_escritorio,))
+                saldo -= sum(para_float(item[0]) for item in cur.fetchall())
+                if saldo < valor:
+                    return jsonify({
+                        'error': f'Saldo insuficiente para esta baixa. Saldo: R$ {saldo:.2f} | Valor: R$ {valor:.2f}.'
+                    }), 400
+            cur.execute('''
+                UPDATE LANCAMENTOS_FINANCEIROS
+                SET STATUS = 'Recebido'
+                WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
+            ''', (id_lancamento, id_escritorio))
+            con.commit()
+            return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
 
-                saldo_atual = receita_recebida - despesas_pagas
-
-                if saldo_atual <= 0:
-                    return jsonify({'error': f'Saldo insuficiente. Seu saldo atual é R$ {saldo_atual:.2f}.'}), 400
-
-                if saldo_atual < valor_lancamento:
-                    return jsonify({'error': f'Saldo insuficiente para esta baixa. Saldo: R$ {saldo_atual:.2f} | Valor da despesa: R$ {valor_lancamento:.2f}.'}), 400
-
-                cur.execute("""
-                    UPDATE LANCAMENTOS_FINANCEIROS
-                    SET STATUS = 'Recebido'
-                    WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ?
-                """, (id_lancamento, id_escritorio))
-                con.commit()
-                return jsonify({'mensagem': 'Baixa realizada com sucesso.'}), 200
-
-        cur.execute("""
-            SELECT parc.VALOR_PARCELA, parc.STATUS
-            FROM PARCELAS parc
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE parc.ID_PARCELAS = ? 
-              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
-                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-              ))
-        """, (id_lancamento, id_escritorio, id_escritorio))
-
-        row_parc = cur.fetchone()
-
-        if row_parc:
-            status_db = (row_parc[1] or '').upper()
-            valor_parcela = para_float(row_parc[0])
-
-            if status_db == 'PAGA':
+        for tabela, alias, coluna_id, join, msg_sucesso in (
+            ('PARCELAS', 'parc', 'ID_PARCELAS',
+             'INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO',
+             'Pagamento da parcela confirmado com sucesso.'),
+            ('PARCELAS_EXITO', 'pe', 'ID_PARCELA_EXITO',
+             '''INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
+                INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO''',
+             'Pagamento da parcela de êxito confirmado com sucesso.')
+        ):
+            cur.execute(f'''
+                SELECT {alias}.STATUS
+                FROM {tabela} {alias}
+                {join}
+                INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
+                WHERE {alias}.{coluna_id} = ?
+                  AND (p.ID_ESCRITORIOS = ? OR (
+                      p.ID_ESCRITORIOS IS NULL AND p.ID_USUARIOS_ADVOGADO IN (
+                          SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO
+                          WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
+                      )
+                  ))
+            ''', (id_lancamento, id_escritorio, id_escritorio))
+            row = cur.fetchone()
+            if not row:
+                continue
+            if (row[0] or '').upper() in ('PAGA', 'PAGO', 'RECEBIDA', 'RECEBIDO'):
                 return jsonify({'error': 'Esta parcela já foi paga.'}), 400
-
-            data_pagamento = datetime.date.today()
-            cur.execute("""
-                UPDATE PARCELAS
+            cur.execute(f'''
+                UPDATE {tabela}
                 SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
-                WHERE ID_PARCELAS = ?
-            """, (data_pagamento, id_lancamento))
+                WHERE {coluna_id} = ?
+            ''', (datetime.date.today(), id_lancamento))
             con.commit()
-            return jsonify({'mensagem': 'Pagamento da parcela confirmado com sucesso.'}), 200
-
-        cur.execute("""
-            SELECT pe.VALOR_PARCELA, pe.STATUS
-            FROM PARCELAS_EXITO pe
-            INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE pe.ID_PARCELA_EXITO = ? 
-              AND (p.ID_ESCRITORIOS = ? OR p.ID_USUARIOS_ADVOGADO IN (
-                  SELECT ID_USUARIOS FROM ADVOGADO_ESCRITORIO WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-              ))
-        """, (id_lancamento, id_escritorio, id_escritorio))
-
-        row_exito = cur.fetchone()
-
-        if row_exito:
-            status_db = (row_exito[1] or '').upper()
-            valor_exito = para_float(row_exito[0])
-
-            if status_db == 'PAGA':
-                return jsonify({'error': 'Esta parcela de êxito já foi paga.'}), 400
-
-            data_pagamento = datetime.date.today()
-            cur.execute("""
-                UPDATE PARCELAS_EXITO
-                SET STATUS = 'PAGA', DATA_PAGAMENTO = ?
-                WHERE ID_PARCELA_EXITO = ?
-            """, (data_pagamento, id_lancamento))
-            con.commit()
-            return jsonify({'mensagem': 'Pagamento da parcela de êxito confirmado com sucesso.'}), 200
-
+            return jsonify({'mensagem': msg_sucesso}), 200
         return jsonify({'error': 'Lançamento não encontrado'}), 404
-
-    except Exception as e:
+    except Exception:
         con.rollback()
-        print(f'Erro ao dar baixa no lançamento: {e}')
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        app.logger.exception('Erro ao dar baixa no lançamento')
+        return jsonify({'error': 'Erro ao dar baixa no lançamento.'}), 500
     finally:
         cur.close()
         con.close()
@@ -786,228 +491,74 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
 
 @app.route('/escritorio/<int:id_escritorio>/financeiro/resumo', methods=['GET'])
 def resumo_financeiro_escritorio(id_escritorio):
-    token_data = decodificar_token()
-    if token_data == False:
+    token = decodificar_token()
+    if not token:
         return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] != 0:
+    if token.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_usuario = token_data['id_usuarios']
-
-    periodo = request.args.get('periodo', 'mes')
-    data_ini = request.args.get('data_inicial')
-    data_fim = request.args.get('data_final')
-
-    inicio, fim = periodo_para_datas(periodo, data_ini, data_fim)
-
+    inicio, fim = periodo_para_datas(
+        request.args.get('periodo', 'mes'),
+        request.args.get('data_inicial'),
+        request.args.get('data_final')
+    )
     con = conexao()
     cur = con.cursor()
-
-    hoje = datetime.date.today()
-
     try:
-        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
         if not permitido:
-            return jsonify({'error': msg}), 403
-
-        receita_manual_recebida = 0.0
-        receita_manual_pendente = 0.0
-        receita_manual_atrasada = 0.0
+            return jsonify({'error': mensagem}), 403
+        lancamentos = montar_lancamentos(cur, id_escritorio, inicio, fim)
+        receita_recebida = 0.0
+        receita_pendente = 0.0
+        receita_atrasada = 0.0
         despesa_paga = 0.0
         despesa_pendente = 0.0
         despesa_atrasada = 0.0
-
-        sql_manual = """
-            SELECT TIPO, STATUS, VALOR, "DATA"
-            FROM LANCAMENTOS_FINANCEIROS
-            WHERE ID_ESCRITORIO = ? AND ATIVO = 1
-        """
-        params_manual = [id_escritorio]
-
-        if inicio:
-            sql_manual += ' AND "DATA" >= ?'
-            params_manual.append(inicio)
-
-        if fim:
-            sql_manual += ' AND "DATA" <= ?'
-            params_manual.append(fim)
-
-        cur.execute(sql_manual, tuple(params_manual))
-
-        for tipo, status_db, valor, data_lanc in cur.fetchall():
-            v = para_float(valor)
-            tipo = (tipo or '').lower()
-
-            data_obj = data_lanc.date() if hasattr(data_lanc, 'date') else data_lanc
-
-            status_calc = status_lancamento_manual(tipo, status_db, data_obj, hoje)
-
+        for item in lancamentos:
+            valor = item['valor']
+            tipo = item['tipo']
+            status = item['status']
             if tipo == 'receita':
-                if status_calc == 'Recebido':
-                    receita_manual_recebida += v
-                elif status_calc == 'Atrasado':
-                    receita_manual_atrasada += v
+                if status == 'Recebido':
+                    receita_recebida += valor
+                elif status == 'Atrasado':
+                    receita_atrasada += valor
                 else:
-                    receita_manual_pendente += v
-
+                    receita_pendente += valor
             elif tipo == 'despesa':
-                if status_calc == 'Recebido':
-                    despesa_paga += v
-                elif status_calc == 'Atrasado':
-                    despesa_atrasada += v
+                if status == 'Recebido':
+                    despesa_paga += valor
+                elif status == 'Atrasado':
+                    despesa_atrasada += valor
                 else:
-                    despesa_pendente += v
-
-        receita_parcelas_pagas = 0.0
-        receita_parcelas_pendente = 0.0
-        receita_parcelas_atrasada = 0.0
-
-        sql_parcelas = """
-            SELECT parc.VALOR_PARCELA, parc.DATA_VENCIMENTO, parc.STATUS, parc.DATA_PAGAMENTO
-            FROM PARCELAS parc
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = parc.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE (
-                p.ID_ESCRITORIOS = ?
-                OR (
-                    p.ID_ESCRITORIOS IS NULL
-                    AND p.ID_USUARIOS_ADVOGADO IN (
-                        SELECT ID_USUARIOS
-                        FROM ADVOGADO_ESCRITORIO
-                        WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                    )
-                )
-            )
-            AND UPPER(COALESCE(parc.STATUS, '')) <> 'CANCELADA'
-        """
-
-        cur.execute(sql_parcelas, (id_escritorio, id_escritorio))
-
-        for valor, venc_raw, status_db, pag_raw in cur.fetchall():
-            v = para_float(valor)
-            venc = converter_data_pagamento(venc_raw)
-            pag = converter_data_pagamento(pag_raw)
-
-            status_calc = status_parcela(venc, status_db, hoje, pag)
-
-            if status_calc == 'Recebido':
-                data_ref = pag if pag else venc
-            else:
-                data_ref = venc
-
-            if not dentro_periodo(data_ref, inicio, fim):
-                continue
-
-            if status_calc == 'Recebido':
-                receita_parcelas_pagas += v
-            elif status_calc == 'Atrasado':
-                receita_parcelas_atrasada += v
-            else:
-                receita_parcelas_pendente += v
-
-        sql_exito = """
-            SELECT pe.VALOR_PARCELA, pe.DATA_VENCIMENTO, pe.STATUS, pe.DATA_PAGAMENTO
-            FROM PARCELAS_EXITO pe
-            INNER JOIN PAGAMENTO_EXITO pex ON pex.ID_PAGAMENTO_EXITO = pe.ID_PAGAMENTO_EXITO
-            INNER JOIN PAGAMENTOS pag ON pag.ID_PAGAMENTOS = pex.ID_PAGAMENTO
-            INNER JOIN PROCESSOS p ON p.ID_PROCESSOS = pag.ID_PROCESSO
-            WHERE (
-                p.ID_ESCRITORIOS = ?
-                OR (
-                    p.ID_ESCRITORIOS IS NULL
-                    AND p.ID_USUARIOS_ADVOGADO IN (
-                        SELECT ID_USUARIOS
-                        FROM ADVOGADO_ESCRITORIO
-                        WHERE ID_ESCRITORIOS = ? AND ATIVO = 1
-                    )
-                )
-            )
-            AND UPPER(COALESCE(pe.STATUS, '')) <> 'CANCELADA'
-        """
-
-        cur.execute(sql_exito, (id_escritorio, id_escritorio))
-
-        for valor, venc_raw, status_db, pag_raw in cur.fetchall():
-            v = para_float(valor)
-            venc = converter_data_pagamento(venc_raw)
-            pag = converter_data_pagamento(pag_raw)
-
-            status_calc = status_parcela(venc, status_db, hoje, pag)
-
-            if status_calc == 'Recebido':
-                data_ref = pag if pag else venc
-            else:
-                data_ref = venc
-
-            if not dentro_periodo(data_ref, inicio, fim):
-                continue
-
-            if status_calc == 'Recebido':
-                receita_parcelas_pagas += v
-            elif status_calc == 'Atrasado':
-                receita_parcelas_atrasada += v
-            else:
-                receita_parcelas_pendente += v
-
-        receita_recebida = receita_manual_recebida + receita_parcelas_pagas
-        receita_pendente = receita_manual_pendente + receita_parcelas_pendente
-        receita_atrasada = receita_manual_atrasada + receita_parcelas_atrasada
-
+                    despesa_pendente += valor
         receita_a_receber = receita_pendente + receita_atrasada
         total_receitas = receita_recebida + receita_a_receber
         despesas = despesa_paga + despesa_pendente + despesa_atrasada
-
         saldo = receita_recebida - (despesas + receita_a_receber)
-
-        if saldo > 0:
-            resultado = 'lucro'
-            lucro = saldo
-            prejuizo = 0.0
-        elif saldo < 0:
-            resultado = 'prejuizo'
-            lucro = 0.0
-            prejuizo = abs(saldo)
-        else:
-            resultado = 'neutro'
-            lucro = 0.0
-            prejuizo = 0.0
-
-        percentual_recebido = (receita_recebida / total_receitas * 100) if total_receitas > 0 else 0
-        percentual_arredondado = round(percentual_recebido)
-
-        if saldo < 0:
-            situacao = 'Crítica'
-        elif percentual_recebido >= 70:
-            situacao = 'Boa'
-        else:
-            situacao = 'Atenção'
-
+        resultado = 'lucro' if saldo > 0 else 'prejuizo' if saldo < 0 else 'neutro'
+        percentual = round(receita_recebida * 100 / total_receitas) if total_receitas > 0 else 0
+        situacao = 'Crítica' if saldo < 0 else 'Boa' if percentual >= 70 else 'Atenção'
         return jsonify({
             'receita_recebida': receita_recebida,
             'receita_pendente': receita_pendente,
             'receita_atrasada': receita_atrasada,
             'receita_a_receber': receita_a_receber,
             'total_receitas': total_receitas,
-
             'despesa_paga': despesa_paga,
             'despesa_pendente': despesa_pendente,
             'despesa_atrasada': despesa_atrasada,
             'despesas': despesas,
-
             'saldo': saldo,
-            'lucro': lucro,
-            'prejuizo': prejuizo,
+            'lucro': max(saldo, 0),
+            'prejuizo': max(-saldo, 0),
             'resultado': resultado,
-            'percentual_recebido': percentual_arredondado,
+            'percentual_recebido': percentual,
             'situacao': situacao
         }), 200
-
-    except Exception as e:
-        print(f'Erro ao calcular resumo: {e}')
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        app.logger.exception('Erro ao calcular resumo financeiro')
+        return jsonify({'error': 'Erro ao calcular resumo financeiro.'}), 500
     finally:
         cur.close()
         con.close()
@@ -1015,28 +566,22 @@ def resumo_financeiro_escritorio(id_escritorio):
 
 @app.route('/escritorio/<int:id_escritorio>/financeiro/relatorio', methods=['POST'])
 def gerar_relatorio_financeiro(id_escritorio):
-    token_data = decodificar_token()
-    if token_data == False:
+    token = decodificar_token()
+    if not token:
         return jsonify({'error': 'Token necessário'}), 401
-
-    if token_data['tipo'] != 0:
+    if token.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
-
-    id_usuario = token_data['id_usuarios']
-    dados = request.get_json() or {}
-    lancamentos = dados.get('lancamentos', [])
-    resumo = dados.get('resumo', {})
-    periodo_texto = dados.get('periodo_texto', 'Período não especificado')
-
+    dados = request.get_json(silent=True) or {}
+    lancamentos = dados.get('lancamentos') or []
+    resumo = dados.get('resumo') or {}
+    periodo_texto = dados.get('periodo_texto') or 'Período não especificado'
     con = conexao()
     cur = con.cursor()
-
     try:
-        permitido, msg = verificar_acesso_escritorio(cur, id_usuario, id_escritorio)
+        permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
         if not permitido:
-            return jsonify({'error': msg}), 403
-
-        cur.execute("SELECT NOME_FANTASIA FROM ESCRITORIOS WHERE ID_ESCRITORIOS = ?", (id_escritorio,))
+            return jsonify({'error': mensagem}), 403
+        cur.execute('SELECT NOME_FANTASIA FROM ESCRITORIOS WHERE ID_ESCRITORIOS = ?', (id_escritorio,))
         row = cur.fetchone()
         nome_escritorio = row[0] if row and row[0] else 'Escritório'
 
@@ -1044,11 +589,12 @@ def gerar_relatorio_financeiro(id_escritorio):
             valor = '-' if valor in (None, '') else str(valor)
             valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
             if limite and len(valor) > limite:
-                return valor[:limite - 3] + '...'
+                valor = valor[:limite - 3] + '...'
             return valor
 
         def dinheiro(valor):
-            return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+            numero = para_float(valor)
+            return f'R$ {numero:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
 
         class RelatorioFinanceiroPDF(FPDF):
             def header(self):
@@ -1068,107 +614,81 @@ def gerar_relatorio_financeiro(id_escritorio):
                 self.set_y(-9)
                 self.set_font('Helvetica', '', 8)
                 self.set_text_color(100, 100, 100)
-                self.cell(0, 5, f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}',
-                          align='C')
+                self.cell(0, 5, f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}', align='C')
 
         pdf = RelatorioFinanceiroPDF(orientation='L', unit='mm', format='A4')
         pdf.set_auto_page_break(auto=True, margin=18)
         pdf.set_margins(16, 16, 16)
         pdf.add_page()
-
         pdf.set_fill_color(237, 244, 255)
         pdf.set_text_color(0, 71, 171)
         pdf.set_font('Helvetica', 'B', 12)
-        pdf.cell(265, 8, texto(f"Relatório Financeiro - {nome_escritorio}", 80), fill=True, new_x='LMARGIN',
-                 new_y='NEXT')
-
+        pdf.cell(265, 8, texto(f'Relatório Financeiro - {nome_escritorio}', 80), fill=True, new_x='LMARGIN', new_y='NEXT')
         pdf.set_text_color(90, 90, 90)
         pdf.set_font('Helvetica', '', 9)
-        pdf.cell(0, 6, texto(f"Período: {periodo_texto}", 120), new_x='LMARGIN', new_y='NEXT')
+        pdf.cell(0, 6, texto(f'Período: {periodo_texto}', 120), new_x='LMARGIN', new_y='NEXT')
         pdf.ln(4)
-
         pdf.set_fill_color(250, 252, 255)
         pdf.set_draw_color(220, 228, 238)
-
-        resumo_itens = [
+        for rotulo, valor in (
             ('Total de Receitas Previstas', dinheiro(resumo.get('total_receitas', 0))),
             ('Receita Recebida', dinheiro(resumo.get('receita_recebida', 0))),
             ('Receita a Receber', dinheiro(resumo.get('receita_a_receber', 0))),
             ('Despesas', dinheiro(resumo.get('despesas', 0))),
             ('Saldo Atual', dinheiro(resumo.get('saldo', 0)))
-        ]
-
-        for rotulo, valor in resumo_itens:
+        ):
             pdf.set_text_color(0, 71, 171)
             pdf.set_font('Helvetica', 'B', 9)
             pdf.cell(70, 8, rotulo, border=1, fill=True)
-
             pdf.set_text_color(35, 35, 35)
             pdf.set_font('Helvetica', '', 9)
             pdf.cell(40, 8, valor, border=1, new_x='LMARGIN', new_y='NEXT')
-
         pdf.ln(10)
-
-        colunas = [
-            ('Data', 25, 10),
-            ('Tipo', 25, 15),
-            ('Descrição', 125, 100),
-            ('Status', 30, 20),
-            ('Valor', 60, 45)
-        ]
+        colunas = [('Data', 25), ('Tipo', 25), ('Descricao', 125), ('Status', 30), ('Valor', 60)]
 
         def cabecalho_tabela():
             pdf.set_fill_color(237, 244, 255)
             pdf.set_draw_color(220, 228, 238)
             pdf.set_text_color(0, 71, 171)
             pdf.set_font('Helvetica', 'B', 8)
-            for nome, largura, _ in colunas:
+            for nome, largura in colunas:
                 pdf.cell(largura, 8, nome, border=1, fill=True)
             pdf.ln()
             pdf.set_text_color(35, 35, 35)
 
         cabecalho_tabela()
         pdf.set_font('Helvetica', '', 8)
-
         if not lancamentos:
             pdf.set_fill_color(250, 252, 255)
-            pdf.cell(265, 9, 'Nenhum lançamento encontrado neste período.', border=1, fill=True, align='C',
-                     new_x='LMARGIN', new_y='NEXT')
-
+            pdf.cell(265, 9, 'Nenhum lancamento encontrado neste periodo.', border=1, fill=True, align='C', new_x='LMARGIN', new_y='NEXT')
         for indice, item in enumerate(lancamentos):
             if pdf.get_y() + 8 > 190:
                 pdf.add_page()
                 cabecalho_tabela()
                 pdf.set_font('Helvetica', '', 8)
-
-            data_txt = item.get('data', '').split('-')
-            data_fmt = f"{data_txt[2]}/{data_txt[1]}/{data_txt[0]}" if len(data_txt) == 3 else item.get('data', '')
-            tipo_txt = item.get('tipo', '').capitalize()
-
-            status_raw = item.get('status', '')
-            status_txt = status_raw if status_raw else ''
-
+            data_iso = str(item.get('data') or '')
+            partes = data_iso.split('-')
+            data_exibir = f'{partes[2]}/{partes[1]}/{partes[0]}' if len(partes) == 3 else data_iso
             valores = [
-                data_fmt,
-                tipo_txt,
+                data_exibir,
+                str(item.get('tipo') or '').capitalize(),
                 texto(item.get('descricao', ''), 100),
-                status_txt,
+                texto(item.get('status', '')),
                 dinheiro(item.get('valor', 0))
             ]
-
             pdf.set_fill_color(250, 252, 255) if indice % 2 else pdf.set_fill_color(255, 255, 255)
-            for (_, largura, _), valor in zip(colunas, valores):
-                pdf.cell(largura, 7, valor, border=1, fill=True)
+            for (_, largura), valor in zip(colunas, valores):
+                pdf.cell(largura, 7, texto(valor), border=1, fill=True)
             pdf.ln()
-
-        return send_file(BytesIO(bytes(pdf.output())), mimetype='application/pdf', as_attachment=True,
-                         download_name='relatorio-financeiro.pdf')
-
-    except Exception as e:
-        print(f"Erro ao gerar PDF financeiro: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return send_file(
+            BytesIO(bytes(pdf.output())),
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name='relatorio-financeiro.pdf'
+        )
+    except Exception:
+        app.logger.exception('Erro ao gerar PDF financeiro')
+        return jsonify({'error': 'Erro ao gerar relatório financeiro.'}), 500
     finally:
         cur.close()
         con.close()
