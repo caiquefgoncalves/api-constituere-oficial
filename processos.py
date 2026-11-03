@@ -6276,7 +6276,7 @@ def criar_cobranca_boleto():
 
         if resposta.status_code >= 400:
             return jsonify({
-                'error': f'Erro ao criar boleto ({resposta.status_code})',
+                'error': f'Esse cliente não tem conta na Arkhé',
                 'detalhes': resposta.text[:500]
             }), 400
 

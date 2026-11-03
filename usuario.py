@@ -543,203 +543,1074 @@ def listar_logs_escritorio(id_escritorio):
 
 @app.route('/escritorio/<int:id_escritorio>/logs/pdf', methods=['GET'])
 def gerar_relatorio_logs_pdf(id_escritorio):
+    import re
+    import unicodedata
+    import datetime
+    from io import BytesIO
+    from fpdf import FPDF
+    from flask import jsonify, request, send_file
+
     token_data = decodificar_token()
-    if not token_data or token_data['tipo'] != 0:
+
+    if not token_data or token_data.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
-    con = conexao()
-    cur = con.cursor()
+    con = None
+    cur = None
+    con_log = None
+    cur_log = None
 
     try:
-        cur.execute("SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?", (token_data['id_usuarios'],))
-        res_adv = cur.fetchone()
-        nome_adv_logado = res_adv[0] if res_adv else "Advogado Logado"
+        con = conexao()
+        cur = con.cursor()
+
+        cur.execute("""
+            SELECT 1
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+              AND STATUS = 'PROPRIETARIO'
+              AND ATIVO = 1
+        """, (token_data['id_usuarios'], id_escritorio))
+
+        if not cur.fetchone():
+            return jsonify({
+                'error': 'Apenas o proprietário pode consultar os logs.'
+            }), 403
+
+        cur.execute("""
+            SELECT NOME
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ?
+        """, (token_data['id_usuarios'],))
+
+        resultado_advogado = cur.fetchone()
+        nome_advogado = resultado_advogado[0] if resultado_advogado else 'Advogado'
 
         con_log = conexao_log()
         cur_log = con_log.cursor()
 
         cur_log.execute("""
             SELECT FIRST 500
-                ID_LOG, ID_USUARIO, NOME_USUARIO, ACAO, TABELA_AFETADA,
-                ID_REGISTRO_AFETADO, CAMPO, VALOR_ANTIGO, VALOR_NOVO,
-                DETALHES, DATA_HORA, MAQUINA, IP_ORIGEM
+                ID_LOG,
+                ID_USUARIO,
+                NOME_USUARIO,
+                ACAO,
+                TABELA_AFETADA,
+                ID_REGISTRO_AFETADO,
+                CAMPO,
+                VALOR_ANTIGO,
+                VALOR_NOVO,
+                DETALHES,
+                DATA_HORA,
+                MAQUINA,
+                IP_ORIGEM
             FROM LOG_AUDITORIA
             WHERE ID_ESCRITORIO = ?
             ORDER BY DATA_HORA DESC, ID_LOG DESC
         """, (id_escritorio,))
+
         rows = cur_log.fetchall()
-        cur_log.close()
-        con_log.close()
 
         if not rows:
-            return jsonify({'error': 'Nenhum log encontrado para gerar o PDF'}), 404
+            return jsonify({
+                'error': 'Nenhum log encontrado para gerar o PDF.'
+            }), 404
 
-        def texto(valor, limite=None):
-            valor = '-' if valor in (None, '') else str(valor)
-            valor = unicodedata.normalize('NFKD', valor).encode('ascii', 'ignore').decode('ascii')
-            if limite and len(valor) > limite:
-                return valor[:limite - 3] + '...'
-            return valor
+        def texto(valor):
+            if valor is None:
+                return ''
 
-        def parse_valores(valor):
+            if hasattr(valor, 'read'):
+                valor = valor.read()
+
+            if isinstance(valor, bytes):
+                valor = valor.decode('utf-8', errors='replace')
+
+            return str(valor).strip()
+
+        def texto_pdf(valor):
+            valor = texto(valor) or '-'
+            return unicodedata.normalize(
+                'NFKD', valor
+            ).encode('ascii', 'ignore').decode('ascii')
+
+        def inteiro(valor):
+            try:
+                return int(valor)
+            except (TypeError, ValueError):
+                return None
+
+        def consultar(sql, parametros):
+            try:
+                cur.execute(sql, parametros)
+                return cur.fetchone()
+            except Exception:
+                return None
+
+        def nome_usuario(id_usuario):
+            if not id_usuario:
+                return None
+
+            linha = consultar("""
+                SELECT NOME
+                FROM USUARIOS
+                WHERE ID_USUARIOS = ?
+            """, (id_usuario,))
+
+            return linha[0] if linha else None
+
+        def extrair_campos(valor):
             resultado = {}
-            ignorados = {'ID_USUARIOS', 'ID_USUARIO_RESPONSAVEL', 'DATA_CADASTRO', 'PRIMEIRO_ACESSO', 'SENHA'}
-            for parte in texto(valor).replace('\r', '').replace('\n', ' ').split(' | '):
-                if ':' in parte:
-                    chave, val = parte.split(':', 1)
-                    chave, val = chave.strip().upper(), val.strip()
-                    if chave not in ignorados and val != '[PROTEGIDO]':
-                        resultado[chave] = '(Vazio)' if not val or val.upper() == 'NULL' else val
+
+            for parte in re.split(
+                r'\s+\|\s+|\x1e',
+                texto(valor).replace('\r', '').replace('\n', ' ')
+            ):
+                chave, separador, conteudo = parte.partition(':')
+
+                if not separador:
+                    continue
+
+                chave = chave.strip().upper().replace(' ', '_')
+                conteudo = conteudo.strip()
+
+                if not re.fullmatch(r'[A-Z0-9_]+', chave):
+                    continue
+
+                resultado[chave] = (
+                    '(Vazio)'
+                    if not conteudo or conteudo.upper() == 'NULL'
+                    else conteudo
+                )
+
             return resultado
+
+        campos_protegidos = {
+            'SENHA',
+            'REFRESH_TOKEN',
+            'ACCESS_TOKEN',
+            'CLIENT_SECRET',
+            'ID_TOKEN',
+            'TOKEN',
+            'GOOGLE_EVENT_ID'
+        }
 
         def obter_mudancas(antigo, novo):
             mudancas = []
-            for chave in dict.fromkeys([*antigo, *novo]):
-                antes, depois = antigo.get(chave, '(Vazio)'), novo.get(chave, '(Vazio)')
-                if antes != depois:
-                    mudancas.append({'campo': chave, 'antes': antes, 'depois': depois})
+
+            for campo in dict.fromkeys([*antigo, *novo]):
+                if campo.startswith('ID_') or campo in campos_protegidos:
+                    continue
+
+                antes = antigo.get(campo, '(Vazio)')
+                depois = novo.get(campo, '(Vazio)')
+
+                if antes == depois:
+                    continue
+
+                mudancas.append({
+                    'campo': campo,
+                    'antes': antes,
+                    'depois': depois
+                })
+
             return mudancas
+
+        def obter_alvo(tabela, identificador, antigo, novo):
+            atributos = {**antigo, **novo}
+
+            def campo(chave):
+                valor = atributos.get(chave)
+
+                if valor is None or valor.upper() in ('NULL', '(VAZIO)'):
+                    return None
+
+                return valor
+
+            consultas = {
+                'USUARIOS': (
+                    'SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?',
+                    (identificador,)
+                ),
+                'ESCRITORIOS': (
+                    'SELECT COALESCE(NOME_FANTASIA, RAZAO_SOCIAL) FROM ESCRITORIOS WHERE ID_ESCRITORIOS = ?',
+                    (identificador,)
+                ),
+                'ATUALIZACOES': (
+                    'SELECT TITULO FROM ATUALIZACOES WHERE ID_ATUALIZACOES = ?',
+                    (identificador,)
+                ),
+                'AGENDAMENTOS': (
+                    'SELECT ASSUNTO FROM AGENDAMENTOS WHERE ID_AGENDAMENTOS = ?',
+                    (identificador,)
+                ),
+                'LANCAMENTOS_FINANCEIROS': (
+                    'SELECT DESCRICAO FROM LANCAMENTOS_FINANCEIROS WHERE ID_LANCAMENTOS = ?',
+                    (identificador,)
+                ),
+                'PROCESSOS': (
+                    'SELECT NUM_PROCESSO FROM PROCESSOS WHERE ID_PROCESSOS = ?',
+                    (identificador,)
+                ),
+                'NOTIFICACOES': (
+                    'SELECT TITULO FROM NOTIFICACOES WHERE ID_NOTIFICACAO = ?',
+                    (identificador,)
+                ),
+                'PARTE_CONTRARIA': (
+                    'SELECT NOME FROM PARTE_CONTRARIA WHERE ID_PARTE_CONTRARIA = ?',
+                    (identificador,)
+                ),
+                'DOCUMENTOS_GERADOS': (
+                    'SELECT NOME_ARQUIVO FROM DOCUMENTOS_GERADOS WHERE ID_DOCUMENTOS_GERADOS = ?',
+                    (identificador,)
+                ),
+                'MODELOS_DOCUMENTOS': (
+                    'SELECT NOME FROM MODELOS_DOCUMENTOS WHERE ID_MODELOS_DOCUMENTOS = ?',
+                    (identificador,)
+                ),
+                'REPRESENTANTES': (
+                    'SELECT NOME_COMPLETO FROM REPRESENTANTES WHERE ID_REPRESENTANTE = ?',
+                    (identificador,)
+                )
+            }
+
+            if tabela == 'ADVOGADO_ESCRITORIO':
+                advogado_id = inteiro(campo('ID_USUARIOS'))
+
+                if advogado_id is None:
+                    linha = consultar("""
+                        SELECT ID_USUARIOS
+                        FROM ADVOGADO_ESCRITORIO
+                        WHERE ID = ?
+                    """, (identificador,))
+                    advogado_id = linha[0] if linha else None
+
+                return nome_usuario(advogado_id) or 'Advogado vinculado'
+
+            if tabela == 'GOOGLE_CALENDAR':
+                return 'Google Agenda'
+
+            if tabela in ('MENSAGENS', 'CONVERSAS'):
+                return 'Mensagem' if tabela == 'MENSAGENS' else 'Conversa'
+
+            if tabela == 'AGENDAMENTOS':
+                return campo('ASSUNTO') or 'Agendamento'
+
+            if tabela == 'ESCRITORIOS':
+                return (
+                    campo('NOME_FANTASIA')
+                    or campo('RAZAO_SOCIAL')
+                    or 'Escritório'
+                )
+
+            if tabela == 'USUARIOS':
+                return campo('NOME') or nome_usuario(identificador) or 'Cadastro de usuário'
+
+            if tabela in consultas:
+                sql, parametros = consultas[tabela]
+                linha = consultar(sql, parametros)
+
+                if linha and linha[0]:
+                    return str(linha[0])
+
+            return (
+                campo('NOME')
+                or campo('DESCRICAO')
+                or campo('TITULO')
+                or 'Registro'
+            )
+
+        nomes_tabelas = {
+            'MENSAGENS': 'mensagem',
+            'CONVERSAS': 'conversa',
+            'ESCRITORIOS': 'escritório',
+            'ATUALIZACOES': 'atualização do processo',
+            'AGENDAMENTOS': 'agendamento',
+            'ADVOGADO_ESCRITORIO': 'advogado',
+            'LANCAMENTOS_FINANCEIROS': 'lançamento financeiro',
+            'GOOGLE_CALENDAR': 'integração do Google Agenda',
+            'NOTIFICACOES': 'notificação',
+            'DOCUMENTOS_GERADOS': 'documento',
+            'MODELOS_DOCUMENTOS': 'modelo',
+            'PARTE_CONTRARIA': 'parte contrária',
+            'PROCESSOS': 'processo',
+            'PAGAMENTOS': 'pagamento',
+            'PARCELAS': 'parcela',
+            'PAGAMENTO_EXITO': 'honorário de êxito',
+            'PARCELAS_EXITO': 'parcela de êxito'
+        }
+
+        verbos = {
+            'MENSAGENS': {
+                'INSERT': 'enviou',
+                'UPDATE': 'editou',
+                'DELETE': 'excluiu'
+            },
+            'CONVERSAS': {
+                'INSERT': 'iniciou',
+                'UPDATE': 'atualizou',
+                'DELETE': 'excluiu'
+            },
+            'ESCRITORIOS': {
+                'INSERT': 'cadastrou',
+                'UPDATE': 'atualizou',
+                'DELETE': 'excluiu'
+            },
+            'ATUALIZACOES': {
+                'INSERT': 'registrou',
+                'UPDATE': 'editou',
+                'DELETE': 'excluiu'
+            },
+            'AGENDAMENTOS': {
+                'INSERT': 'marcou',
+                'UPDATE': 'atualizou',
+                'DELETE': 'excluiu'
+            },
+            'ADVOGADO_ESCRITORIO': {
+                'INSERT': 'vinculou',
+                'UPDATE': 'alterou o vínculo de',
+                'DELETE': 'removeu o vínculo de'
+            },
+            'GOOGLE_CALENDAR': {
+                'INSERT': 'conectou',
+                'UPDATE': 'atualizou',
+                'DELETE': 'desconectou'
+            }
+        }
+
+        rotulos_acoes = {
+            'MENSAGENS': {
+                'INSERT': 'Mensagem Enviada',
+                'UPDATE': 'Mensagem Editada',
+                'DELETE': 'Mensagem Excluída'
+            },
+            'CONVERSAS': {
+                'INSERT': 'Nova Conversa',
+                'UPDATE': 'Conversa Atualizada',
+                'DELETE': 'Conversa Excluída'
+            },
+            'ESCRITORIOS': {
+                'INSERT': 'Escritório Cadastrado',
+                'UPDATE': 'Escritório Atualizado',
+                'DELETE': 'Escritório Excluído'
+            },
+            'ATUALIZACOES': {
+                'INSERT': 'Atualização Registrada',
+                'UPDATE': 'Atualização Editada',
+                'DELETE': 'Atualização Excluída'
+            },
+            'AGENDAMENTOS': {
+                'INSERT': 'Agendamento Criado',
+                'UPDATE': 'Agendamento Atualizado',
+                'DELETE': 'Agendamento Excluído'
+            },
+            'ADVOGADO_ESCRITORIO': {
+                'INSERT': 'Advogado Vinculado',
+                'UPDATE': 'Vínculo Atualizado',
+                'DELETE': 'Vínculo Removido'
+            },
+            'LANCAMENTOS_FINANCEIROS': {
+                'INSERT': 'Novo Lançamento',
+                'UPDATE': 'Lançamento Atualizado',
+                'DELETE': 'Lançamento Excluído'
+            },
+            'GOOGLE_CALENDAR': {
+                'INSERT': 'Google Conectado',
+                'UPDATE': 'Integração Atualizada',
+                'DELETE': 'Google Desconectado'
+            }
+        }
+
+        acoes_personalizadas = {
+            'PROCESSO_CRIADO': ('INSERT', 'Processo Cadastrado'),
+            'PROCESSO_ATUALIZADO': ('UPDATE', 'Processo Atualizado'),
+            'PROCESSO_EDITADO': ('UPDATE', 'Processo Atualizado'),
+            'PROCESSO_EXCLUIDO': ('DELETE', 'Processo Excluído'),
+            'USUARIO_CRIADO': ('INSERT', 'Usuário Cadastrado'),
+            'USUARIO_ATUALIZADO': ('UPDATE', 'Usuário Atualizado'),
+            'USUARIO_EXCLUIDO': ('DELETE', 'Usuário Excluído'),
+            'AGENDAMENTO_CRIADO': ('INSERT', 'Agendamento Criado'),
+            'AGENDAMENTO_ATUALIZADO': ('UPDATE', 'Agendamento Atualizado'),
+            'AGENDAMENTO_EXCLUIDO': ('DELETE', 'Agendamento Excluído'),
+            'DOCUMENTO_CRIADO': ('INSERT', 'Documento Cadastrado'),
+            'DOCUMENTO_ATUALIZADO': ('UPDATE', 'Documento Atualizado'),
+            'DOCUMENTO_EXCLUIDO': ('DELETE', 'Documento Excluído'),
+            'PAGAMENTO_CRIADO': ('INSERT', 'Pagamento Cadastrado'),
+            'PAGAMENTO_ATUALIZADO': ('UPDATE', 'Pagamento Atualizado'),
+            'PAGAMENTO_EXCLUIDO': ('DELETE', 'Pagamento Excluído')
+        }
+
+        campos_legiveis = {
+            'RAZAO_SOCIAL': 'Razão social',
+            'NOME_FANTASIA': 'Nome fantasia',
+            'REGISTRO_OAB': 'Registro OAB',
+            'UF_OAB': 'UF da OAB',
+            'TELEFONE': 'Telefone',
+            'EMAIL': 'E-mail',
+            'CNPJ': 'CNPJ',
+            'CPF': 'CPF',
+            'RG': 'RG',
+            'CEP': 'CEP',
+            'LOGRADOURO': 'Endereço',
+            'NUMERO': 'Número',
+            'COMPLEMENTO': 'Complemento',
+            'BAIRRO': 'Bairro',
+            'CIDADE': 'Cidade',
+            'ESTADO': 'Estado',
+            'TITULO': 'Título',
+            'DESCRICAO': 'Descrição',
+            'DATA': 'Data',
+            'DATA_INICIO': 'Data de início',
+            'DATA_ATUALIZACAO': 'Data de atualização',
+            'PROCESSO_CONCLUIDO': 'Processo concluído',
+            'CLIENTE': 'Cliente',
+            'ASSUNTO': 'Assunto',
+            'HORARIO': 'Horário',
+            'DURACAO': 'Duração em minutos',
+            'STATUS': 'Situação',
+            'MOTIVO': 'Motivo',
+            'TIPO': 'Tipo',
+            'VALOR': 'Valor',
+            'VALOR_TOTAL': 'Valor total',
+            'VALOR_PAGO': 'Valor pago',
+            'VALOR_PARCELA': 'Valor da parcela',
+            'FORMA_PAGAMENTO': 'Forma de pagamento',
+            'ATIVO': 'Status',
+            'LIDA': 'Status de leitura',
+            'NOME': 'Nome',
+            'NOME_COMPLETO': 'Nome completo',
+            'NUM_PROCESSO': 'Número do processo',
+            'TIPO_PROCESSO': 'Tipo de processo',
+            'AREA': 'Área',
+            'COMARCA': 'Comarca',
+            'VARA': 'Vara',
+            'INSTANCIA': 'Instância',
+            'PROFISSAO': 'Profissão',
+            'SEXO': 'Sexo',
+            'NACIONALIDADE': 'Nacionalidade',
+            'ESTADO_CIVIL': 'Estado civil',
+            'NOME_ARQUIVO': 'Nome do arquivo',
+            'MENSAGEM': 'Mensagem',
+            'ULTIMA_MENSAGEM': 'Última mensagem',
+            'GOOGLE_EMAIL': 'Conta Google',
+            'CONTA_GOOGLE': 'Conta Google',
+            'CONEXAO': 'Conexão com Google',
+            'CREDENCIAL': 'Credencial de acesso',
+            'SALARIOS': 'Salários',
+            'SALARIO': 'Salário',
+            'SALARIO_BASE': 'Salário base',
+            'DATA_NASCIMENTO': 'Data de nascimento',
+            'DATA_VENCIMENTO': 'Data de vencimento',
+            'DATA_PAGAMENTO': 'Data de pagamento'
+        }
+
+        def formatar_campo(campo):
+            campo = str(campo or '').strip().upper()
+
+            return campos_legiveis.get(
+                campo,
+                campo.replace('_', ' ').capitalize()
+            )
+
+        def formatar_valor(campo, valor, tabela):
+            if valor is None or str(valor).strip().upper() in ('', 'NULL', '(VAZIO)'):
+                return 'Não existia'
+
+            valor = str(valor).strip()
+            chave = str(campo or '').upper()
+
+            def somente_numeros(texto):
+                return re.sub(r'\D', '', str(texto))
+
+            def formatar_cpf(numero):
+                if len(numero) == 11:
+                    return f'{numero[:3]}.{numero[3:6]}.{numero[6:9]}-{numero[9:]}'
+                return numero
+
+            def formatar_cnpj(numero):
+                if len(numero) == 14:
+                    return f'{numero[:2]}.{numero[2:5]}.{numero[5:8]}/{numero[8:12]}-{numero[12:]}'
+                return numero
+
+            def formatar_telefone(numero):
+                if len(numero) == 11:
+                    return f'({numero[:2]}) {numero[2:7]}-{numero[7:]}'
+                if len(numero) == 10:
+                    return f'({numero[:2]}) {numero[2:6]}-{numero[6:]}'
+                return numero
+
+            if chave == 'CPF':
+                return formatar_cpf(somente_numeros(valor))
+
+            if chave == 'CNPJ':
+                return formatar_cnpj(somente_numeros(valor))
+
+            if chave in ('TELEFONE', 'CELULAR', 'WHATSAPP'):
+                return formatar_telefone(somente_numeros(valor))
+
+            if chave == 'CEP':
+                numero = somente_numeros(valor)
+                if len(numero) == 8:
+                    return f'{numero[:5]}-{numero[5:]}'
+                return valor
+
+            if chave in ('NUM_PROCESSO', 'NUMERO_PROCESSO'):
+                numero = somente_numeros(valor)
+                if len(numero) == 20:
+                    return (
+                        f'{numero[:7]}-{numero[7:9]}.'
+                        f'{numero[9:13]}.{numero[13]}.'
+                        f'{numero[14:16]}.{numero[16:]}'
+                    )
+                return valor
+
+            if chave == 'PROCESSO_CONCLUIDO':
+                return 'Sim' if valor.upper() in ('1', 'TRUE', 'SIM') else 'Não'
+
+            if chave.startswith(('CONFIRMADO_', 'RECUSADO_')):
+                return 'Sim' if valor.upper() in ('1', 'TRUE', 'SIM') else 'Não'
+
+            if chave == 'ATIVO':
+                return 'Ativo' if valor.upper() in ('1', 'TRUE', 'SIM') else 'Inativo'
+
+            if chave == 'LIDA':
+                return 'Lido' if valor.upper() in ('1', 'TRUE', 'SIM') else 'Não lido'
+
+            if chave == 'STATUS':
+                status = {
+                    'A_CONFIRMAR': 'A confirmar',
+                    'CONFIRMADO': 'Confirmado',
+                    'RECUSADO': 'Recusado',
+                    'CANCELADO': 'Cancelado',
+                    'PENDENTE': 'Pendente',
+                    'PAGO': 'Pago',
+                    'PAGA': 'Paga',
+                    'RECEBIDO': 'Recebido',
+                    'ATRASADO': 'Atrasado',
+                    'CONCLUIDO': 'Concluído',
+                    'EM_ANDAMENTO': 'Em andamento',
+                    'ATIVO': 'Ativo',
+                    'INATIVO': 'Inativo'
+                }
+                return status.get(valor.upper(), valor.replace('_', ' ').capitalize())
+
+            if chave == 'TIPO' and tabela == 'USUARIOS':
+                return {
+                    '0': 'Advogado',
+                    '1': 'Escritório',
+                    '2': 'Cliente (Pessoa Física)',
+                    '3': 'Cliente (Pessoa Jurídica)'
+                }.get(valor, valor)
+
+            campos_monetarios = (
+                chave == 'VALOR'
+                or chave.startswith('VALOR_')
+                or 'SALARIO' in chave
+                or chave in ('HONORARIOS', 'HONORARIO', 'SALARIOS')
+            )
+
+            if campos_monetarios:
+                numero = valor.replace('R$', '').replace(' ', '')
+
+                if ',' in numero and '.' in numero:
+                    numero = numero.replace('.', '').replace(',', '.')
+                elif ',' in numero:
+                    numero = numero.replace(',', '.')
+
+                try:
+                    numero = float(numero)
+                    return f'R$ {numero:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
+                except (ValueError, TypeError):
+                    pass
+
+            if chave == 'DATA' or chave.startswith('DATA_') or 'NASCIMENTO' in chave or 'VENCIMENTO' in chave:
+                data = re.match(r'^(\d{4})-(\d{2})-(\d{2})', valor)
+
+                if data:
+                    return f'{data.group(3)}/{data.group(2)}/{data.group(1)}'
+
+                data_br = re.match(r'^(\d{2})/(\d{2})/(\d{4})', valor)
+
+                if data_br:
+                    return valor
+
+            traducoes = {
+                'PROPRIETARIO': 'Proprietário',
+                'PARCEIRO': 'Parceiro',
+                'ASSOCIADO': 'Associado',
+                'FISICA': 'Pessoa Física',
+                'JURIDICA': 'Pessoa Jurídica',
+                'SALARIOS': 'Salários',
+                'SALARIO': 'Salário',
+                'PENDENTE': 'Pendente',
+                'PAGA': 'Paga',
+                'PAGO': 'Pago',
+                'RECEBIDO': 'Recebido',
+                'A_PAGAR': 'A pagar',
+                'A_RECEBER': 'A receber',
+                'PIX': 'Pix',
+                'BOLETO': 'Boleto',
+                'CARTAO_CREDITO': 'Cartão de crédito',
+                'CARTAO_DE_CREDITO': 'Cartão de crédito',
+                'DINHEIRO': 'Dinheiro',
+                'TRANSFERENCIA': 'Transferência',
+                'DEBITO': 'Débito',
+                'CREDITO': 'Crédito',
+                'MENSAL': 'Mensal',
+                'ANUAL': 'Anual',
+                'TRABALHISTA': 'Trabalhista',
+                'CIVIL': 'Cível',
+                'PENAL': 'Penal',
+                'FAMILIA': 'Família',
+                'PREVIDENCIARIO': 'Previdenciário',
+                'TRIBUTARIO': 'Tributário'
+            }
+
+            return traducoes.get(
+                valor.upper(),
+                valor.replace('_', ' ').capitalize()
+            )
 
         class RelatorioLogsPDF(FPDF):
             def header(self):
                 self.set_fill_color(0, 71, 171)
-                self.rect(0, 0, 297, 20, 'F')
+                self.rect(0, 0, 210, 23, 'F')
                 self.set_text_color(255, 255, 255)
                 self.set_font('Helvetica', 'B', 15)
-                self.set_xy(16, 6)
+                self.set_xy(15, 7)
                 self.cell(0, 8, 'Constituere | Historico de Alteracoes')
-                self.set_text_color(35, 35, 35)
-                self.set_y(28)
+                self.set_y(30)
 
             def footer(self):
-                self.set_y(-12)
+                self.set_y(-14)
                 self.set_draw_color(220, 228, 238)
-                self.line(16, self.get_y(), 281, self.get_y())
-                self.set_y(-9)
+                self.line(15, self.get_y(), 195, self.get_y())
+                self.set_y(-11)
                 self.set_font('Helvetica', '', 8)
                 self.set_text_color(100, 100, 100)
-                self.cell(0, 5, f'Gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}',
-                          align='C')
+                self.cell(
+                    0,
+                    5,
+                    f'Relatorio gerado em {datetime.date.today().strftime("%d/%m/%Y")} | Pagina {self.page_no()}',
+                    align='C'
+                )
 
-        pdf = RelatorioLogsPDF(orientation='L', unit='mm', format='A4')
-        pdf.set_auto_page_break(auto=True, margin=18)
-        pdf.set_margins(16, 16, 16)
+        pdf = RelatorioLogsPDF(orientation='P', unit='mm', format='A4')
+        pdf.set_margins(15, 15, 15)
+        pdf.set_auto_page_break(auto=True, margin=20)
         pdf.add_page()
 
-        pdf.set_fill_color(237, 244, 255)
         pdf.set_text_color(0, 71, 171)
-        pdf.set_font('Helvetica', 'B', 12)
-        pdf.cell(0, 10, '  Historico de Alteracoes do Escritorio', fill=True, new_x='LMARGIN', new_y='NEXT')
-        pdf.ln(2)
+        pdf.set_font('Helvetica', 'B', 14)
+        pdf.cell(0, 9, 'Historico de Alteracoes do Escritorio', new_x='LMARGIN', new_y='NEXT')
 
-        total_banco = sum(1 for r in rows if 'ORIGEM: BANCO_DIRETO' in texto(r[9]))
+        pdf.set_text_color(90, 100, 115)
+        pdf.set_font('Helvetica', '', 9)
+        pdf.cell(
+            0,
+            6,
+            f'Responsavel pelo relatorio: {texto_pdf(nome_advogado)}',
+            new_x='LMARGIN',
+            new_y='NEXT'
+        )
+
+        total_banco = sum(
+            1 for row in rows
+            if 'ORIGEM: BANCO_DIRETO' in texto(row[9])
+            or not (
+                'ORIGEM: SISTEMA' in texto(row[9])
+                or 'ORIGEM: APP' in texto(row[9])
+            )
+        )
+
         total_sistema = len(rows) - total_banco
 
-        def desenhar_card(x, y, titulo, valor, cor_titulo, cor_valor):
-            pdf.set_fill_color(248, 250, 252)
-            pdf.rect(x, y, 80, 18, 'F')
+        pdf.ln(4)
 
-            pdf.set_fill_color(*cor_titulo)
-            pdf.rect(x, y, 2, 18, 'F')
+        largura_card = 180
+        largura_resumo = 85
 
-            pdf.set_text_color(90, 90, 90)
-            pdf.set_font('Helvetica', 'B', 8)
-            pdf.set_xy(x + 5, y + 3)
-            pdf.cell(0, 5, titulo.upper())
-
-            pdf.set_text_color(*cor_valor)
-            pdf.set_font('Helvetica', 'B', 16)
-            pdf.set_xy(x + 5, y + 8)
-            pdf.cell(0, 8, str(valor))
-
-        y_cards = pdf.get_y()
-        desenhar_card(16, y_cards, 'Total de Ações', len(rows), (59, 130, 246), (30, 58, 138))
-        desenhar_card(101, y_cards, 'Pelo Sistema', total_sistema, (34, 197, 94), (22, 101, 52))
-        desenhar_card(186, y_cards, 'Direto no Banco', total_banco, (239, 68, 68), (153, 27, 27))
-
-        pdf.set_y(y_cards + 22)
-        pdf.ln(6)
-
-        colunas = [
-            ('Data/Hora', 32),
-            ('Autor', 40),
-            ('Quem sofreu', 35),
-            ('Ação', 40),
-            ('Valor Antigo', 45),
-            ('Valor Novo', 45),
-            ('Origem', 18),
-            ('IP', 20)
-        ]
-
-        pdf.set_fill_color(237, 244, 255)
-        pdf.set_text_color(0, 71, 171)
-        pdf.set_font('Helvetica', 'B', 8)
-        for nome, largura in colunas:
-            pdf.cell(largura, 8, nome, border=0, fill=True, align='C')
-        pdf.ln()
-
-        pdf.set_font('Helvetica', '', 7.5)
-        for indice, row in enumerate(rows):
-            if pdf.get_y() + 10 > 190:
+        def verificar_espaco(altura=35):
+            if pdf.get_y() + altura > 275:
                 pdf.add_page()
-                pdf.set_fill_color(237, 244, 255)
-                pdf.set_text_color(0, 71, 171)
-                pdf.set_font('Helvetica', 'B', 8)
-                for nome, largura in colunas:
-                    pdf.cell(largura, 8, nome, border=0, fill=True, align='C')
-                pdf.ln()
-                pdf.set_font('Helvetica', '', 7.5)
 
-            data_hora = row[10].strftime('%d/%m/%Y %H:%M') if row[10] else '-'
+        def escrever_texto(valor, largura, altura=5, negrito=False, cor=(35, 45, 60)):
+            pdf.set_text_color(*cor)
+            pdf.set_font('Helvetica', 'B' if negrito else '', 9)
+            pdf.multi_cell(
+                largura,
+                altura,
+                texto_pdf(valor),
+                border=0,
+                new_x='LMARGIN',
+                new_y='NEXT'
+            )
+
+        def escrever_mudanca(mudanca, tabela):
+            verificar_espaco(27)
+
+            y_inicio = pdf.get_y()
+
+            pdf.set_fill_color(245, 248, 252)
+            pdf.set_draw_color(225, 232, 240)
+            pdf.rect(18, y_inicio, 174, 24, 'DF')
+
+            pdf.set_xy(21, y_inicio + 2)
+            escrever_texto(
+                formatar_campo(mudanca['campo']),
+                168,
+                4,
+                True,
+                (30, 50, 75)
+            )
+
+            y_valores = pdf.get_y() + 1
+
+            pdf.set_xy(21, y_valores)
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.set_text_color(153, 27, 27)
+            pdf.cell(82, 4, 'ANTES')
+
+            pdf.set_xy(108, y_valores)
+            pdf.set_text_color(22, 101, 52)
+            pdf.cell(82, 4, 'DEPOIS')
+
+            pdf.set_xy(21, y_valores + 5)
+            escrever_texto(
+                formatar_valor(
+                    mudanca['campo'],
+                    mudanca['antes'],
+                    tabela
+                ),
+                82,
+                4,
+                False,
+                (100, 35, 35)
+            )
+
+            pdf.set_xy(108, y_valores + 5)
+            escrever_texto(
+                formatar_valor(
+                    mudanca['campo'],
+                    mudanca['depois'],
+                    tabela
+                ),
+                82,
+                4,
+                False,
+                (25, 90, 50)
+            )
+
+            pdf.set_y(max(pdf.get_y(), y_inicio + 26))
+            pdf.ln(2)
+
+        for indice, row in enumerate(rows):
+            tabela = texto(row[4]).strip().upper().replace(' ', '_')
+            acao_original = texto(row[3]).strip().upper()
+
+            acao_personalizada = acoes_personalizadas.get(acao_original)
+
+            if acao_personalizada:
+                acao = acao_personalizada[0]
+                rotulo_personalizado = acao_personalizada[1]
+            else:
+                acao = acao_original
+                rotulo_personalizado = None
+
             detalhes = texto(row[9])
-            foi_banco = 'ORIGEM: BANCO_DIRETO' in detalhes
 
-            autor = 'Sist. (Direto)' if foi_banco else texto(nome_adv_logado, 20)
-            alvo = texto(row[2]) or 'Registro'
+            antigo = extrair_campos(row[7])
+            novo = extrair_campos(row[8])
+            mudancas = obter_mudancas(antigo, novo)
 
-            mudancas = obter_mudancas(parse_valores(row[7]), parse_valores(row[8]))
+            if tabela == 'NOTIFICACOES' and acao == 'UPDATE' and len(mudancas) == 1 and mudancas[0]['campo'] == 'LIDA':
+                acao = 'LIDO' if mudancas[0]['depois'] in ('1', 'Lido') else 'NAO_LIDO'
+
+            if acao == 'UPDATE' and antigo == novo:
+                continue
+
+            autor_match = re.search(
+                r'(?im)^AUTOR_ID:\s*(\d+)\s*$',
+                detalhes
+            )
+
+            autor_id = inteiro(autor_match.group(1)) if autor_match else None
+
+            sistema = (
+                'ORIGEM: SISTEMA' in detalhes
+                or 'ORIGEM: APP' in detalhes
+            )
+
+            foi_banco = (
+                'ORIGEM: BANCO_DIRETO' in detalhes
+                or not sistema
+            )
+
+            if foi_banco:
+                nome_realizador = 'Alterado diretamente no banco'
+                cargo = 'Banco de dados'
+            else:
+                nome_realizador = (
+                    nome_usuario(autor_id)
+                    if autor_id and autor_id > 0
+                    else None
+                ) or 'Ação realizada pelo sistema'
+
+                cargo = 'Advogado' if autor_id and nome_usuario(autor_id) else 'Sistema'
+
+            alvo = obter_alvo(
+                tabela,
+                row[5],
+                antigo,
+                novo
+            )
+
+            verbo = verbos.get(tabela, {}).get(
+                acao,
+                {
+                    'INSERT': 'cadastrou',
+                    'CRIAR': 'cadastrou',
+                    'UPDATE': 'atualizou',
+                    'EDITAR': 'atualizou',
+                    'DELETE': 'excluiu',
+                    'EXCLUIR': 'excluiu',
+                    'LIDO': 'marcou como lida',
+                    'NAO_LIDO': 'marcou como não lida'
+                }.get(acao, 'modificou')
+            )
+
+            objeto = nomes_tabelas.get(tabela, 'cadastro')
+
+            if tabela == 'ADVOGADO_ESCRITORIO' and acao != 'INSERT':
+                resumo = f'{nome_realizador} {verbo} {alvo}.'
+            elif tabela == 'MENSAGENS':
+                resumo = f'{nome_realizador} {verbo} a mensagem.'
+            elif tabela == 'CONVERSAS':
+                resumo = f'{nome_realizador} {verbo} a conversa.'
+            elif tabela == 'GOOGLE_CALENDAR':
+                resumo = f'{nome_realizador} {verbo} a integração do Google Agenda.'
+            else:
+                resumo = f'{nome_realizador} {verbo} {objeto} {alvo}.'
+
+            rotulo_acao = rotulo_personalizado or rotulos_acoes.get(tabela, {}).get(
+                acao,
+                {
+                    'INSERT': 'Novo Cadastro',
+                    'CRIAR': 'Novo Cadastro',
+                    'UPDATE': 'Atualização',
+                    'EDITAR': 'Atualização',
+                    'DELETE': 'Exclusão',
+                    'EXCLUIR': 'Exclusão',
+                    'LIDO': 'Lido',
+                    'NAO_LIDO': 'Não lida'
+                }.get(acao, 'Atualização')
+            )
+
+            data_hora = row[10]
+
+            if data_hora:
+                if isinstance(data_hora, str):
+                    try:
+                        data_hora = datetime.datetime.fromisoformat(data_hora)
+                    except ValueError:
+                        data = data_hora[:10]
+                        hora = data_hora[11:19]
+                        partes = data.split('-')
+                        if len(partes) == 3:
+                            data = f'{partes[2]}/{partes[1]}/{partes[0]}'
+                    else:
+                        data = data_hora.strftime('%d/%m/%Y')
+                        hora = data_hora.strftime('%H:%M:%S')
+                else:
+                    data = data_hora.strftime('%d/%m/%Y')
+                    hora = data_hora.strftime('%H:%M:%S')
+            else:
+                data = '-'
+                hora = '-'
+
+            ip = texto(row[12]) or '-'
+
+            if ip == '::1':
+                ip = '127.0.0.1'
+
+            maquina = texto(row[11]) or '-'
+
+            verificar_espaco(48)
+
+            y_inicio = pdf.get_y()
+
+            pdf.set_draw_color(215, 225, 238)
+            pdf.set_fill_color(255, 255, 255)
+            pdf.rect(15, y_inicio, largura_card, 10, 'F')
+
+            pdf.set_fill_color(0, 71, 171)
+            pdf.rect(15, y_inicio, 2, 10, 'F')
+
+            pdf.set_xy(20, y_inicio + 2)
+            pdf.set_font('Helvetica', 'B', 10)
+            pdf.set_text_color(
+                153 if foi_banco else 15,
+                27 if foi_banco else 23,
+                27 if foi_banco else 42
+            )
+            pdf.cell(largura_resumo, 5, texto_pdf(nome_realizador))
+
+            pdf.set_xy(145, y_inicio + 2)
+            pdf.set_font('Helvetica', 'B', 8)
+
+            if foi_banco:
+                pdf.set_text_color(153, 27, 27)
+            else:
+                pdf.set_text_color(0, 71, 171)
+
+            pdf.cell(45, 5, texto_pdf(rotulo_acao), align='R')
+
+            pdf.set_xy(20, y_inicio + 12)
+            pdf.set_font('Helvetica', '', 8)
+            pdf.set_text_color(110, 120, 135)
+            pdf.cell(0, 5, texto_pdf(cargo), new_x='LMARGIN', new_y='NEXT')
+
+            if foi_banco:
+                pdf.set_x(20)
+                pdf.set_font('Helvetica', 'B', 8)
+                pdf.set_text_color(153, 27, 27)
+                pdf.multi_cell(
+                    170,
+                    5,
+                    'ALTERACAO DIRETA NO BANCO DE DADOS',
+                    new_x='LMARGIN',
+                    new_y='NEXT'
+                )
+
+            pdf.set_x(20)
+            pdf.set_font('Helvetica', '', 9)
+            pdf.set_text_color(51, 65, 85)
+            pdf.multi_cell(
+                170,
+                5,
+                texto_pdf(resumo),
+                new_x='LMARGIN',
+                new_y='NEXT'
+            )
+
+            pdf.ln(2)
+
+            y_meta = pdf.get_y()
+            pdf.set_fill_color(237, 244, 255)
+            pdf.rect(20, y_meta, 170, 13, 'F')
+
+            metadados = [
+                ('DATA', data, 20),
+                ('HORA', hora, 65),
+                ('MEIO', 'Banco de Dados' if foi_banco else 'Sistema', 110)
+            ]
+
+            for titulo, valor, x in metadados:
+                pdf.set_xy(x + 3, y_meta + 1)
+                pdf.set_font('Helvetica', 'B', 7)
+                pdf.set_text_color(90, 105, 125)
+                pdf.cell(45, 4, titulo)
+
+                pdf.set_xy(x + 3, y_meta + 6)
+                pdf.set_font('Helvetica', 'B', 8)
+                pdf.set_text_color(35, 50, 70)
+                pdf.cell(55, 4, texto_pdf(valor))
+
+            pdf.set_y(y_meta + 16)
+
+            pdf.set_x(20)
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.set_text_color(50, 65, 85)
+            pdf.cell(0, 5, 'DETALHES DA ACAO', new_x='LMARGIN', new_y='NEXT')
+
+            pdf.set_x(20)
+            pdf.set_font('Helvetica', '', 8)
+            pdf.set_text_color(90, 100, 115)
+            pdf.multi_cell(
+                170,
+                4,
+                f'Registro: {texto_pdf(alvo)}',
+                new_x='LMARGIN',
+                new_y='NEXT'
+            )
+
+            pdf.set_x(20)
+            pdf.set_font('Helvetica', '', 8)
+            pdf.set_text_color(90, 100, 115)
+            pdf.multi_cell(
+                170,
+                4,
+                f'IP: {texto_pdf(ip)}    |    Maquina: {texto_pdf(maquina)}',
+                new_x='LMARGIN',
+                new_y='NEXT'
+            )
 
             if mudancas:
-                m = mudancas[0]
-                acao = f"Editou {m['campo'].replace('_', ' ').title()}"
-                val_antigo = texto(m['antes'], 22)
-                val_novo = texto(m['depois'], 22)
+                pdf.ln(2)
+
+                pdf.set_x(20)
+                pdf.set_font('Helvetica', 'B', 9)
+                pdf.set_text_color(30, 50, 75)
+                pdf.cell(0, 5, 'O QUE MUDOU?', new_x='LMARGIN', new_y='NEXT')
+
+                for mudanca in mudancas:
+                    escrever_mudanca(mudanca, tabela)
             else:
-                acao = texto(row[3])
-                val_antigo = '-'
-                val_novo = '-'
+                pdf.ln(2)
+                pdf.set_x(20)
+                pdf.set_font('Helvetica', 'I', 8)
+                pdf.set_text_color(110, 120, 135)
+                pdf.multi_cell(
+                    170,
+                    5,
+                    'Nenhuma informacao detalhada foi registrada nesta alteracao.',
+                    new_x='LMARGIN',
+                    new_y='NEXT'
+                )
 
-            ip = texto(row[12], 15)
-            origem = 'Banco' if foi_banco else 'Sistema'
+            pdf.ln(5)
+            pdf.set_draw_color(220, 228, 238)
+            pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+            pdf.ln(5)
 
-            valores = [data_hora, autor, alvo, acao, val_antigo, val_novo, origem, ip]
+        pdf.ln(2)
+        pdf.set_font('Helvetica', 'B', 9)
+        pdf.set_text_color(70, 85, 105)
+        pdf.cell(
+            0,
+            6,
+            f'Total de acoes: {len(rows)}  |  Pelo sistema: {total_sistema}  |  Direto no banco: {total_banco}',
+            new_x='LMARGIN',
+            new_y='NEXT'
+        )
 
-            pdf.set_fill_color(250, 252, 255) if indice % 2 else pdf.set_fill_color(255, 255, 255)
+        return send_file(
+            BytesIO(bytes(pdf.output())),
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name='historico-alteracoes.pdf'
+        )
 
-            for i, ((_, largura), valor) in enumerate(zip(colunas, valores)):
-                if i == 4 and valor != '-':
-                    pdf.set_text_color(153, 27, 27)
-                    pdf.set_font('Helvetica', 'B', 7.5)
-                elif i == 5 and valor != '-':
-                    pdf.set_text_color(22, 101, 52)
-                    pdf.set_font('Helvetica', 'B', 7.5)
-                else:
-                    pdf.set_text_color(35, 35, 35)
-                    pdf.set_font('Helvetica', '', 7.5)
+    except Exception:
+        app.logger.exception('Erro ao gerar PDF de logs de auditoria')
 
-                pdf.cell(largura, 8, str(valor), border=0, fill=True, align='C')
+        return jsonify({
+            'error': 'Não foi possível gerar o relatório.'
+        }), 500
 
-            pdf.ln()
-
-        return send_file(BytesIO(bytes(pdf.output())), mimetype='application/pdf', as_attachment=True,
-                         download_name='historico-alteracoes.pdf')
-
-    except Exception as erro:
-        print(f"Erro ao gerar PDF de logs: {erro}")
-        return jsonify({'error': f'Nao foi possivel gerar o relatorio: {erro}'}), 500
     finally:
-        cur.close()
-        con.close()
+        if cur_log is not None:
+            cur_log.close()
+
+        if con_log is not None:
+            con_log.close()
+
+        if cur is not None:
+            cur.close()
+
+        if con is not None:
+            con.close()
 
 @app.route('/escritorio/<int:id_escritorio>/informacoes', methods=['PUT'])
 def editar_informacao_escritorio_ia(id_escritorio):

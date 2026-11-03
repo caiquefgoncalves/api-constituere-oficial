@@ -1,4 +1,4 @@
-from flask import Flask, send_from_directory
+from flask import Flask, send_from_directory, jsonify, request, make_response
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
@@ -62,6 +62,17 @@ socketio = SocketIO(
     transports=["polling"]
 )
 
+@app.before_request
+def handle_options():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', ''))
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers',
+                             'Content-Type, Authorization, X-Requested-With, X-Access-Token, X-Client-Platform, X-Client-Device')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        return response
+
 app.config.from_pyfile('config.py')
 
 app.config['UPLOAD_FOLDER'] = os.path.join(
@@ -91,24 +102,25 @@ def uploaded_file(filename):
 
 @socketio.on('connect')
 def socket_connect():
-    print('Cliente conectado ao Socket.IO')
+    print('Cliente conectado ao Socket.IO', flush=True)
 
 @socketio.on('disconnect')
 def socket_disconnect():
-    print('Cliente desconectado do Socket.IO')
+    print('Cliente desconectado do Socket.IO', flush=True)
 
 @socketio.on('entrar_usuario')
 def entrar_usuario(data):
     try:
         id_usuario = data.get('id_usuario')
         if not id_usuario:
+            print('[SOCKET] entrar_usuario sem id_usuario', flush=True)
             return
         sala = f'usuario_{id_usuario}'
         join_room(sala)
-        print(f'Usuário {id_usuario} entrou na sala {sala}')
+        print(f'[SOCKET] Usuário {id_usuario} entrou na sala {sala}', flush=True)
         emit('entrou_sala', {'sala': sala, 'id_usuario': id_usuario})
     except Exception as e:
-        print(f'Erro ao colocar usuário na sala: {e}')
+        print(f'[SOCKET] Erro ao colocar usuário na sala: {e}', flush=True)
 
 @socketio.on('sair_usuario')
 def sair_usuario(data):
@@ -118,9 +130,9 @@ def sair_usuario(data):
             return
         sala = f'usuario_{id_usuario}'
         leave_room(sala)
-        print(f'Usuário {id_usuario} saiu da sala {sala}')
+        print(f'Usuário {id_usuario} saiu da sala {sala}', flush=True)
     except Exception as e:
-        print(f'Erro ao remover usuário da sala: {e}')
+        print(f'Erro ao remover usuário da sala: {e}', flush=True)
 
 from usuario import *
 from processos import *
@@ -130,6 +142,25 @@ from veritas_ai import *
 from financeiro import *
 from dm import *
 from google_calendar import *
+
+from financeiro import set_socketio_emitter
+set_socketio_emitter(socketio)
+print("[MAIN] socketio injetado no financeiro:", socketio is not None, flush=True)
+
+if 'teste_emit' not in app.view_functions:
+    @app.route('/teste_emit/<int:id_usuario>')
+    def teste_emit(id_usuario):
+        socketio.emit('nova_notificacao', {
+            'id': 99999,
+            'tipo': 'TESTE',
+            'titulo': 'Teste manual',
+            'mensagem': 'Se você viu isso sem recarregar, o socket funciona!',
+            'lida': False,
+            'data_criacao': '01/01/2026',
+            'hora_criacao': '12:00',
+            'data_leitura': None
+        }, room=f'usuario_{id_usuario}')
+        return f'Emitido para usuario_{id_usuario}'
 
 def agendador_notificacoes():
     print("\n>>> [AGENDADOR] THREAD INICIADA COM SUCESSO! <<<\n", flush=True)
@@ -165,5 +196,6 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=5000,
         debug=True,
-        allow_unsafe_werkzeug=True
+        allow_unsafe_werkzeug=True,
+        use_reloader=False
     )

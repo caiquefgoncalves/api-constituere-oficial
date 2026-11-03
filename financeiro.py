@@ -1,4 +1,3 @@
-
 import datetime
 import unicodedata
 from decimal import Decimal, InvalidOperation
@@ -9,7 +8,15 @@ from fpdf import FPDF
 
 from db import conexao
 from funcao import decodificar_token, converter_data_pagamento
-from main import app, socketio
+from main import app
+
+
+_socketio = None
+
+
+def set_socketio_emitter(sio):
+    global _socketio
+    _socketio = sio
 
 
 def converter_data(valor):
@@ -28,6 +35,7 @@ def converter_data(valor):
 
 def periodo_para_datas(periodo, data_ini=None, data_fim=None):
     hoje = datetime.date.today()
+
     if periodo == 'mes':
         return hoje.replace(day=1), hoje
     if periodo == 'mesAnterior':
@@ -242,21 +250,24 @@ def processar_notificacoes_vencimento():
             id_notificacao = cur.fetchone()[0]
             con.commit()
             agora = datetime.datetime.now()
-            socketio.emit('nova_notificacao', {
-                'id': id_notificacao,
-                'tipo': 'FINANCEIRO_VENCIMENTO',
-                'titulo': titulo,
-                'mensagem': mensagem,
-                'lida': False,
-                'data_criacao': agora.strftime('%d/%m/%Y'),
-                'hora_criacao': agora.strftime('%H:%M'),
-                'data_leitura': None
-            }, room=f'usuario_{id_advogado}')
+            print(f"[NOTIF] _socketio é None? {_socketio is None} | id_advogado={id_advogado}", flush=True)
+            if _socketio:
+                _socketio.emit('nova_notificacao', {
+                    'id': id_notificacao,
+                    'tipo': 'FINANCEIRO_VENCIMENTO',
+                    'titulo': titulo,
+                    'mensagem': mensagem,
+                    'lida': False,
+                    'data_criacao': agora.strftime('%d/%m/%Y'),
+                    'hora_criacao': agora.strftime('%H:%M'),
+                    'data_leitura': None
+                }, room=f'usuario_{id_advogado}')
+                print(f"[NOTIF] Emitido para usuario_{id_advogado}", flush=True)
             enviadas += 1
         return enviadas
     except Exception:
         con.rollback()
-        app.logger.exception('Erro ao processar notificações de vencimento')
+        print('Erro ao processar notificações de vencimento', flush=True)
         return 0
     finally:
         cur.close()
@@ -301,7 +312,7 @@ def listar_lancamentos_escritorio(id_escritorio):
             }
         }), 200
     except Exception:
-        app.logger.exception('Erro ao listar lançamentos')
+        print('Erro ao listar lançamentos', flush=True)
         return jsonify({'error': 'Erro ao listar lançamentos financeiros.'}), 500
     finally:
         cur.close()
@@ -333,8 +344,6 @@ def criar_lancamento_escritorio(id_escritorio):
     data_obj = converter_data(dados.get('data'))
     if not data_obj:
         return jsonify({'error': 'Data inválida'}), 400
-    if data_obj > datetime.date.today():
-        return jsonify({'error': 'A data não pode ser futura'}), 400
 
     status = 'recebida' if tipo == 'receita' else 'a_pagar'
     con = conexao()
@@ -358,7 +367,7 @@ def criar_lancamento_escritorio(id_escritorio):
         }), 201
     except Exception:
         con.rollback()
-        app.logger.exception('Erro ao criar lançamento financeiro')
+        print('Erro ao criar lançamento financeiro', flush=True)
         return jsonify({'error': 'Erro ao cadastrar lançamento financeiro.'}), 500
     finally:
         cur.close()
@@ -482,7 +491,7 @@ def baixar_lancamento_escritorio(id_escritorio, id_lancamento):
         return jsonify({'error': 'Lançamento não encontrado'}), 404
     except Exception:
         con.rollback()
-        app.logger.exception('Erro ao dar baixa no lançamento')
+        print('Erro ao dar baixa no lançamento', flush=True)
         return jsonify({'error': 'Erro ao dar baixa no lançamento.'}), 500
     finally:
         cur.close()
@@ -504,6 +513,8 @@ def resumo_financeiro_escritorio(id_escritorio):
     con = conexao()
     cur = con.cursor()
     try:
+        if inicio and fim and fim < inicio:
+            return jsonify({'error': 'Período inválido'}), 400
         permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
         if not permitido:
             return jsonify({'error': mensagem}), 403
@@ -557,7 +568,7 @@ def resumo_financeiro_escritorio(id_escritorio):
             'situacao': situacao
         }), 200
     except Exception:
-        app.logger.exception('Erro ao calcular resumo financeiro')
+        print('Erro ao calcular resumo financeiro', flush=True)
         return jsonify({'error': 'Erro ao calcular resumo financeiro.'}), 500
     finally:
         cur.close()
@@ -687,7 +698,7 @@ def gerar_relatorio_financeiro(id_escritorio):
             download_name='relatorio-financeiro.pdf'
         )
     except Exception:
-        app.logger.exception('Erro ao gerar PDF financeiro')
+        print('Erro ao gerar PDF financeiro', flush=True)
         return jsonify({'error': 'Erro ao gerar relatório financeiro.'}), 500
     finally:
         cur.close()
