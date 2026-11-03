@@ -15,3 +15,4 @@ google-auth-httplib2
 google-auth-oauthlib
 cryptography==42.0.8
 tzdata
+python-dotenv
