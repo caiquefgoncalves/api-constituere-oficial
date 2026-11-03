@@ -35,7 +35,6 @@ def converter_data(valor):
 
 def periodo_para_datas(periodo, data_ini=None, data_fim=None):
     hoje = datetime.date.today()
-
     if periodo == 'mes':
         return hoje.replace(day=1), hoje
     if periodo == 'mesAnterior':
@@ -291,11 +290,17 @@ def listar_lancamentos_escritorio(id_escritorio):
     tipo = (request.args.get('tipo') or 'todos').lower()
     if tipo not in ('todos', 'receita', 'despesa'):
         return jsonify({'error': 'Tipo inválido'}), 400
+    periodo_solicitado = request.args.get('periodo', 'mes')
     inicio, fim = periodo_para_datas(
-        request.args.get('periodo', 'mes'),
+        periodo_solicitado,
         request.args.get('data_inicial'),
         request.args.get('data_final')
     )
+    if periodo_solicitado == 'personalizado':
+        if not inicio or not fim:
+            return jsonify({'error': 'Informe a data inicial e a data final.'}), 400
+        if fim < inicio:
+            return jsonify({'error': 'Período inválido'}), 400
     con = conexao()
     cur = con.cursor()
     try:
@@ -369,6 +374,123 @@ def criar_lancamento_escritorio(id_escritorio):
         con.rollback()
         print('Erro ao criar lançamento financeiro', flush=True)
         return jsonify({'error': 'Erro ao cadastrar lançamento financeiro.'}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/escritorio/<int:id_escritorio>/financeiro/lancamentos/<int:id_lancamento>', methods=['PUT'])
+def editar_lancamento_escritorio(id_escritorio, id_lancamento):
+    token = decodificar_token()
+    if not token:
+        return jsonify({'error': 'Token necessário'}), 401
+    if token.get('tipo') != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    dados = request.get_json(silent=True) if request.is_json else request.form
+    dados = dados or {}
+    assignments = []
+    parameters = []
+
+    if 'tipo' in dados:
+        tipo = str(dados.get('tipo') or '').strip().lower()
+        if tipo not in ('receita', 'despesa'):
+            return jsonify({'error': 'Tipo inválido'}), 400
+        assignments.append('TIPO = ?')
+        parameters.append(tipo)
+        assignments.append('STATUS = ?')
+        parameters.append('recebida' if tipo == 'receita' else 'a_pagar')
+
+    if 'descricao' in dados:
+        descricao = str(dados.get('descricao') or '').strip()
+        if not descricao or len(descricao) > 254:
+            return jsonify({'error': 'Descrição deve ter de 1 a 254 caracteres.'}), 400
+        assignments.append('DESCRICAO = ?')
+        parameters.append(descricao)
+
+    if 'valor' in dados:
+        try:
+            valor = numero_decimal(dados.get('valor'))
+            if valor <= 0 or valor.as_tuple().exponent < -2:
+                raise ValueError('Valor inválido')
+        except (ValueError, TypeError, InvalidOperation):
+            return jsonify({'error': 'Valor inválido'}), 400
+        assignments.append('VALOR = ?')
+        parameters.append(valor)
+
+    if 'data' in dados:
+        data_obj = converter_data(dados.get('data'))
+        if not data_obj:
+            return jsonify({'error': 'Data inválida'}), 400
+        assignments.append('"DATA" = ?')
+        parameters.append(data_obj)
+
+    if not assignments:
+        return jsonify({'error': 'Informe ao menos um campo para alterar'}), 400
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
+        if not permitido:
+            return jsonify({'error': mensagem}), 403
+        cur.execute(
+            'SELECT 1 FROM LANCAMENTOS_FINANCEIROS '
+            'WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1',
+            (id_lancamento, id_escritorio),
+        )
+        if not cur.fetchone():
+            return jsonify({'error': 'Lançamento não encontrado'}), 404
+        parameters.extend((id_lancamento, id_escritorio))
+        cur.execute(
+            'UPDATE LANCAMENTOS_FINANCEIROS SET '
+            + ', '.join(assignments)
+            + ' WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1',
+            tuple(parameters),
+        )
+        con.commit()
+        return jsonify({'mensagem': 'Lançamento atualizado com sucesso.'}), 200
+    except Exception:
+        con.rollback()
+        print('Erro ao editar lançamento financeiro', flush=True)
+        return jsonify({'error': 'Erro ao editar lançamento financeiro.'}), 500
+    finally:
+        cur.close()
+        con.close()
+
+
+@app.route('/escritorio/<int:id_escritorio>/financeiro/lancamentos/<int:id_lancamento>', methods=['DELETE'])
+def excluir_lancamento_escritorio(id_escritorio, id_lancamento):
+    token = decodificar_token()
+    if not token:
+        return jsonify({'error': 'Token necessário'}), 401
+    if token.get('tipo') != 0:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
+        if not permitido:
+            return jsonify({'error': mensagem}), 403
+        cur.execute(
+            'SELECT 1 FROM LANCAMENTOS_FINANCEIROS '
+            'WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1',
+            (id_lancamento, id_escritorio),
+        )
+        if not cur.fetchone():
+            return jsonify({'error': 'Lançamento não encontrado'}), 404
+        cur.execute(
+            '''UPDATE LANCAMENTOS_FINANCEIROS SET ATIVO = 0
+               WHERE ID_LANCAMENTOS = ? AND ID_ESCRITORIO = ? AND ATIVO = 1''',
+            (id_lancamento, id_escritorio),
+        )
+        con.commit()
+        return jsonify({'mensagem': 'Lançamento excluído com sucesso.'}), 200
+    except Exception:
+        con.rollback()
+        print('Erro ao excluir lançamento financeiro', flush=True)
+        return jsonify({'error': 'Erro ao excluir lançamento financeiro.'}), 500
     finally:
         cur.close()
         con.close()
@@ -505,16 +627,20 @@ def resumo_financeiro_escritorio(id_escritorio):
         return jsonify({'error': 'Token necessário'}), 401
     if token.get('tipo') != 0:
         return jsonify({'error': 'Acesso não autorizado'}), 403
+    periodo_solicitado = request.args.get('periodo', 'mes')
     inicio, fim = periodo_para_datas(
-        request.args.get('periodo', 'mes'),
+        periodo_solicitado,
         request.args.get('data_inicial'),
         request.args.get('data_final')
     )
+    if periodo_solicitado == 'personalizado':
+        if not inicio or not fim:
+            return jsonify({'error': 'Informe a data inicial e a data final.'}), 400
+        if fim < inicio:
+            return jsonify({'error': 'Período inválido'}), 400
     con = conexao()
     cur = con.cursor()
     try:
-        if inicio and fim and fim < inicio:
-            return jsonify({'error': 'Período inválido'}), 400
         permitido, mensagem = verificar_acesso_escritorio(cur, token['id_usuarios'], id_escritorio)
         if not permitido:
             return jsonify({'error': mensagem}), 403
