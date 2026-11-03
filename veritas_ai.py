@@ -15,6 +15,8 @@ from main import app
 
 
 ASSISTANT_NAME = "Veritas"
+# Os dois provedores usam a API compatível com OpenAI; a escolha pode ser
+# alterada por variáveis de ambiente sem modificar a rota principal.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_NVIDIA_MODEL = "moonshotai/kimi-k3"
@@ -28,6 +30,8 @@ DEFAULT_OPENROUTER_MODELS = (
 )
 DEFAULT_PROVIDER_PRIORITY = "OPENROUTER"
 
+# Referências aceitas nas respostas jurídicas. A lista também é enviada ao
+# modelo para que fontes não oficiais não sejam apresentadas ao usuário.
 FONTES_JURIDICAS_OFICIAIS = (
     ("Legislação federal — Presidência da República", "https://www.planalto.gov.br/ccivil_03/"),
     ("Legislação e normas consolidadas — Portal Normas", "https://www.normas.leg.br/"),
@@ -43,6 +47,9 @@ DOMINIOS_JURIDICOS_OFICIAIS = {
     "tst.jus.br", "jurisprudencia.tst.jus.br", "tse.jus.br", "jurisprudencia.tse.jus.br",
     "cnj.jus.br", "www.cnj.jus.br", "lexml.gov.br", "www.lexml.gov.br",
 }
+# Contrato das ações que o modelo pode propor. A proposta ainda passa por
+# _proposal_from_tool_call, que valida permissões e dados antes de devolvê-la
+# ao frontend; o modelo não executa nenhuma operação diretamente.
 SCHEDULE_TOOLS = [
     {"type": "function", "function": {"name": "gerar_pagamento_pix", "description": "Propõe gerar uma cobrança Pix para uma parcela em aberto do próprio cliente.", "parameters": {"type": "object", "properties": {"id_parcela": {"type": "integer"}, "tipo_parcela": {"type": "string", "enum": ["prolabore", "exito"]}}, "required": ["id_parcela", "tipo_parcela"]}}},
     {"type": "function", "function": {"name": "cadastrar_cliente", "description": "Propõe cadastrar cliente pessoa física ou jurídica para o advogado ou proprietário. Para pessoa física, data_nascimento e sexo também são obrigatórios. Para pessoa jurídica, razao_social e nome_fantasia também são obrigatórios.", "parameters": {"type": "object", "properties": {"tipo": {"type": "integer", "enum": [2, 3]}, "nome": {"type": "string"}, "email": {"type": "string"}, "telefone": {"type": "string"}, "cpf_cnpj": {"type": "string"}, "senha": {"type": "string"}, "confirmar_senha": {"type": "string"}, "data_nascimento": {"type": "string"}, "sexo": {"type": "string"}, "razao_social": {"type": "string"}, "nome_fantasia": {"type": "string"}}, "required": ["tipo", "nome", "email", "telefone", "cpf_cnpj", "senha", "confirmar_senha"]}}},
@@ -269,7 +276,10 @@ SCHEDULE_TOOLS = [
 ]
 
 
+# Extrai e valida o JWT da requisição, retornando a identidade mínima do usuário.
 def _decode_request_token():
+    # Aceita os formatos usados pelos clientes existentes e devolve somente os
+    # campos mínimos necessários para controlar o acesso à conversa.
     token = request.headers.get("X-Access-Token")
 
     if not token:
@@ -297,7 +307,10 @@ def _decode_request_token():
         return False
 
 
+# Converte datas nativas ou textos aceitos para um objeto date, ou None se inválido.
 def _as_date(value):
+    # O banco e as mensagens do usuário podem usar formatos distintos; este
+    # ponto único evita que cada fluxo trate datas de uma forma diferente.
     if value is None:
         return None
 
@@ -318,6 +331,7 @@ def _as_date(value):
     return None
 
 
+# Converte uma data válida para a apresentação brasileira DD/MM/AAAA.
 def _format_date(value):
     date_value = _as_date(value)
     if not date_value:
@@ -325,6 +339,7 @@ def _format_date(value):
     return date_value.strftime("%d/%m/%Y")
 
 
+# Padroniza horários para HH:MM, inclusive valores vindos do banco.
 def _format_time(value):
     if value is None:
         return "--"
@@ -335,6 +350,7 @@ def _format_time(value):
     return str(value)[:5]
 
 
+# Exibe uma duração em texto, convertendo minutos inteiros para horas e minutos.
 def _format_duration(value):
     if value is None:
         return "--"
@@ -345,6 +361,7 @@ def _format_duration(value):
     return str(value)
 
 
+# Aplica a máscara visual de CPF ou CNPJ aos dígitos recebidos.
 def _format_document(value):
     digits = re.sub(r"\D", "", str(value or ""))
 
@@ -356,7 +373,10 @@ def _format_document(value):
     return ""
 
 
+# Remove acentos e padroniza o texto para comparações de intenção.
 def _normalize_text(value):
+    # A normalização torna a identificação de intenções tolerante a acentos,
+    # maiúsculas e espaços, sem alterar o texto exibido ao usuário.
     normalized = unicodedata.normalize("NFKD", value or "")
     without_accents = "".join(
         char for char in normalized if not unicodedata.combining(char)
@@ -364,6 +384,7 @@ def _normalize_text(value):
     return without_accents.lower().strip()
 
 
+# Verifica se o texto normalizado contém ao menos uma palavra-chave inteira.
 def _contains_any_word(text, keywords):
     return any(
         re.search(rf"\b{re.escape(keyword)}\b", text)
@@ -371,6 +392,7 @@ def _contains_any_word(text, keywords):
     )
 
 
+# Identifica respostas curtas que provavelmente informam a duração do atendimento.
 def _is_duration_reply(question):
     """Recognizes common standalone duration formats used in appointment flows."""
     normalized = _normalize_text(question)
@@ -380,6 +402,7 @@ def _is_duration_reply(question):
     ))
 
 
+# Decide se a mensagem completa um campo pendente de um fluxo de agendamento.
 def _is_schedule_detail_reply(question, history):
     """Allows details supplied while the user is completing an appointment request."""
     normalized = _normalize_text(question)
@@ -410,6 +433,7 @@ def _is_schedule_detail_reply(question, history):
     return has_pending_schedule and has_schedule_detail
 
 
+# Decide se a mensagem é o motivo pedido para recusar ou cancelar um agendamento.
 def _is_schedule_reason_reply(question, history):
     """Allows a short reason supplied after a pending rejection or cancellation."""
     prior_messages = "\n".join(
@@ -434,6 +458,7 @@ def _is_schedule_reason_reply(question, history):
     )
 
 
+# Detecta se a resposta curta complementa o cadastro de um cliente.
 def _is_client_registration_detail_reply(question, history):
     """Allows a data-only reply while a client registration is in progress."""
     prior_messages = "\n".join(
@@ -458,6 +483,7 @@ def _is_client_registration_detail_reply(question, history):
     )
 
 
+# Detecta respostas que devem continuar um fluxo iniciado anteriormente.
 def _is_pending_workflow_reply(question, history):
     """Allows concise answers to a field the assistant just requested."""
     normalized = _normalize_text(question)
@@ -519,6 +545,7 @@ _NUMBER_WORDS = {
 }
 
 
+# Soma meses de calendário preservando um dia válido no mês de destino.
 def _add_months(value, months):
     """Returns the equivalent date a number of calendar months from value."""
     month_index = value.month - 1 + months
@@ -529,8 +556,11 @@ def _add_months(value, months):
     return datetime.date(year, month, min(value.day, last_day))
 
 
+# Interpreta uma única data relativa escrita em português.
 def _relative_date_from_question(question):
     """Recognizes a single calendar date expressed relatively in Portuguese."""
+    # Datas relativas usam a data do servidor como referência para que uma
+    # proposta de agenda seja sempre associada a uma data inequívoca.
     normalized = _normalize_text(question)
     today = datetime.date.today()
 
@@ -582,6 +612,7 @@ def _relative_date_from_question(question):
         return None
 
 
+# Traduz referências temporais da pergunta em um intervalo de datas consultável.
 def _resolve_period(question):
     today = datetime.date.today()
     normalized = _normalize_text(question)
@@ -627,6 +658,7 @@ def _resolve_period(question):
     return today, today + datetime.timedelta(days=7), "proximos_7_dias"
 
 
+# Verifica se a pergunta trata de agenda, reuniões ou compromissos.
 def _question_mentions_schedule(question):
     normalized = _normalize_text(question)
     keywords = (
@@ -641,6 +673,7 @@ def _question_mentions_schedule(question):
     )
 
 
+# Verifica se o pedido pretende criar, editar, confirmar, recusar ou cancelar agenda.
 def _question_requests_schedule_mutation(question):
     normalized = _normalize_text(question)
     action_words = (
@@ -659,6 +692,7 @@ def _question_requests_schedule_mutation(question):
     )
 
 
+# Detecta referências ordinais, como "o primeiro", a um agendamento já listado.
 def _question_uses_schedule_ordinal_reference(question):
     return _contains_any_word(
         _normalize_text(question),
@@ -666,6 +700,7 @@ def _question_uses_schedule_ordinal_reference(question):
     )
 
 
+# Identifica pedidos de inativação de vínculo de advogado com escritório.
 def _question_requests_lawyer_deactivation(question):
     normalized = _normalize_text(question)
     return _contains_any_word(normalized, ("inativar", "inative", "remover", "remova")) and _contains_any_word(
@@ -673,6 +708,7 @@ def _question_requests_lawyer_deactivation(question):
     )
 
 
+# Identifica pedidos de reativação de vínculo de advogado com escritório.
 def _question_requests_lawyer_activation(question):
     normalized = _normalize_text(question)
     return _contains_any_word(normalized, ("ativar", "ative", "reativar", "reative")) and _contains_any_word(
@@ -680,6 +716,7 @@ def _question_requests_lawyer_activation(question):
     )
 
 
+# Resume se a pergunta solicita alguma ação que altera um agendamento.
 def _schedule_action_requested(question):
     normalized = _normalize_text(question)
     if _contains_any_word(normalized, ("recuse", "recusar", "recusa")):
@@ -692,6 +729,7 @@ def _schedule_action_requested(question):
     return None
 
 
+# Verifica se o usuário já informou uma justificativa para a ação de agenda.
 def _question_includes_schedule_reason(question):
     normalized = _normalize_text(question)
     return _contains_any_word(
@@ -700,6 +738,7 @@ def _question_includes_schedule_reason(question):
     )
 
 
+# Produz a pergunta pelo motivo quando uma ação de agenda exige essa informação.
 def _missing_schedule_reason_message(question, authorized_context):
     """Requires an explicit reason before a rejection or cancellation proposal."""
     action = _schedule_action_requested(question)
@@ -718,6 +757,7 @@ def _missing_schedule_reason_message(question, authorized_context):
     )
 
 
+# Distingue pedidos referentes à agenda do próprio advogado autenticado.
 def _is_own_agenda_request(question):
     normalized = _normalize_text(question)
     return (
@@ -726,6 +766,7 @@ def _is_own_agenda_request(question):
     )
 
 
+# Verifica se a pergunta está relacionada a processos ou causas.
 def _question_mentions_cases(question):
     normalized = _normalize_text(question)
     keywords = (
@@ -741,6 +782,7 @@ def _question_mentions_cases(question):
     return _contains_any_word(normalized, keywords)
 
 
+# Detecta solicitações para registrar atualização em um processo.
 def _question_requests_process_update(question):
     normalized = _normalize_text(question)
     return _contains_any_word(
@@ -749,6 +791,7 @@ def _question_requests_process_update(question):
     ) and _question_mentions_cases(question)
 
 
+# Detecta solicitações para cadastrar um novo processo.
 def _question_requests_process_creation(question):
     normalized = _normalize_text(question)
     return _question_mentions_cases(question) and _contains_any_word(
@@ -756,6 +799,7 @@ def _question_requests_process_creation(question):
     ) and not _contains_any_word(normalized, ("atualizacao", "atualizações", "atualizar", "atualize"))
 
 
+# Detecta solicitações de relatório ou PDF de processo.
 def _question_requests_process_report(question):
     normalized = _normalize_text(question)
     return (
@@ -767,6 +811,7 @@ def _question_requests_process_report(question):
     )
 
 
+# Detecta pedidos para gerar o PDF do histórico de auditoria.
 def _question_requests_log_pdf(question):
     normalized = _normalize_text(question)
     return (
@@ -775,6 +820,7 @@ def _question_requests_log_pdf(question):
     )
 
 
+# Detecta pedidos para excluir um registro do log de auditoria.
 def _question_requests_log_deletion(question):
     normalized = _normalize_text(question)
     return "log" in normalized and _contains_any_word(
@@ -782,6 +828,7 @@ def _question_requests_log_deletion(question):
     )
 
 
+# Detecta pedidos para adicionar advogado a um escritório.
 def _question_requests_office_lawyer_addition(question):
     normalized = _normalize_text(question)
     return (
@@ -791,11 +838,13 @@ def _question_requests_office_lawyer_addition(question):
     )
 
 
+# Detecta pedidos de alteração das informações cadastrais do escritório.
 def _question_requests_office_edit(question):
     normalized = _normalize_text(question)
     return _contains_any_word(normalized, ("editar", "edite", "alterar", "altere", "atualizar", "atualize")) and "escritorio" in normalized
 
 
+# Detecta pedidos pelo resumo agregado do escritório.
 def _question_requests_office_overview(question):
     normalized = _normalize_text(question)
     return "escritorio" in normalized and _contains_any_word(
@@ -803,6 +852,7 @@ def _question_requests_office_overview(question):
     )
 
 
+# Detecta pedidos para baixar o relatório de agendamentos.
 def _question_requests_appointment_report(question):
     normalized = _normalize_text(question)
     return (
@@ -811,6 +861,7 @@ def _question_requests_appointment_report(question):
     )
 
 
+# Monta uma proposta segura de download do relatório de agendamentos.
 def _appointment_report_proposal(question, authorized_context):
     if not _question_requests_appointment_report(question):
         return None, None
@@ -847,7 +898,10 @@ def _appointment_report_proposal(question, authorized_context):
     }
 
 
+# Obtém o escritório que o advogado administra como proprietário ativo.
 def _fetch_owned_office(id_lawyer):
+    # As consultas abaixo retornam apenas recortes necessários ao contexto.
+    # Assim, o modelo não recebe tabelas inteiras nem dados de outros usuários.
     con = conexao()
     cur = con.cursor()
     try:
@@ -866,6 +920,7 @@ def _fetch_owned_office(id_lawyer):
         con.close()
 
 
+# Consulta indicadores consolidados do escritório, sem retornar dados individuais.
 def _fetch_office_general_summary(id_office):
     """Provides aggregate office data only to its owner."""
     con = conexao()
@@ -891,6 +946,7 @@ def _fetch_office_general_summary(id_office):
         con.close()
 
 
+# Prepara a proposta de geração ou exclusão permitida no log de auditoria.
 def _log_pdf_proposal(question, authorized_context):
     if not _question_requests_log_pdf(question):
         return None, None
@@ -928,6 +984,7 @@ def _log_pdf_proposal(question, authorized_context):
     }
 
 
+# Verifica se o usuário autorizou explicitamente salvar ou concluir uma ação.
 def _question_requests_save(question):
     return _contains_any_word(
         _normalize_text(question),
@@ -935,6 +992,7 @@ def _question_requests_save(question):
     )
 
 
+# Converte uma ação de agenda já resolvida em proposta para confirmação na interface.
 def _pending_schedule_action_proposal(question, contextual_question, authorized_context):
     """Creates a confirmation proposal when a user supplies a pending reason."""
     normalized_context = _normalize_text(contextual_question)
@@ -1012,6 +1070,7 @@ def _pending_schedule_action_proposal(question, contextual_question, authorized_
     }
 
 
+# Resolve mensagens que escolhem um agendamento pela sua posição na lista.
 def _ordinal_schedule_action_message(question, authorized_context):
     """Handles a confirm/cancel request that refers to agenda positions."""
     normalized = _normalize_text(question)
@@ -1040,6 +1099,7 @@ def _ordinal_schedule_action_message(question, authorized_context):
     )
 
 
+# Produz uma resposta local para consultas de resumo da agenda.
 def _agenda_summary_answer(question, authorized_context):
     """Formats the agenda from the authorized records instead of the model."""
     normalized = _normalize_text(question)
@@ -1074,6 +1134,7 @@ def _agenda_summary_answer(question, authorized_context):
     return "\n".join(lines)
 
 
+# Propõe a inclusão de um segundo advogado em um agendamento identificado.
 def _add_second_lawyer_to_appointment_proposal(
     question, contextual_question, authorized_context
 ):
@@ -1150,6 +1211,7 @@ def _add_second_lawyer_to_appointment_proposal(
     }
 
 
+# Propõe alteração de horário ou duração quando o agendamento é inequívoco.
 def _edit_appointment_time_proposal(question, authorized_context):
     """Prepares a time-only edit for the single appointment in context."""
     normalized = _normalize_text(question)
@@ -1204,6 +1266,7 @@ def _edit_appointment_time_proposal(question, authorized_context):
     }
 
 
+# Verifica se a pergunta menciona clientes, parceiros ou contatos.
 def _question_mentions_contacts(question):
     return _contains_any_word(
         _normalize_text(question),
@@ -1211,6 +1274,7 @@ def _question_mentions_contacts(question):
     )
 
 
+# Detecta pedidos para listar contatos vinculados ao advogado.
 def _question_requests_contact_list(question):
     """A client named in an appointment request is not a list request."""
     return (
@@ -1220,6 +1284,7 @@ def _question_requests_contact_list(question):
     )
 
 
+# Detecta pedidos de cliente para conhecer advogados do escritório.
 def _question_requests_client_lawyers(question):
     normalized = _normalize_text(question)
     return _contains_any_word(normalized, ("advogado", "advogada", "advogados", "advogadas")) and _contains_any_word(
@@ -1227,6 +1292,7 @@ def _question_requests_client_lawyers(question):
     )
 
 
+# Detecta pedidos de indicação de advogado conforme necessidade jurídica.
 def _question_requests_lawyer_triage(question):
     normalized = _normalize_text(question)
     needs_lawyer = _contains_any_word(
@@ -1240,6 +1306,7 @@ def _question_requests_lawyer_triage(question):
     return needs_lawyer and legal_topic
 
 
+# Detecta pedidos de cadastro ou edição de cliente por advogado.
 def _question_requests_client_mutation(question):
     normalized = _normalize_text(question)
     return _contains_any_word(normalized, ("cliente", "clientes")) and _contains_any_word(
@@ -1247,6 +1314,7 @@ def _question_requests_client_mutation(question):
     )
 
 
+# Detecta pedidos de cliente para alterar seu próprio cadastro.
 def _question_requests_own_profile_edit(question):
     normalized = _normalize_text(question)
     return _contains_any_word(normalized, ("meus dados", "meu cadastro", "meu perfil", "meu nome", "meu email", "meu e-mail", "meu telefone", "meu endereco", "meu endereço")) and _contains_any_word(
@@ -1254,6 +1322,7 @@ def _question_requests_own_profile_edit(question):
     )
 
 
+# Verifica se a pergunta se relaciona a parcelas, cobranças ou pagamentos.
 def _question_mentions_payments(question):
     normalized = _normalize_text(question)
     payment_words = (
@@ -1268,6 +1337,7 @@ def _question_mentions_payments(question):
     return _contains_any_word(normalized, payment_words)
 
 
+# Detecta pedidos pela lista de clientes inadimplentes.
 def _question_requests_debtors(question):
     """Returns true for requests to list clients with open debts."""
     normalized = _normalize_text(question)
@@ -1284,6 +1354,7 @@ def _question_requests_debtors(question):
     )
 
 
+# Gera a resposta local de inadimplência a partir do resumo financeiro autorizado.
 def _debtors_answer(question, authorized_context):
     """Lists the lawyer's clients that have overdue or open installments."""
     if (
@@ -1323,6 +1394,7 @@ def _debtors_answer(question, authorized_context):
     return "\n".join(lines)
 
 
+# Consulta os agendamentos do advogado no período indicado pela pergunta.
 def _fetch_lawyer_appointments(id_lawyer, question):
     start, end, period = _resolve_period(question)
 
@@ -1386,6 +1458,7 @@ def _fetch_lawyer_appointments(id_lawyer, question):
         con.close()
 
 
+# Extrai datas explícitas digitadas nos formatos aceitos pelo assistente.
 def _extract_dates_from_question(question):
     dates = []
     normalized = _normalize_text(question)
@@ -1424,6 +1497,7 @@ def _extract_dates_from_question(question):
     return list(dict.fromkeys(dates))
 
 
+# Converte a data da ferramenta para a data final usada na proposta de agenda.
 def _date_for_schedule_proposal(value, question):
     """Converts relative dates to ISO before an appointment proposal is sent."""
     relative_date = _relative_date_from_question(question)
@@ -1434,6 +1508,7 @@ def _date_for_schedule_proposal(value, question):
     return parsed_date.isoformat() if parsed_date else str(value).strip()
 
 
+# Localiza agendamentos do advogado por cliente e/ou data citados na conversa.
 def _find_appointments_by_client_and_date(question, id_lawyer):
     dates = _extract_dates_from_question(question)
 
@@ -1553,6 +1628,7 @@ def _find_appointments_by_client_and_date(question, id_lawyer):
         con.close()
 
 
+# Busca apenas os clientes ativos que pertencem ao advogado informado.
 def _fetch_lawyer_clients(id_lawyer):
     con = conexao()
     cur = con.cursor()
@@ -1581,6 +1657,7 @@ def _fetch_lawyer_clients(id_lawyer):
         con.close()
 
 
+# Identifica advogados que possuem processo aberto para o cliente mencionado.
 def _find_lawyers_with_client_process(question, id_lawyer):
     """Finds lawyers linked to a named client through a process."""
     normalized_question = _normalize_text(question)
@@ -1617,6 +1694,7 @@ def _find_lawyers_with_client_process(question, id_lawyer):
         con.close()
 
 
+# Lista os escritórios ativos aos quais o advogado tem vínculo.
 def _fetch_lawyer_offices(id_lawyer):
     """Returns only active offices and the lawyer's position in each one."""
     con = conexao()
@@ -1644,6 +1722,7 @@ def _fetch_lawyer_offices(id_lawyer):
         con.close()
 
 
+# Lista advogados ativos que podem participar de agendamentos.
 def _fetch_active_lawyers():
     con = conexao()
     cur = con.cursor()
@@ -1663,6 +1742,7 @@ def _fetch_active_lawyers():
         con.close()
 
 
+# Reúne o cliente, seus advogados disponíveis e vínculos processuais para agenda.
 def _fetch_client_scheduling_context(id_client):
     """Returns the logged client's profile and only lawyers from its office."""
     con = conexao()
@@ -1750,6 +1830,7 @@ def _fetch_client_scheduling_context(id_client):
         con.close()
 
 
+# Busca o perfil do próprio cliente para permitir somente a autoedição.
 def _fetch_client_profile(id_client):
     """Gets the authenticated client's current data to support partial edits."""
     con = conexao()
@@ -1785,6 +1866,7 @@ def _fetch_client_profile(id_client):
         con.close()
 
 
+# Lista parceiros ativos vinculados aos escritórios do advogado.
 def _fetch_lawyer_partners(id_lawyer):
     con = conexao()
     cur = con.cursor()
@@ -1816,6 +1898,7 @@ def _fetch_lawyer_partners(id_lawyer):
         con.close()
 
 
+# Lista advogados do escritório, incluindo o estado de seu vínculo.
 def _fetch_office_lawyers(office_id):
     con = conexao()
     cur = con.cursor()
@@ -1836,6 +1919,7 @@ def _fetch_office_lawyers(office_id):
         con.close()
 
 
+# Resolve nomes, documentos ou e-mails citados em participantes de agenda.
 def _find_schedule_parties(question, id_lawyer):
     emails = set(re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", question))
     documents = {
@@ -1911,6 +1995,7 @@ def _find_schedule_parties(question, id_lawyer):
         con.close()
 
 
+# Agrupa linhas de pagamento em totais, pendências e próximos vencimentos.
 def _summarize_payment_rows(rows):
     """Normalizes payment rows without exposing internal payment identifiers."""
     today = datetime.date.today()
@@ -1972,6 +2057,7 @@ def _summarize_payment_rows(rows):
     )
 
 
+# Calcula o panorama financeiro dos clientes vinculados ao advogado.
 def _fetch_lawyer_payment_summary(id_lawyer):
     """Summarizes only the logged lawyer's client payments for Veritas."""
     con = conexao()
@@ -2017,6 +2103,7 @@ def _fetch_lawyer_payment_summary(id_lawyer):
         con.close()
 
 
+# Calcula o panorama financeiro visível ao próprio cliente.
 def _fetch_client_payment_summary(id_client):
     """Returns only the logged client's own financial summary."""
     con = conexao()
@@ -2074,6 +2161,7 @@ def _fetch_client_payment_summary(id_client):
         con.close()
 
 
+# Lista parcelas próprias elegíveis para a geração de pagamento via Pix.
 def _fetch_client_payable_installments(id_client):
     """Lists only the authenticated client's unpaid installments for Pix."""
     con = conexao()
@@ -2110,6 +2198,7 @@ def _fetch_client_payable_installments(id_client):
         con.close()
 
 
+# Busca o resumo dos processos que pertencem ao advogado autenticado.
 def _fetch_lawyer_case_summary(id_lawyer):
     con = conexao()
     cur = con.cursor()
@@ -2177,6 +2266,7 @@ def _fetch_lawyer_case_summary(id_lawyer):
         con.close()
 
 
+# Localiza processos do advogado que correspondem aos dados informados na pergunta.
 def _find_processes_for_update(id_lawyer, question):
     """Returns only the logged lawyer's processes referenced in the request."""
     normalized_question = _normalize_text(question)
@@ -2228,6 +2318,7 @@ def _find_processes_for_update(id_lawyer, question):
         con.close()
 
 
+# Busca a configuração atual de honorários de êxito de um processo autorizado.
 def _fetch_process_success_fee(id_lawyer, process_id):
     con = conexao()
     cur = con.cursor()
@@ -2261,6 +2352,7 @@ def _fetch_process_success_fee(id_lawyer, process_id):
         con.close()
 
 
+# Constrói os dados autorizados para a intenção atual conforme o perfil autenticado.
 def _build_authorized_context(question, token_data, contextual_question=None):
     """Builds data for the current intent, using history only to complete it.
 
@@ -2284,6 +2376,9 @@ def _build_authorized_context(question, token_data, contextual_question=None):
         "restricoes": [],
     }
 
+    # O contexto é montado por intenção e perfil. Cada bloco acrescenta apenas
+    # informações que aquele pedido pode usar e registra uma restrição quando
+    # a identidade autenticada não tem permissão para vê-las.
     log_requested = (
         _question_requests_log_pdf(question)
         or _question_requests_log_pdf(contextual_question)
@@ -2381,6 +2476,8 @@ def _build_authorized_context(question, token_data, contextual_question=None):
         or _is_duration_reply(question)
     )
 
+    # Agenda exige dados extras somente para criar/alterar compromissos; uma
+    # simples consulta não deve expor a lista completa de clientes e advogados.
     if schedule_in_progress:
         if user_type == 0:
             context["dados"]["agendamentos"] = _fetch_lawyer_appointments(
@@ -2508,6 +2605,7 @@ def _build_authorized_context(question, token_data, contextual_question=None):
     return context
 
 
+# Oferece respostas determinísticas quando não há retorno adequado do modelo.
 def _fallback_answer(question, authorized_context):
     user_type = authorized_context.get("usuario_logado", {}).get("tipo")
     appointments = authorized_context.get("dados", {}).get("agendamentos")
@@ -2632,7 +2730,10 @@ def _fallback_answer(question, authorized_context):
     )
 
 
+# Filtra e limita o histórico que poderá ser encaminhado ao modelo.
 def _sanitize_history(history):
+    # Limita tamanho e papéis aceitos antes de enviar o histórico ao provedor,
+    # evitando contexto excessivo e mensagens com formato inesperado.
     if not isinstance(history, list):
         return []
 
@@ -2652,6 +2753,7 @@ def _sanitize_history(history):
     return sanitized
 
 
+# Combina a pergunta ao histórico somente quando ela continua o mesmo fluxo.
 def _question_with_history(question, history):
     # Keep only the active workflow. Reusing every prior user message can make a
     # previous restricted request interfere with a new, valid request.
@@ -2703,7 +2805,10 @@ def _question_with_history(question, history):
     return question
 
 
+# Remove IDs internos eventualmente mencionados no texto produzido pelo modelo.
 def _hide_internal_ids(answer):
+    # IDs são necessários entre o modelo e as ferramentas, mas nunca fazem
+    # parte da conversa. Remove uma eventual exposição na resposta textual.
     if re.search(
         r"\b(?:id_cliente|id\s+(?:do|da)\s+cliente|id\s+cadastrado)\b",
         answer,
@@ -2722,6 +2827,7 @@ def _hide_internal_ids(answer):
     ).replace("  ", " ").strip()
 
 
+# Remove links não oficiais e referências internas que a resposta não deve exibir.
 def _remover_fontes_nao_oficiais(answer):
     """Impede que o chat apresente links jurídicos fora dos portais aprovados."""
     # O contexto autorizado é uma estrutura interna enviada ao modelo; nunca é
@@ -2751,6 +2857,7 @@ def _remover_fontes_nao_oficiais(answer):
         flags=re.IGNORECASE,
     )
 
+    # Decide se cada link pode permanecer na resposta jurídica.
     def substituir_link(match):
         url = match.group(0)
         host = (urlparse(url).hostname or "").lower()
@@ -2761,6 +2868,7 @@ def _remover_fontes_nao_oficiais(answer):
     return re.sub(r"https?://[^\s)\]>]+", substituir_link, answer)
 
 
+# Lê a lista configurável de modelos OpenRouter, com valores padrão como reserva.
 def _get_openrouter_models():
     configured_models = os.getenv("VERITAS_OPENROUTER_MODELS", "").strip()
 
@@ -2774,6 +2882,7 @@ def _get_openrouter_models():
     return DEFAULT_OPENROUTER_MODELS
 
 
+# Lê a lista configurável de modelos NVIDIA, mantendo compatibilidade legada.
 def _get_nvidia_models():
     """Reads NVIDIA models in priority order, with legacy compatibility."""
     configured_models = (
@@ -2791,6 +2900,7 @@ def _get_nvidia_models():
     return DEFAULT_NVIDIA_MODELS
 
 
+# Obtém e limita o tempo de espera de cada chamada ao modelo.
 def _get_model_timeout_seconds():
     try:
         configured_timeout = float(
@@ -2803,6 +2913,7 @@ def _get_model_timeout_seconds():
         return DEFAULT_MODEL_TIMEOUT_SECONDS
 
 
+# Define o provedor preferencial, preservando o outro como alternativa.
 def _get_provider_priority():
     """Returns the preferred provider; the other provider remains a fallback."""
     configured_provider = os.getenv(
@@ -2812,7 +2923,11 @@ def _get_provider_priority():
     return "NVIDIA" if configured_provider == "NVIDIA" else "OPENROUTER"
 
 
+# Valida uma chamada de ferramenta e a transforma em proposta de ação confirmável.
 def _proposal_from_tool_call(tool_call, authorized_context, question):
+    # O retorno da IA é tratado como uma sugestão não confiável. Cada ramo
+    # confere novamente se o registro pertence ao contexto autorizado antes de
+    # construir a ação que o frontend poderá pedir para o usuário confirmar.
     try:
         arguments = json.loads(tool_call.function.arguments)
     except (AttributeError, TypeError, json.JSONDecodeError):
@@ -3250,7 +3365,10 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
     return None
 
 
+# Consulta o provedor de IA escolhido e aplica a alternância segura entre provedores.
 def _call_openrouter(question, authorized_context, history, force_provider=None):
+    # Apesar do nome histórico, esta função atende OpenRouter e NVIDIA. Ela
+    # escolhe o provedor disponível e tenta o outro apenas em caso de falha.
     nvidia_api_key = os.getenv("NVIDIA_API_KEY", "").strip()
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 
@@ -3288,6 +3406,8 @@ def _call_openrouter(question, authorized_context, history, force_provider=None)
         )
         models = _get_nvidia_models()
 
+    # As instruções estabelecem limites de escopo, privacidade e fontes antes
+    # de qualquer dado autorizado ou mensagem do usuário ser encaminhado.
     fontes_juridicas = "\n".join(
         f"- {nome}: {url}" for nome, url in FONTES_JURIDICAS_OFICIAIS
     )
@@ -3410,8 +3530,11 @@ CONTEXTO AUTORIZADO:
     return None, None
 
 
+# Recebe uma pergunta autenticada e devolve resposta ou proposta da Veritas.
 @app.route("/ai/veritas", methods=["POST"])
 def perguntar_veritas():
+    # Pipeline da rota: autentica, prepara o contexto mínimo, resolve fluxos
+    # determinísticos e só então consulta o modelo para linguagem natural.
     request_started = time.perf_counter()
     token_data = _decode_request_token()
 
@@ -3438,6 +3561,8 @@ def perguntar_veritas():
         )
         context_seconds = time.perf_counter() - context_started
         model_started = time.perf_counter()
+        # Respostas e propostas locais têm precedência: reduzem latência e
+        # preservam regras que não podem depender da interpretação do modelo.
         answer = _debtors_answer(question, authorized_context)
         if answer is None:
             answer = _agenda_summary_answer(question, authorized_context)
@@ -3473,6 +3598,8 @@ def perguntar_veritas():
                 answer, proposal = _call_openrouter(question, authorized_context, history)
         model_seconds = time.perf_counter() - model_started
 
+        # Sem resposta do modelo (por exemplo, chave ausente ou indisponibilidade),
+        # mantém uma resposta útil e segura baseada no contexto já autorizado.
         if not answer:
             answer = _fallback_answer(question, authorized_context)
 
