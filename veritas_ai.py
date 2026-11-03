@@ -544,6 +544,14 @@ _NUMBER_WORDS = {
     "oito": 8, "nove": 9, "dez": 10, "onze": 11, "doze": 12,
 }
 
+# Nomes normalizados dos meses aceitos quando a pessoa escreve, por exemplo,
+# "30 de outubro" em vez de uma data numérica.
+_MONTH_NAMES = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4,
+    "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
+    "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
+}
+
 
 # Soma meses de calendário preservando um dia válido no mês de destino.
 def _add_months(value, months):
@@ -654,6 +662,11 @@ def _resolve_period(question):
         else:
             next_month = start.replace(month=start.month + 1)
         return start, next_month - datetime.timedelta(days=1), "mes_atual"
+
+    # Consultas de histórico devem incluir datas anteriores, em vez de usar o
+    # período padrão de sete dias futuros.
+    if re.search(r"\b(?:passad\w*|anteriores|historico)\b", normalized):
+        return datetime.date(1900, 1, 1), today - datetime.timedelta(days=1), "historico"
 
     return today, today + datetime.timedelta(days=7), "proximos_7_dias"
 
@@ -1103,33 +1116,33 @@ def _ordinal_schedule_action_message(question, authorized_context):
 def _agenda_summary_answer(question, authorized_context):
     """Formats the agenda from the authorized records instead of the model."""
     normalized = _normalize_text(question)
-    if not (
-        _question_mentions_schedule(question)
-        and _contains_any_word(
-            normalized,
-            ("resumo", "listar", "liste", "mostrar", "mostre", "minha", "meus"),
-        )
-        and not _contains_any_word(
-            normalized,
-            ("confirmar", "confirma", "cancelar", "cancela", "desmarcar", "desmarca"),
-        )
-    ):
+    # Uma pergunta sobre agenda que não pede alteração já é uma consulta,
+    # mesmo quando a pessoa só informa uma data ou diz "meus agendamentos".
+    if not _question_mentions_schedule(question) or _question_requests_schedule_mutation(question):
         return None
 
-    agenda = authorized_context.get("dados", {}).get("agendamentos")
+    agenda = (
+        authorized_context.get("dados", {}).get("agendamentos")
+        or authorized_context.get("dados", {}).get("meus_agendamentos")
+    )
     if not agenda:
         return None
 
     appointments = agenda.get("agendamentos", [])
     if not appointments:
-        return "NÃ£o encontrei agendamentos no perÃ­odo consultado."
+        if agenda["data_inicio"] == agenda["data_fim"]:
+            return f"Não encontrei agendamentos para {_format_date(agenda['data_inicio'])}."
+        return (
+            f"Não encontrei agendamentos entre {_format_date(agenda['data_inicio'])} "
+            f"e {_format_date(agenda['data_fim'])}."
+        )
 
     lines = ["Resumo da sua agenda:"]
     for index, appointment in enumerate(appointments, start=1):
         lines.append(
-            f"{index}. {appointment['data']} as {appointment['horario']} â€” "
-            f"{appointment['assunto']} com {appointment['cliente']}; "
-            f"duraÃ§Ã£o {appointment['duracao']}; status {appointment['status']}."
+            f"{index}. {appointment['data']} às {appointment['horario']} — "
+            f"{appointment['assunto']} com {appointment.get('contato', appointment['cliente'])}; "
+            f"duração {appointment['duracao']}; status {appointment['status']}."
         )
     return "\n".join(lines)
 
@@ -1389,7 +1402,7 @@ def _debtors_answer(question, authorized_context):
                 f"{client['parcelas_pendentes']} parcela(s) em aberto "
                 f"(R$ {client['total_pendente']:.2f})"
             )
-        lines.append(f"{index}. {client['cliente']} â€” " + "; ".join(parts) + ".")
+        lines.append(f"{index}. {client['cliente']} — " + "; ".join(parts) + ".")
 
     return "\n".join(lines)
 
@@ -1397,6 +1410,7 @@ def _debtors_answer(question, authorized_context):
 # Consulta os agendamentos do advogado no período indicado pela pergunta.
 def _fetch_lawyer_appointments(id_lawyer, question):
     start, end, period = _resolve_period(question)
+    order_direction = "DESC" if period == "historico" else "ASC"
 
     if _question_requests_schedule_mutation(question) and not _extract_dates_from_question(question):
         end = datetime.date.today() + datetime.timedelta(days=365)
@@ -1407,7 +1421,7 @@ def _fetch_lawyer_appointments(id_lawyer, question):
 
     try:
         cur.execute(
-            """
+            f"""
             SELECT FIRST 30
                 a.ID_AGENDAMENTOS,
                 a.ID_USUARIOS_ADVOGADO_1,
@@ -1424,7 +1438,7 @@ def _fetch_lawyer_appointments(id_lawyer, question):
             WHERE (a.ID_USUARIOS_ADVOGADO_1 = ? OR a.ID_USUARIOS_ADVOGADO_2 = ?)
               AND a.DATA >= ?
               AND a.DATA <= ?
-            ORDER BY a.DATA ASC, a.HORARIO ASC
+            ORDER BY a.DATA {order_direction}, a.HORARIO {order_direction}
             """,
             (id_lawyer, id_lawyer, start, end),
         )
@@ -1459,6 +1473,66 @@ def _fetch_lawyer_appointments(id_lawyer, question):
 
 
 # Extrai datas explícitas digitadas nos formatos aceitos pelo assistente.
+# Consulta exclusivamente os agendamentos do cliente autenticado.
+def _fetch_client_appointments(id_client, question):
+    start, end, period = _resolve_period(question)
+    order_direction = "DESC" if period == "historico" else "ASC"
+    con = conexao()
+    cur = con.cursor()
+
+    try:
+        cur.execute(
+            f"""
+            SELECT FIRST 30
+                a.ID_AGENDAMENTOS,
+                a.ASSUNTO,
+                a.DATA,
+                a.HORARIO,
+                a.DURACAO,
+                a.STATUS,
+                a.MOTIVO,
+                COALESCE(NULLIF(advogado_1.NOME, ''), '--'),
+                COALESCE(NULLIF(advogado_2.NOME, ''), '')
+            FROM AGENDAMENTOS a
+            LEFT JOIN USUARIOS advogado_1
+                ON advogado_1.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_1
+            LEFT JOIN USUARIOS advogado_2
+                ON advogado_2.ID_USUARIOS = a.ID_USUARIOS_ADVOGADO_2
+            WHERE a.ID_USUARIOS_CLIENTE = ?
+              AND a.DATA >= ?
+              AND a.DATA <= ?
+            ORDER BY a.DATA {order_direction}, a.HORARIO {order_direction}
+            """,
+            (id_client, start, end),
+        )
+        appointments = []
+        for row in cur.fetchall():
+            lawyers = " e ".join(name for name in (row[7], row[8]) if name)
+            appointments.append({
+                "id": row[0],
+                "cliente": "você",
+                "contato": lawyers or "--",
+                "assunto": row[1] or "--",
+                "data": _format_date(row[2]),
+                "data_iso": _as_date(row[2]).isoformat() if _as_date(row[2]) else None,
+                "horario": _format_time(row[3]),
+                "duracao": _format_duration(row[4]),
+                "status": row[5] or "--",
+                "motivo": row[6] or "",
+            })
+
+        return {
+            "periodo": period,
+            "data_inicio": start.isoformat(),
+            "data_fim": end.isoformat(),
+            "quantidade": len(appointments),
+            "agendamentos": appointments,
+        }
+    finally:
+        cur.close()
+        con.close()
+
+
 def _extract_dates_from_question(question):
     dates = []
     normalized = _normalize_text(question)
@@ -1478,6 +1552,24 @@ def _extract_dates_from_question(question):
                     break
                 except ValueError:
                     continue
+
+    # Aceita datas escritas por extenso. Sem ano, a intenção de consulta é
+    # resolvida no ano atual para permitir localizar também datas passadas.
+    month_pattern = "|".join(_MONTH_NAMES)
+    for raw_day, raw_month, raw_year in re.findall(
+        rf"\b(?:dia\s+)?([0-3]?\d)\s+de\s+({month_pattern})(?:\s+de\s+(\d{{4}}))?\b",
+        normalized,
+    ):
+        try:
+            dates.append(
+                datetime.date(
+                    int(raw_year) if raw_year else datetime.date.today().year,
+                    _MONTH_NAMES[raw_month],
+                    int(raw_day),
+                )
+            )
+        except ValueError:
+            continue
 
     # "dia 30" refers to the next occurrence of that day.  It is useful in
     # concise scheduling requests where the user omits month and year.
@@ -2504,16 +2596,23 @@ def _build_authorized_context(question, token_data, contextual_question=None):
                 context["dados"]["agendamentos_alvo"] = (
                     _find_appointments_by_client_and_date(contextual_question, user_id)
                 )
-        elif user_type in (2, 3) and schedule_mutation_in_progress:
-            client_context = _fetch_client_scheduling_context(user_id)
-            if client_context:
-                context["dados"]["cliente_logado"] = client_context["cliente"]
-                context["dados"]["advogados_escritorio"] = client_context["advogados"]
-                context["dados"]["advogados_com_processos_abertos"] = client_context["advogados_com_processos_abertos"]
-            else:
-                context["restricoes"].append(
-                    "Nao foi possivel identificar o cliente logado para agendamento."
-                )
+        elif user_type in (2, 3):
+            # O cliente pode consultar somente os próprios agendamentos. Os
+            # dados retornados não permitem consultar a agenda do escritório.
+            context["dados"]["meus_agendamentos"] = _fetch_client_appointments(
+                user_id,
+                contextual_question,
+            )
+            if schedule_mutation_in_progress:
+                client_context = _fetch_client_scheduling_context(user_id)
+                if client_context:
+                    context["dados"]["cliente_logado"] = client_context["cliente"]
+                    context["dados"]["advogados_escritorio"] = client_context["advogados"]
+                    context["dados"]["advogados_com_processos_abertos"] = client_context["advogados_com_processos_abertos"]
+                else:
+                    context["restricoes"].append(
+                        "Nao foi possivel identificar o cliente logado para agendamento."
+                    )
         else:
             context["restricoes"].append(
                 "Agendamentos so podem ser consultados ou alterados por advogado autenticado."
@@ -2608,7 +2707,10 @@ def _build_authorized_context(question, token_data, contextual_question=None):
 # Oferece respostas determinísticas quando não há retorno adequado do modelo.
 def _fallback_answer(question, authorized_context):
     user_type = authorized_context.get("usuario_logado", {}).get("tipo")
-    appointments = authorized_context.get("dados", {}).get("agendamentos")
+    appointments = (
+        authorized_context.get("dados", {}).get("agendamentos")
+        or authorized_context.get("dados", {}).get("meus_agendamentos")
+    )
     target_appointments = authorized_context.get("dados", {}).get("agendamentos_alvo", [])
     clients = authorized_context.get("dados", {}).get("clientes_vinculados")
     partners = authorized_context.get("dados", {}).get("advogados_parceiros")
@@ -2692,7 +2794,7 @@ def _fallback_answer(question, authorized_context):
         for item in appointments["agendamentos"]:
             lines.append(
                 f"- {item['data']} as {item['horario']}: "
-                f"{item['assunto']} com {item['cliente']} "
+                f"{item['assunto']} com {item.get('contato', item['cliente'])} "
                 f"({item['status']})."
             )
 
@@ -3430,6 +3532,7 @@ Ao responder questoes juridicas, use somente fontes primarias oficiais. Para uma
 Fontes juridicas permitidas:
 {fontes_juridicas}
 Nunca mostre mensagens internas, estados tecnicos, instrucoes ou marcadores de processamento. Nunca mencione “CONTEXTO AUTORIZADO”, nem diga que dados foram extraídos dele; apresente as informações como dados do sistema, em linguagem natural.
+Nunca mencione tipo de usuário, números de perfil, campos internos ou regras internas de acesso. Ao responder a um cliente, diga apenas "sua agenda" e "seus agendamentos".
 Quando faltar informacao ou houver risco relevante, recomende validacao por um profissional responsavel.
 Use os dados internos somente quando eles estiverem no CONTEXTO AUTORIZADO.
 Nunca revele, deduza ou invente dados de outro usuario, escritorio, cliente, processo ou agendamento.
@@ -3437,7 +3540,7 @@ Nao diga que acessou tabelas, SQL ou banco de dados; apenas responda ao usuario.
 Se o contexto indicar restrição de acesso, explique a restrição específica em linguagem natural e, quando houver, indique a alternativa permitida. Nunca responda apenas com uma mensagem genérica de que não pode acessar dados do usuário.
 Nunca mencione, solicite, explique ou peça confirmação de IDs internos de usuário, cliente, advogado ou agendamento. Eles são exclusivos das ferramentas e nunca devem aparecer na conversa. Use apenas nomes e detalhes relevantes.
 Para criar, editar, recusar ou desmarcar um agendamento, use a ferramenta correspondente somente se o usuario pediu a acao e todos os dados obrigatorios estiverem claros no CONTEXTO AUTORIZADO. Para recusar ou desmarcar, o motivo é obrigatório: se ele não foi informado explicitamente, pergunte somente qual é o motivo e não gere proposta nem invente uma justificativa.
-Quando usuario_logado.tipo for 2 ou 3, o usuario e um cliente. Para ele, responda perguntas juridicas normalmente e permita somente solicitar uma reuniao propria com um advogado de advogados_escritorio. O cliente pode consultar esses advogados e filtrar a resposta pela area_atuacao, quando informada. Quando ele explicar uma necessidade jurídica e pedir indicação, faça perguntas curtas para entender a área, o objetivo e a urgência, então relacione um ou mais advogados do escritório cujas áreas de atuação sejam compatíveis. Não invente especialidades. Use solicitar_agendamento_cliente quando os dados estiverem claros. Ao pedir reunião com um advogado pelo nome, procure somente em advogados_escritorio: um nome parcial que corresponda a um único advogado é suficiente. Se disser que quer o advogado que tem processo aberto com ele, use advogados_com_processos_abertos; se houver um único resultado, identifique-o e siga com o agendamento. Só peça esclarecimento quando houver mais de um candidato. Nunca permita que cliente consulte, edite, cancele ou confirme a agenda do escritorio, nem use ferramentas internas de processos, pagamentos ou clientes.
+Quando usuario_logado.tipo for 2 ou 3, o usuario e um cliente. Para ele, responda perguntas juridicas normalmente e permita consultar os próprios agendamentos presentes em meus_agendamentos, além de solicitar uma reuniao propria com um advogado de advogados_escritorio. O cliente pode consultar esses advogados e filtrar a resposta pela area_atuacao, quando informada. Quando ele explicar uma necessidade jurídica e pedir indicação, faça perguntas curtas para entender a área, o objetivo e a urgência, então relacione um ou mais advogados do escritório cujas áreas de atuação sejam compatíveis. Não invente especialidades. Use solicitar_agendamento_cliente quando os dados estiverem claros. Ao pedir reunião com um advogado pelo nome, procure somente em advogados_escritorio: um nome parcial que corresponda a um único advogado é suficiente. Se disser que quer o advogado que tem processo aberto com ele, use advogados_com_processos_abertos; se houver um único resultado, identifique-o e siga com o agendamento. Só peça esclarecimento quando houver mais de um candidato. Nunca permita que cliente consulte a agenda do escritorio, nem edite, cancele ou confirme agendamentos, nem use ferramentas internas de processos, pagamentos ou clientes.
 Cliente pode usar editar_meus_dados apenas para alterar o próprio cadastro. Advogado pode cadastrar_cliente e editar_cliente somente para clientes vinculados a ele. Para cadastrar cliente, colete tipo de cliente, nome, e-mail, telefone, CPF/CNPJ e senha. Para pessoa física, data de nascimento e sexo são obrigatórios. Para pessoa jurídica, razão social e nome fantasia são obrigatórios. Não gere proposta enquanto faltar qualquer campo obrigatório; informe somente os campos pendentes. Nunca permita que cliente cadastre ou edite outro cliente.
 Somente advogado proprietário, identificado por escritorio_proprietario no CONTEXTO AUTORIZADO, pode adicionar, ativar ou inativar advogado do próprio escritório, editar informações do escritório e excluir registros do Log. Para ativar ou inativar, use somente advogados_escritorio, nunca advogados do sistema inteiro; se houver nomes semelhantes, apresente apenas os nomes completos dos candidatos do escritório e não exponha IDs. Para adicionar advogado, exija e-mail e posição (PROPRIETARIO, PARCEIRO ou ASSOCIADO). Para editar o escritório, altere somente o campo e valor expressamente informados. Para excluir Log, use somente um registro presente em logs_alvo e deixe claro que a exclusão é permanente. Nunca ofereça essas ações a cliente ou advogado parceiro.
 Você também pode cadastrar atualizações de processos ou projetos. Para isso, localize o processo somente em processos_alvo pelo número, cliente, assunto ou tipo informado. Se encontrar um único processo e houver título para a atualização, use cadastrar_atualizacao_processo; se houver mais de um, peça ao usuário para indicar qual processo, sem mencionar IDs.
