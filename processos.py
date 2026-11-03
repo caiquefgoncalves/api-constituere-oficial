@@ -8,7 +8,8 @@ from db import conexao
 import datetime
 from io import BytesIO
 import os
-import requests
+import requests, re
+
 
 from financeiro import processar_notificacoes_vencimento
 
@@ -17,7 +18,10 @@ from flask import g, jsonify, request, send_file
 from io import BytesIO
 from fpdf import FPDF
 import unicodedata
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 @app.route('/cadastrar_processo', methods=['POST'])
 def cadastrar_processo():
@@ -5733,8 +5737,14 @@ def listar_pagamentos_cliente():
 
 
 ARKHE_URL = "https://arkhe-backend.zbbquj.easypanel.host/api/v1"
-ARKHE_CLIENT_ID = os.getenv("ARKHE_CLIENT_ID", "").strip()
-ARKHE_CLIENT_SECRET = os.getenv("ARKHE_CLIENT_SECRET", "").strip()
+
+ARKHE_CLIENT_ID = os.getenv("ARKHE_CLIENT_ID")
+ARKHE_CLIENT_SECRET = os.getenv("ARKHE_CLIENT_SECRET")
+
+if not ARKHE_CLIENT_ID or not ARKHE_CLIENT_SECRET:
+    print("[ARKHE] ERRO: Credenciais não encontradas no ambiente.")
+else:
+    print("[ARKHE] Credenciais carregadas com sucesso.")
 
 
 def headers_arkhe():
@@ -6009,11 +6019,19 @@ def criar_cobranca_pix():
     if token_data == False:
         return jsonify({'error': 'Token necessário'}), 401
 
+    print('olá')
+
     if token_data['tipo'] not in [2, 3]:
         return jsonify({'error': 'Acesso não autorizado'}), 403
 
+    print(ARKHE_CLIENT_ID)
+    print(ARKHE_CLIENT_SECRET)
+
     if not ARKHE_CLIENT_ID or not ARKHE_CLIENT_SECRET:
         return jsonify({'error': 'Pagamento Pix não configurado'}), 503
+
+
+
 
     id_cliente = token_data['id_usuarios']
     dados = request.get_json() or {}
@@ -6149,6 +6167,7 @@ def consultar_cobranca_pix(id_cobranca):
 
 
 
+
 @app.route('/cliente/pagamento/boleto', methods=['POST'])
 def criar_cobranca_boleto():
     token_data = decodificar_token()
@@ -6165,78 +6184,101 @@ def criar_cobranca_boleto():
     id_cliente = token_data['id_usuarios']
     dados = request.get_json() or {}
 
-    con = conexao()
-    cur = con.cursor()
+    con = None
+    cur = None
 
-    cur.execute("""
-            SELECT 
-                ID_USUARIOS, 
-                CPF, 
+    try:
+        con = conexao()
+        cur = con.cursor()
+
+        cur.execute("""
+            SELECT
+                ID_USUARIOS,
+                CPF,
                 CNPJ
-            FROM USUARIOS WHERE ID_USUARIOS = ?
+            FROM USUARIOS
+            WHERE ID_USUARIOS = ?
         """, (id_cliente,))
 
-    usuario = cur.fetchone()
-    cpf = usuario[1]
-    cnpj = usuario[2]
-    if cpf == None:
-        cpf_cnpj = cnpj
-    else:
-        cpf_cnpj = cpf
+        usuario = cur.fetchone()
 
+        if not usuario:
+            return jsonify({'error': 'Usuário não encontrado'}), 404
 
-    id_parcela = dados.get('id_parcela')
-    tipo_parcela = dados.get('tipo_parcela', 'prolabore')
+        cpf = usuario[1]
+        cnpj = usuario[2]
 
-    print(f"[BOLETO] Requisição recebida - id_cliente={id_cliente}, id_parcela={id_parcela}, tipo={tipo_parcela}")
+        cpf_cnpj = cpf if cpf else cnpj
 
-    if not id_parcela:
-        return jsonify({'error': 'Parcela é obrigatória'}), 400
+        if not cpf_cnpj:
+            return jsonify({'error': 'CPF ou CNPJ não encontrado'}), 400
 
-    try:
-        id_parcela = int(id_parcela)
-    except (TypeError, ValueError):
-        return jsonify({'error': 'ID de parcela inválido'}), 400
+        id_parcela = dados.get('id_parcela')
+        tipo_parcela = dados.get('tipo_parcela', 'prolabore')
 
-    if tipo_parcela not in ['prolabore', 'exito']:
-        return jsonify({'error': 'Tipo de parcela inválido'}), 400
+        print(f"[BOLETO] Requisição recebida - id_cliente={id_cliente}, id_parcela={id_parcela}, tipo={tipo_parcela}")
 
-    parcela = buscar_parcela(id_parcela, id_cliente, tipo_parcela)
+        if not id_parcela:
+            return jsonify({'error': 'Parcela é obrigatória'}), 400
 
-    print(f"[BOLETO] Parcela encontrada: {parcela}")
+        try:
+            id_parcela = int(id_parcela)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'ID de parcela inválido'}), 400
 
-    if not parcela:
-        return jsonify({'error': 'Parcela não encontrada'}), 404
+        if tipo_parcela not in ['prolabore', 'exito']:
+            return jsonify({'error': 'Tipo de parcela inválido'}), 400
 
-    if parcela['status'] == 'PAGA':
-        return jsonify({'error': 'Esta parcela já foi paga'}), 400
+        parcela = buscar_parcela(id_parcela, id_cliente, tipo_parcela)
 
-    valor = parcela['valor']
-    data_vencimento = parcela['data_vencimento']
+        print(f"[BOLETO] Parcela encontrada: {parcela}")
 
-    print(f"[BOLETO] Valor convertido: {valor} (original: {parcela['valor_raw']}, tipo: {parcela['tipo_raw']})")
+        if not parcela:
+            return jsonify({'error': 'Parcela não encontrada'}), 404
 
-    if valor is None:
-        return jsonify({'error': 'Valor da parcela inválido no banco'}), 400
+        if parcela['status'] == 'PAGA':
+            return jsonify({'error': 'Esta parcela já foi paga'}), 400
 
-    if valor <= 0:
-        return jsonify({'error': f'Valor da parcela é {valor}, precisa ser maior que zero'}), 400
+        valor = parcela['valor']
+        data_vencimento = parcela['data_vencimento']
 
-    try:
+        print(f"[BOLETO] Valor convertido: {valor} (original: {parcela['valor_raw']}, tipo: {parcela['tipo_raw']})")
+
+        if valor is None:
+            return jsonify({'error': 'Valor da parcela inválido no banco'}), 400
+
+        if valor <= 0:
+            return jsonify({'error': 'Valor da parcela precisa ser maior que zero'}), 400
+
+        if data_vencimento is None:
+            return jsonify({'error': 'Data de vencimento da parcela não encontrada'}), 400
+
+        if isinstance(data_vencimento, datetime.datetime):
+            data_vencimento = data_vencimento.date()
+
+        if isinstance(data_vencimento, datetime.date):
+            data_vencimento = data_vencimento.isoformat()
+        else:
+            data_vencimento = str(data_vencimento).strip()
+
         resposta = requests.post(
             f"{ARKHE_URL}/cobrancas/boletos",
             headers=headers_arkhe(),
-            json={"documento_pagador": cpf_cnpj,
-                  "valor": valor,
-                  "data_vencimento": data_vencimento
-                  },
+            json={
+                "documento_pagador": str(cpf_cnpj),
+                "valor": float(valor),
+                "data_vencimento": data_vencimento
+            },
             timeout=15
         )
 
         print(f"[BOLETO] Resposta Arkhé: status={resposta.status_code}, body={resposta.text[:500]}")
 
         if resposta.status_code >= 400:
-            return jsonify({'error': f'Erro ao criar boleto ({resposta.status_code})'}), 400
+            return jsonify({
+                'error': f'Erro ao criar boleto ({resposta.status_code})',
+                'detalhes': resposta.text[:500]
+            }), 400
 
         dados_arkhe = resposta.json()
 
@@ -6244,7 +6286,7 @@ def criar_cobranca_boleto():
             'id_cobranca': dados_arkhe.get('id_cobranca'),
             'id_pagador': dados_arkhe.get('id_pagador'),
             'id_recebedor': dados_arkhe.get('id_recebedor'),
-            'valor': valor,
+            'valor': float(valor),
             'data_vencimento': dados_arkhe.get('data_vencimento'),
             'codigo_pagamento': dados_arkhe.get('codigo_pagamento'),
             'url_pdf': dados_arkhe.get('url_pdf'),
@@ -6255,11 +6297,22 @@ def criar_cobranca_boleto():
     except requests.exceptions.Timeout:
         return jsonify({'error': 'Tempo esgotado ao conectar com a Arkhé'}), 504
 
+    except requests.exceptions.RequestException as e:
+        print(f"[BOLETO] Erro de conexão com a Arkhé: {e}")
+        return jsonify({'error': 'Não foi possível conectar ao serviço de boletos'}), 502
+
     except Exception as e:
         print(f"[BOLETO] Erro: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'error': 'Erro interno'}), 500
+
+    finally:
+        if cur:
+            cur.close()
+        if con:
+            con.close()
+
 
 
 @app.route('/pagamentos/relatorio', methods=['POST'])
@@ -6394,3 +6447,213 @@ def gerar_relatorio_pagamentos():
         as_attachment=True,
         download_name='relatorio-pagamentos.pdf'
     )
+
+@app.route('/cliente/pagamento/cartao', methods=['POST'])
+def pagar_com_cartao():
+    token_data = decodificar_token()
+
+    if token_data == False:
+        return jsonify({'error': 'Token necessário'}), 401
+
+    if token_data['tipo'] not in [2, 3]:
+        return jsonify({'error': 'Acesso não autorizado'}), 403
+
+    if not ARKHE_CLIENT_ID or not ARKHE_CLIENT_SECRET:
+        return jsonify({'error': 'Pagamento não configurado'}), 503
+
+    id_cliente = token_data['id_usuarios']
+    dados = request.get_json(silent=True) or {}
+
+    id_parcela = dados.get('id_parcela')
+    tipo_parcela = dados.get('tipo_parcela', 'prolabore')
+    tipo_cartao = str(dados.get('tipo', '')).upper()
+
+    numero_cartao = ''.join(
+        filter(str.isdigit, str(dados.get('numero_cartao') or ''))
+    )
+
+    validade = str(dados.get('validade') or '').strip()
+    cvv = str(dados.get('cvv') or '').strip()
+
+    try:
+        id_parcela = int(id_parcela)
+        parcelas_cartao = int(dados.get('parcelas', 1))
+    except (ValueError, TypeError):
+        return jsonify({
+            'error': 'Parcela ou quantidade de parcelas inválida'
+        }), 400
+
+    if id_parcela <= 0:
+        return jsonify({'error': 'Parcela inválida'}), 400
+
+    if tipo_parcela not in ['prolabore', 'exito']:
+        return jsonify({'error': 'Tipo de parcela inválido'}), 400
+
+    if tipo_cartao not in ['DEBITO', 'CREDITO']:
+        return jsonify({'error': 'Tipo de cartão inválido'}), 400
+
+    if len(numero_cartao) != 16:
+        return jsonify({
+            'error': 'O número do cartão deve conter 16 dígitos'
+        }), 400
+
+    if not re.fullmatch(r'(0[1-9]|1[0-2])/\d{4}', validade):
+        return jsonify({
+            'error': 'Validade inválida. Utilize MM/AAAA'
+        }), 400
+
+    mes, ano = map(int, validade.split('/'))
+    hoje = datetime.date.today()
+
+    if (ano, mes) < (hoje.year, hoje.month):
+        return jsonify({
+            'error': 'O cartão está vencido'
+        }), 400
+
+    if not re.fullmatch(r'\d{3}', cvv):
+        return jsonify({
+            'error': 'O CVV deve conter 3 dígitos'
+        }), 400
+
+    if tipo_cartao == 'DEBITO':
+        parcelas_cartao = 1
+    elif not 1 <= parcelas_cartao <= 15:
+        return jsonify({
+            'error': 'O crédito permite de 1 a 15 parcelas'
+        }), 400
+
+    parcela = buscar_parcela(
+        id_parcela,
+        id_cliente,
+        tipo_parcela
+    )
+
+    if not parcela:
+        return jsonify({
+            'error': 'Parcela não encontrada'
+        }), 404
+
+    if str(parcela['status'] or '').upper() == 'PAGA':
+        return jsonify({
+            'error': 'Esta parcela já foi paga'
+        }), 400
+
+    valor = parcela['valor']
+
+    if valor is None or valor <= 0:
+        return jsonify({
+            'error': 'Valor da parcela inválido'
+        }), 400
+
+    if valor < parcelas_cartao * 0.01:
+        return jsonify({
+            'error': 'O valor de cada parcela deve ser de pelo menos R$ 0,01'
+        }), 400
+
+    try:
+        resposta = requests.post(
+            f"{ARKHE_URL}/vendas/cartao",
+            headers=headers_arkhe(),
+            json={
+                'numero_cartao': numero_cartao,
+                'validade': validade,
+                'cvv': cvv,
+                'valor': float(valor),
+                'tipo': tipo_cartao,
+                'parcelas': parcelas_cartao
+            },
+            timeout=20
+        )
+
+        # Não registrar número completo nem CVV nos logs
+        print(f"[CARTAO] Status Arkhé: {resposta.status_code}")
+
+        if resposta.status_code >= 500:
+            return jsonify({
+                'error': 'A Arkhé não conseguiu concluir a solicitação. Verifique o recebimento antes de tentar novamente.',
+                'verificar_antes_de_repetir': True
+            }), 502
+
+        try:
+            dados_arkhe = resposta.json()
+        except ValueError:
+            return jsonify({
+                'error': 'Resposta inválida da Arkhé. Verifique antes de tentar novamente.',
+                'verificar_antes_de_repetir': True
+            }), 502
+
+        if not isinstance(dados_arkhe, dict):
+            return jsonify({
+                'error': 'Resposta inesperada da Arkhé.',
+                'verificar_antes_de_repetir': True
+            }), 502
+
+        mensagem = dados_arkhe.get('mensagem')
+
+        if resposta.status_code == 409:
+            return jsonify({
+                'error': mensagem or 'Uma venda semelhante foi enviada recentemente. Verifique antes de repetir.',
+                'verificar_antes_de_repetir': True
+            }), 409
+
+        if resposta.status_code >= 400:
+            return jsonify({
+                'error': mensagem or 'Não foi possível realizar o pagamento.'
+            }), 400
+
+        aprovado = dados_arkhe.get('aprovado') is True
+
+        if not aprovado:
+            return jsonify({
+                'aprovado': False,
+                'mensagem': mensagem or 'Pagamento não aprovado.'
+            }), 200
+
+        # Pagamento aprovado pela Arkhé
+        confirmado = confirmar_pagamento_pix(
+            id_parcela,
+            tipo_parcela
+        )
+
+        if not confirmado:
+            return jsonify({
+                'error': 'O pagamento foi aprovado na Arkhé, mas não foi registrado no Constituere. Não tente pagar novamente.',
+                'aprovado': True,
+                'verificar_antes_de_repetir': True,
+                'id_compra': dados_arkhe.get('id_compra')
+            }), 500
+
+        print("[CARTAO] Pagamento aprovado e registrado")
+
+        return jsonify({
+            'aprovado': True,
+            'mensagem': mensagem or 'Pagamento aprovado!',
+            'id_compra': dados_arkhe.get('id_compra'),
+            'id_movimentacao': dados_arkhe.get('id_movimentacao'),
+            'valor': dados_arkhe.get('valor'),
+            'valor_recebido': dados_arkhe.get('valor_recebido'),
+            'taxa': dados_arkhe.get('taxa'),
+            'tipo': tipo_cartao,
+            'parcelas': parcelas_cartao,
+            'final_cartao': dados_arkhe.get('final_cartao')
+        }), 200
+
+    except requests.exceptions.Timeout:
+        return jsonify({
+            'error': 'Tempo esgotado. Verifique se a cobrança foi realizada antes de tentar novamente.',
+            'verificar_antes_de_repetir': True
+        }), 504
+
+    except requests.exceptions.RequestException as e:
+        print(f"[CARTAO] Falha de conexão: {type(e).__name__}")
+        return jsonify({
+            'error': 'Falha de comunicação com a Arkhé. Verifique antes de tentar novamente.',
+            'verificar_antes_de_repetir': True
+        }), 502
+
+    except Exception as e:
+        print(f"[CARTAO] Erro interno: {type(e).__name__}")
+        return jsonify({
+            'error': 'Erro interno ao processar pagamento. Verifique antes de tentar novamente.',
+            'verificar_antes_de_repetir': True
+        }), 500
