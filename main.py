@@ -145,7 +145,12 @@ from google_calendar import *
 
 from financeiro import set_socketio_emitter
 set_socketio_emitter(socketio)
+
+from agendamentos import set_socketio_emitter as set_socketio_emitter_agendamentos
+set_socketio_emitter_agendamentos(socketio)
+
 print("[MAIN] socketio injetado no financeiro:", socketio is not None, flush=True)
+print("[MAIN] socketio injetado no agendamentos:", socketio is not None, flush=True)
 
 if 'teste_emit' not in app.view_functions:
     @app.route('/teste_emit/<int:id_usuario>')
@@ -177,11 +182,29 @@ def agendador_notificacoes():
         except Exception as e:
             print(f"[AGENDADOR] Erro: {e}", flush=True)
 
-        time.sleep(30)
+        time.sleep(5)
+
+def agendador_agendamentos_expirados():
+    print("\n>>> [AGENDADOR AGENDAMENTOS] THREAD INICIADA <<<\n", flush=True)
+
+    while True:
+        try:
+            with app.app_context():
+                from agendamentos import processar_agendamentos_expirados
+                recusados = processar_agendamentos_expirados()
+                if recusados:
+                    print(f"[AGENDADOR AGENDAMENTOS] {recusados} recusados automaticamente.", flush=True)
+        except Exception as e:
+            print(f"[AGENDADOR AGENDAMENTOS] Erro: {e}", flush=True)
+
+        time.sleep(2)
 
 if __name__ == '__main__':
     thread_agendador = threading.Thread(target=agendador_notificacoes, daemon=True)
     thread_agendador.start()
+
+    thread_agendamentos = threading.Thread(target=agendador_agendamentos_expirados, daemon=True)
+    thread_agendamentos.start()
 
     print("\n=== ROTAS REGISTRADAS ===")
 

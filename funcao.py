@@ -769,3 +769,59 @@ def formatar_valor_br(valor):
         return f'R$ {float(valor):,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
     except (TypeError, ValueError):
         return 'R$ 0,00'
+
+
+def enviar_email_agendamento_recusado_automaticamente(
+    destinatario,
+    nome_cliente,
+    data_agendamento,
+    horario_agendamento,
+    assunto_agendamento,
+    nome_advogado=None,
+):
+    user = "juriscriptoffice@gmail.com"
+    senha_email = "mufi rewg elal bbaw"
+
+    try:
+        from main import app
+        with app.app_context():
+            html = render_template(
+                "email_agendamento_recusado_automaticamente.html",
+                nome_cliente=nome_cliente or "Cliente",
+                texto_principal=(
+                    f'Seu agendamento para <strong>{data_agendamento}</strong> às '
+                    f'<strong>{horario_agendamento}</strong> não foi confirmado a tempo '
+                    f'e foi <strong>recusado automaticamente</strong>.'
+                ),
+                data_agendamento=data_agendamento,
+                horario_agendamento=horario_agendamento,
+                assunto_agendamento=assunto_agendamento,
+                motivos=[
+                    {
+                        "nome": nome_advogado or "Advogado",
+                        "motivo": (
+                            "O agendamento não foi confirmado até o horário marcado "
+                            "e foi recusado automaticamente pelo sistema."
+                        ),
+                    }
+                ],
+            )
+
+        msg = MIMEText(html, "html", "utf-8")
+        msg["Subject"] = "Agendamento recusado automaticamente - Constituere"
+        msg["From"] = user
+        msg["To"] = destinatario
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(user, senha_email)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"E-mail (recusa automática) enviado para {destinatario}!")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao enviar e-mail (recusa automática) para {destinatario}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False

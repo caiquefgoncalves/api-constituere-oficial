@@ -6,16 +6,26 @@ from funcao import (
     enviar_email_um_advogado_confirmado,
     enviar_email_dois_advogados,
     enviar_email_um_advogado,
-    enviar_email_agendamento_cancelado
+    enviar_email_agendamento_cancelado,
+    enviar_email_agendamento_recusado_automaticamente
 )
 from db import conexao
-from main import app, socketio
+from main import app
 import datetime
 import concurrent.futures
+import threading
 import re
 from io import BytesIO
 import unicodedata
 from fpdf import FPDF
+
+
+_socketio = None
+
+
+def set_socketio_emitter(sio):
+    global _socketio
+    _socketio = sio
 
 
 def converter_data(data_texto):
@@ -186,6 +196,191 @@ def buscar_conflito(cur, id_advogado, data_agendamento, horario_min, duracao_min
             }
 
     return None
+
+
+def processar_agendamentos_expirados():
+    con = conexao()
+    cur = con.cursor()
+    agora = datetime.datetime.now()
+    hoje = agora.date()
+    hora_atual_str = agora.strftime('%H:%M:%S')
+    recusados = 0
+
+    try:
+        cur.execute("""
+            SELECT
+                a.ID_AGENDAMENTOS,
+                a.ID_USUARIOS_ADVOGADO_1,
+                a.ID_USUARIOS_ADVOGADO_2,
+                a.ID_USUARIOS_CLIENTE,
+                a.CLIENTE,
+                a.ASSUNTO,
+                a.DATA,
+                a.HORARIO,
+                a.DURACAO,
+                a.GOOGLE_EVENT_ID,
+                u.EMAIL
+            FROM AGENDAMENTOS a
+            LEFT JOIN USUARIOS u ON u.ID_USUARIOS = a.ID_USUARIOS_CLIENTE
+            WHERE LOWER(REPLACE(COALESCE(a.STATUS, ''), ' ', '_')) = 'a_confirmar'
+              AND (
+                    CAST(a.DATA AS DATE) < ?
+                    OR (
+                        CAST(a.DATA AS DATE) = ?
+                        AND CAST(a.HORARIO AS VARCHAR(8)) <= ?
+                    )
+                  )
+        """, (hoje, hoje, hora_atual_str))
+        expirados = cur.fetchall()
+        print(f"[AGENDAMENTOS EXPIRADOS] Encontrados: {len(expirados)}", flush=True)
+
+        for row in expirados:
+            (
+                id_agendamento,
+                id_advogado_1,
+                id_advogado_2,
+                id_cliente,
+                nome_cliente,
+                assunto,
+                data_agendamento,
+                horario_agendamento,
+                duracao,
+                google_event_id,
+                email_cliente,
+            ) = row
+
+            if hasattr(data_agendamento, 'strftime'):
+                data_formatada = data_agendamento.strftime('%d/%m/%Y')
+            else:
+                data_formatada = str(data_agendamento)
+
+            if isinstance(horario_agendamento, datetime.time):
+                horario_formatado = horario_agendamento.strftime('%H:%M')
+            else:
+                horario_formatado = str(horario_agendamento)[:5]
+
+            motivo = 'Agendamento não confirmado até o horário marcado. Recusado automaticamente pelo sistema.'
+
+            print(f"[AGENDAMENTOS EXPIRADOS] Recusando id={id_agendamento} data={data_formatada} hora={horario_formatado} adv1={id_advogado_1} adv2={id_advogado_2}", flush=True)
+
+            cur.execute("""
+                UPDATE AGENDAMENTOS
+                SET STATUS = 'recusado',
+                    MOTIVO = ?,
+                    RECUSADO_ADVOGADO_1 = 1,
+                    RECUSADO_ADVOGADO_2 = 1
+                WHERE ID_AGENDAMENTOS = ?
+            """, (motivo, id_agendamento))
+
+            nome_advogado = None
+            if id_advogado_1:
+                cur.execute("SELECT NOME FROM USUARIOS WHERE ID_USUARIOS = ?", (id_advogado_1,))
+                r = cur.fetchone()
+                if r:
+                    nome_advogado = r[0]
+
+            ids_notificar = []
+            if id_advogado_1:
+                ids_notificar.append(id_advogado_1)
+            if id_advogado_2:
+                ids_notificar.append(id_advogado_2)
+
+            titulo = 'Agendamento recusado automaticamente'
+            mensagem = (
+                f'O agendamento com {nome_cliente or "Cliente"} para '
+                f'{data_formatada} às {horario_formatado} não foi confirmado '
+                f'até o horário e foi recusado automaticamente.'
+            )
+
+            for id_notificar in ids_notificar:
+                cur.execute("""
+                    INSERT INTO NOTIFICACOES (ID_USUARIOS, TIPO, TITULO, MENSAGEM)
+                    VALUES (?, ?, ?, ?) RETURNING ID_NOTIFICACAO
+                """, (id_notificar, 'AGENDAMENTO_RECUSADO_AUTOMATICO', titulo, mensagem))
+                id_notificacao = cur.fetchone()[0]
+
+                con.commit()
+
+                agora_notif = datetime.datetime.now()
+                if _socketio:
+                    _socketio.emit(
+                        'nova_notificacao',
+                        {
+                            'id': id_notificacao,
+                            'tipo': 'AGENDAMENTO_RECUSADO_AUTOMATICO',
+                            'titulo': titulo,
+                            'mensagem': mensagem,
+                            'lida': False,
+                            'data_criacao': agora_notif.strftime('%d/%m/%Y'),
+                            'hora_criacao': agora_notif.strftime('%H:%M'),
+                            'data_leitura': None,
+                            'id_agendamento': id_agendamento,
+                        },
+                        room=f'usuario_{id_notificar}'
+                    )
+
+            con.commit()
+
+            if google_event_id:
+                try:
+                    from google_calendar import cancelar_evento_google
+
+                    id_organizador = None
+                    cur.execute("""
+                        SELECT CONFIRMADO_ADVOGADO_1, CONFIRMADO_ADVOGADO_2
+                        FROM AGENDAMENTOS WHERE ID_AGENDAMENTOS = ?
+                    """, (id_agendamento,))
+                    r_conf = cur.fetchone()
+                    if r_conf:
+                        if r_conf[0] == 1:
+                            id_organizador = id_advogado_1
+                        elif id_advogado_2 and r_conf[1] == 1:
+                            id_organizador = id_advogado_2
+
+                    if id_organizador:
+                        cancelar_evento_google(
+                            id_usuario=id_organizador,
+                            google_event_id=google_event_id
+                        )
+                        cur.execute("""
+                            UPDATE AGENDAMENTOS
+                            SET GOOGLE_EVENT_ID = NULL
+                            WHERE ID_AGENDAMENTOS = ?
+                        """, (id_agendamento,))
+                        con.commit()
+                except Exception as e:
+                    print(f'Erro ao cancelar evento Google (recusa automática): {e}', flush=True)
+
+            if email_cliente:
+                try:
+                    threading.Thread(
+                        target=enviar_email_agendamento_recusado_automaticamente,
+                        args=(
+                            email_cliente,
+                            nome_cliente,
+                            data_formatada,
+                            horario_formatado,
+                            assunto or 'Consulta',
+                            nome_advogado,
+                        ),
+                        daemon=True,
+                    ).start()
+                    print(f"[EMAIL] Thread de recusa automática disparada para {email_cliente}", flush=True)
+                except Exception as e:
+                    print(f'Erro ao disparar e-mail de recusa automática: {e}', flush=True)
+
+            recusados += 1
+
+        return recusados
+    except Exception as e:
+        con.rollback()
+        print(f'Erro ao processar agendamentos expirados: {e}', flush=True)
+        import traceback
+        traceback.print_exc()
+        return 0
+    finally:
+        cur.close()
+        con.close()
 
 
 @app.route('/agendamentos', methods=['POST'])
@@ -440,10 +635,10 @@ def cadastrar_agendamento():
 
         con.commit()
 
-        if id_notificacao and id_advogado_2:
+        if id_notificacao and id_advogado_2 and _socketio:
             agora = datetime.datetime.now()
 
-            socketio.emit(
+            _socketio.emit(
                 'nova_notificacao',
                 {
                     'id': id_notificacao,
@@ -519,7 +714,6 @@ def cadastrar_agendamento():
 
 @app.route('/agendamentos/solicitar', methods=['POST'])
 def solicitar_agendamento_cliente():
-    """Creates a client's meeting request with an attorney from its own office."""
     token_data = decodificar_token()
     if token_data == False:
         return jsonify({'error': 'Token necessário'}), 401
@@ -644,12 +838,13 @@ def solicitar_agendamento_cliente():
         id_notificacao = cur.fetchone()[0]
         con.commit()
 
-        socketio.emit('nova_notificacao', {
-            'id': id_notificacao, 'tipo': 'NOVO_AGENDAMENTO', 'titulo': titulo,
-            'mensagem': mensagem, 'lida': False, 'data_criacao': data_fmt,
-            'hora_criacao': hora_fmt, 'data_leitura': None,
-            'id_agendamento': id_agendamento,
-        }, room=f'usuario_{id_advogado}')
+        if _socketio:
+            _socketio.emit('nova_notificacao', {
+                'id': id_notificacao, 'tipo': 'NOVO_AGENDAMENTO', 'titulo': titulo,
+                'mensagem': mensagem, 'lida': False, 'data_criacao': data_fmt,
+                'hora_criacao': hora_fmt, 'data_leitura': None,
+                'id_agendamento': id_agendamento,
+            }, room=f'usuario_{id_advogado}')
         return jsonify({'mensagem': 'Solicitação de agendamento enviada ao advogado.', 'id_agendamento': id_agendamento}), 201
     except Exception as e:
         con.rollback()
@@ -1283,8 +1478,6 @@ def editar_agendamento(id_agendamento):
         google_sincronizado = False
         google_erro = None
 
-
-
         try:
             from google_calendar import atualizar_evento_google
             from zoneinfo import ZoneInfo
@@ -1346,13 +1539,10 @@ def editar_agendamento(id_agendamento):
 
                 email_cliente_google = dados_google[12]
 
-
                 if (
                         status_google == 'confirmado'
                         and google_event_id
                 ):
-
-
                     if confirmado_1_google == 1:
                         id_organizador = id_adv_1_google
 
@@ -1366,9 +1556,6 @@ def editar_agendamento(id_agendamento):
                         id_organizador = None
 
                     if id_organizador:
-
-
-
                         if isinstance(
                                 horario_google,
                                 datetime.time
@@ -1420,15 +1607,12 @@ def editar_agendamento(id_agendamento):
                         )
                         )
 
-
-
                         convidados = []
 
                         if email_cliente_google:
                             convidados.append(
                                 email_cliente_google
                             )
-
 
                         id_advogado_convidado = None
 
@@ -1437,7 +1621,6 @@ def editar_agendamento(id_agendamento):
                                 and confirmado_1_google == 1
                                 and confirmado_2_google == 1
                         ):
-
                             if (
                                     id_organizador
                                     == id_adv_1_google
@@ -1471,8 +1654,6 @@ def editar_agendamento(id_agendamento):
                                 convidados.append(
                                     resultado_email_adv[0]
                                 )
-
-
 
                         atualizar_evento_google(
                             id_usuario=id_organizador,
@@ -1509,8 +1690,6 @@ def editar_agendamento(id_agendamento):
 
             import traceback
             traceback.print_exc()
-
-
 
         try:
             eh_um_advogado = not id_advogado_2
@@ -1564,7 +1743,6 @@ def editar_agendamento(id_agendamento):
 
         return jsonify({
             'mensagem': 'Agendamento atualizado com sucesso',
-
             'google_calendar': {
                 'sincronizado': google_sincronizado,
                 'erro': google_erro
@@ -1730,8 +1908,6 @@ def confirmar_agendamento(id_agendamento):
 
         con.commit()
 
-
-
         if novo_status == 'confirmado':
             try:
                 from google_calendar import criar_evento_google
@@ -1774,7 +1950,6 @@ def confirmar_agendamento(id_agendamento):
                         confirmado_2_google = dados_google[9] or 0
                         email_cliente_google = dados_google[11]
 
-
                         if confirmado_1_google == 1:
                             id_organizador = id_adv_1_google
 
@@ -1782,15 +1957,12 @@ def confirmar_agendamento(id_agendamento):
                             id_adv_2_google
                             and confirmado_2_google == 1
                         ):
-
                             id_organizador = id_adv_2_google
 
                         else:
                             id_organizador = None
 
                         if id_organizador:
-
-
                             if isinstance(
                                 horario_google,
                                 datetime.time
@@ -1836,14 +2008,12 @@ def confirmar_agendamento(id_agendamento):
                                 )
                             )
 
-
                             convidados = []
 
                             if email_cliente_google:
                                 convidados.append(
                                     email_cliente_google
                                 )
-
 
                             id_advogado_convidado = None
 
@@ -1884,8 +2054,6 @@ def confirmar_agendamento(id_agendamento):
                                     convidados.append(
                                         resultado_email_adv[0]
                                     )
-
-
 
                             evento_google = criar_evento_google(
                                 id_usuario=id_organizador,
@@ -1936,10 +2104,10 @@ def confirmar_agendamento(id_agendamento):
                 import traceback
                 traceback.print_exc()
 
-        if id_notificacao:
+        if id_notificacao and _socketio:
             agora = datetime.datetime.now()
 
-            socketio.emit(
+            _socketio.emit(
                 'nova_notificacao',
                 {
                     'id': id_notificacao,
@@ -2018,12 +2186,10 @@ def confirmar_agendamento(id_agendamento):
         return jsonify({
             'mensagem': 'Resposta registrada com sucesso',
             'status': novo_status,
-
             'google_calendar': {
                 'sincronizado': google_sincronizado,
                 'erro': google_erro
             },
-
             'respostas': {
                 'respondidos': total_respostas,
                 'necessarios': total_advogados,
@@ -2032,7 +2198,6 @@ def confirmar_agendamento(id_agendamento):
                 'texto': f'{total_respostas}/{total_advogados}'
             }
         }), 200
-
 
     except Exception as e:
         con.rollback()
@@ -2216,8 +2381,6 @@ def cancelar_agendamento(id_agendamento):
         google_erro = None
         google_acao = 'nenhuma'
 
-
-
         try:
             from google_calendar import (
                 cancelar_evento_google,
@@ -2288,12 +2451,8 @@ def cancelar_agendamento(id_agendamento):
                     dados_google[8]
                 )
 
-
                 if google_event_id:
-
-
                     if novo_status == 'cancelado':
-
                         if (
                             id_organizador_google_anterior
                         ):
@@ -2324,13 +2483,10 @@ def cancelar_agendamento(id_agendamento):
                                 f'{google_event_id}'
                             )
 
-
-
                     elif (
                         novo_status == 'confirmado'
                         and total_confirmados == 1
                     ):
-
                         if confirmado_1 == 1:
                             id_advogado_presente = (
                                 id_adv_1_google
@@ -2348,9 +2504,6 @@ def cancelar_agendamento(id_agendamento):
                             id_advogado_presente = None
 
                         if id_advogado_presente:
-
-
-
                             if isinstance(
                                 horario_google,
                                 datetime.time
@@ -2413,14 +2566,11 @@ def cancelar_agendamento(id_agendamento):
                                     email_cliente_google
                                 )
 
-
-
                             if (
                                 id_advogado_presente
                                 ==
                                 id_organizador_google_anterior
                             ):
-
                                 atualizar_evento_google(
                                     id_usuario=(
                                         id_advogado_presente
@@ -2452,10 +2602,7 @@ def cancelar_agendamento(id_agendamento):
                                     f'{google_event_id}'
                                 )
 
-
-
                             else:
-
                                 if (
                                     id_organizador_google_anterior
                                 ):
@@ -2468,7 +2615,6 @@ def cancelar_agendamento(id_agendamento):
                                         )
                                     )
 
-
                                 cur.execute("""
                                     UPDATE AGENDAMENTOS
                                     SET GOOGLE_EVENT_ID = NULL
@@ -2478,7 +2624,6 @@ def cancelar_agendamento(id_agendamento):
                                 ))
 
                                 con.commit()
-
 
                                 novo_evento_google = (
                                     criar_evento_google(
@@ -2544,10 +2689,10 @@ def cancelar_agendamento(id_agendamento):
             import traceback
             traceback.print_exc()
 
-        if id_notificacao:
+        if id_notificacao and _socketio:
             agora = datetime.datetime.now()
 
-            socketio.emit(
+            _socketio.emit(
                 'nova_notificacao',
                 {
                     'id': id_notificacao,
@@ -2683,13 +2828,11 @@ def cancelar_agendamento(id_agendamento):
         return jsonify({
             'mensagem': 'Resposta registrada com sucesso',
             'status': novo_status,
-
             'google_calendar': {
                 'sincronizado': google_sincronizado,
                 'acao': google_acao,
                 'erro': google_erro
             },
-
             'respostas': {
                 'respondidos': total_respostas,
                 'necessarios': total_advogados,
@@ -2867,8 +3010,6 @@ def recusar_agendamento(id_agendamento):
         google_sincronizado = False
         google_erro = None
 
-
-
         if (
                 novo_status == 'confirmado'
                 and total_confirmados == 1
@@ -2903,9 +3044,6 @@ def recusar_agendamento(id_agendamento):
                     id_cliente_google = dados_google[3]
 
                     if not google_event_id:
-
-
-
                         if confirmado_1 == 1:
                             id_organizador = id_advogado_1
 
@@ -2919,9 +3057,6 @@ def recusar_agendamento(id_agendamento):
                             id_organizador = None
 
                         if id_organizador:
-
-
-
                             cur.execute("""
                                 SELECT EMAIL
                                 FROM USUARIOS
@@ -2937,8 +3072,6 @@ def recusar_agendamento(id_agendamento):
                                 if cliente_email
                                 else None
                             )
-
-
 
                             if isinstance(
                                     horario_agendamento,
@@ -2993,15 +3126,12 @@ def recusar_agendamento(id_agendamento):
                             )
                             )
 
-
-
                             convidados = []
 
                             if email_cliente_google:
                                 convidados.append(
                                     email_cliente_google
                                 )
-
 
                             evento_google = criar_evento_google(
                                 id_usuario=id_organizador,
@@ -3053,10 +3183,10 @@ def recusar_agendamento(id_agendamento):
                 import traceback
                 traceback.print_exc()
 
-        if id_notificacao:
+        if id_notificacao and _socketio:
             agora = datetime.datetime.now()
 
-            socketio.emit(
+            _socketio.emit(
                 'nova_notificacao',
                 {
                     'id': id_notificacao,
@@ -3192,12 +3322,10 @@ def recusar_agendamento(id_agendamento):
         return jsonify({
             'mensagem': 'Resposta registrada com sucesso',
             'status': novo_status,
-
             'google_calendar': {
                 'sincronizado': google_sincronizado,
                 'erro': google_erro
             },
-
             'respostas': {
                 'respondidos': total_respostas,
                 'necessarios': total_advogados,
@@ -3216,8 +3344,6 @@ def recusar_agendamento(id_agendamento):
     finally:
         cur.close()
         con.close()
-
-
 
 
 @app.route('/cliente/agendamentos', methods=['GET'])
@@ -3647,27 +3773,28 @@ def agendar_reuniao_cliente():
         con.commit()
 
         agora = datetime.datetime.now()
-        socketio.emit(
-            'nova_notificacao',
-            {
-                'id': id_notif,
-                'tipo': 'NOVO_AGENDAMENTO',
-                'titulo': titulo,
-                'mensagem': msg,
-                'lida': False,
-                'data_criacao': agora.strftime('%d/%m/%Y'),
-                'hora_criacao': agora.strftime('%H:%M'),
-                'data_leitura': None,
-                'id_agendamento': id_agendamento
-            },
-            room=f'usuario_{id_advogado}'
-        )
+        if _socketio:
+            _socketio.emit(
+                'nova_notificacao',
+                {
+                    'id': id_notif,
+                    'tipo': 'NOVO_AGENDAMENTO',
+                    'titulo': titulo,
+                    'mensagem': msg,
+                    'lida': False,
+                    'data_criacao': agora.strftime('%d/%m/%Y'),
+                    'hora_criacao': agora.strftime('%H:%M'),
+                    'data_leitura': None,
+                    'id_agendamento': id_agendamento
+                },
+                room=f'usuario_{id_advogado}'
+            )
 
-        socketio.emit(
-            'atualizar_dados',
-            {'entidade': 'agendamento', 'acao': 'criado', 'id_agendamento': id_agendamento},
-            room=f'usuario_{id_advogado}'
-        )
+            _socketio.emit(
+                'atualizar_dados',
+                {'entidade': 'agendamento', 'acao': 'criado', 'id_agendamento': id_agendamento},
+                room=f'usuario_{id_advogado}'
+            )
 
         try:
             cur.execute("SELECT EMAIL FROM USUARIOS WHERE ID_USUARIOS = ?", (id_cliente,))
@@ -3818,27 +3945,28 @@ def reagendar_reuniao_cliente(id_agendamento):
         con.commit()
 
         agora = datetime.datetime.now()
-        socketio.emit(
-            'nova_notificacao',
-            {
-                'id': id_notif,
-                'tipo': 'AGENDAMENTO_REAGENDADO',
-                'titulo': titulo,
-                'mensagem': msg,
-                'lida': False,
-                'data_criacao': agora.strftime('%d/%m/%Y'),
-                'hora_criacao': agora.strftime('%H:%M'),
-                'data_leitura': None,
-                'id_agendamento': id_agendamento
-            },
-            room=f'usuario_{id_adv_1}'
-        )
+        if _socketio:
+            _socketio.emit(
+                'nova_notificacao',
+                {
+                    'id': id_notif,
+                    'tipo': 'AGENDAMENTO_REAGENDADO',
+                    'titulo': titulo,
+                    'mensagem': msg,
+                    'lida': False,
+                    'data_criacao': agora.strftime('%d/%m/%Y'),
+                    'hora_criacao': agora.strftime('%H:%M'),
+                    'data_leitura': None,
+                    'id_agendamento': id_agendamento
+                },
+                room=f'usuario_{id_adv_1}'
+            )
 
-        socketio.emit(
-            'atualizar_dados',
-            {'entidade': 'agendamento', 'acao': 'reagendado', 'id_agendamento': id_agendamento},
-            room=f'usuario_{id_adv_1}'
-        )
+            _socketio.emit(
+                'atualizar_dados',
+                {'entidade': 'agendamento', 'acao': 'reagendado', 'id_agendamento': id_agendamento},
+                room=f'usuario_{id_adv_1}'
+            )
 
         return jsonify({
             'mensagem': 'Reagendamento solicitado com sucesso',
@@ -3908,27 +4036,28 @@ def cancelar_reuniao_cliente(id_agendamento):
         con.commit()
 
         agora = datetime.datetime.now()
-        socketio.emit(
-            'nova_notificacao',
-            {
-                'id': id_notif,
-                'tipo': 'AGENDAMENTO_CANCELADO',
-                'titulo': titulo,
-                'mensagem': msg,
-                'lida': False,
-                'data_criacao': agora.strftime('%d/%m/%Y'),
-                'hora_criacao': agora.strftime('%H:%M'),
-                'data_leitura': None,
-                'id_agendamento': id_agendamento
-            },
-            room=f'usuario_{id_adv_1}'
-        )
+        if _socketio:
+            _socketio.emit(
+                'nova_notificacao',
+                {
+                    'id': id_notif,
+                    'tipo': 'AGENDAMENTO_CANCELADO',
+                    'titulo': titulo,
+                    'mensagem': msg,
+                    'lida': False,
+                    'data_criacao': agora.strftime('%d/%m/%Y'),
+                    'hora_criacao': agora.strftime('%H:%M'),
+                    'data_leitura': None,
+                    'id_agendamento': id_agendamento
+                },
+                room=f'usuario_{id_adv_1}'
+            )
 
-        socketio.emit(
-            'atualizar_dados',
-            {'entidade': 'agendamento', 'acao': 'cancelado', 'id_agendamento': id_agendamento},
-            room=f'usuario_{id_adv_1}'
-        )
+            _socketio.emit(
+                'atualizar_dados',
+                {'entidade': 'agendamento', 'acao': 'cancelado', 'id_agendamento': id_agendamento},
+                room=f'usuario_{id_adv_1}'
+            )
 
         return jsonify({'mensagem': 'Reunião cancelada com sucesso'}), 200
 
