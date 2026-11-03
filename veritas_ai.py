@@ -273,6 +273,53 @@ SCHEDULE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "criar_lancamento_financeiro",
+            "description": "Propõe cadastrar receita ou despesa manual no financeiro do escritório do qual o advogado é proprietário. Exige tipo (receita/despesa), descrição, valor e data no formato YYYY-MM-DD. O escritório vem do contexto autorizado.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tipo": {"type": "string", "enum": ["receita", "despesa"]},
+                    "descricao": {"type": "string"},
+                    "valor": {"type": "number"},
+                    "data": {"type": "string", "description": "YYYY-MM-DD"},
+                },
+                "required": ["tipo", "descricao", "valor", "data"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "editar_lancamento_financeiro",
+            "description": "Propõe editar um lançamento manual existente do financeiro do escritório do advogado proprietário. Encontre-o em lancamentos_financeiros pelo nome, descrição, tipo, data ou valor; altere somente campos explicitamente pedidos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id_lancamento": {"type": "integer"},
+                    "tipo": {"type": "string", "enum": ["receita", "despesa"]},
+                    "descricao": {"type": "string"},
+                    "valor": {"type": "number"},
+                    "data": {"type": "string", "description": "YYYY-MM-DD"},
+                },
+                "required": ["id_lancamento"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "excluir_lancamento_financeiro",
+            "description": "Propõe excluir logicamente um lançamento manual existente no financeiro do escritório do advogado proprietário. Encontre-o em lancamentos_financeiros por descrição, tipo, data ou valor.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id_lancamento": {"type": "integer"}},
+                "required": ["id_lancamento"],
+            },
+        },
+    },
 ]
 
 
@@ -513,6 +560,9 @@ def _is_pending_workflow_reply(question, history):
         or _question_requests_schedule_mutation(prior_user_messages)
         or _question_requests_client_mutation(prior_user_messages)
         or _question_requests_office_lawyer_addition(prior_user_messages)
+        or _question_requests_office_edit(prior_user_messages)
+        or _question_requests_office_finance_action(prior_user_messages)
+        or _question_requests_office_finance_query(prior_user_messages)
         or _question_requests_lawyer_deactivation(prior_user_messages)
         or _question_requests_lawyer_activation(prior_user_messages)
         or _question_requests_process_creation(prior_user_messages)
@@ -526,6 +576,70 @@ def _is_pending_workflow_reply(question, history):
         "previsao", "previsão", "receita",
     )
     return not _contains_any_word(normalized, unrelated_requests)
+
+
+def _is_office_finance_selection_reply(question, history):
+    """Keeps the original finance request when the user selects an office."""
+    normalized_reply = _normalize_text(question)
+    if not normalized_reply or len(normalized_reply) > 100:
+        return False
+    last_assistant_message = next(
+        (item["content"] for item in reversed(history) if item["role"] == "assistant"),
+        "",
+    )
+    normalized_prompt = _normalize_text(last_assistant_message)
+    if not (
+        _contains_any_word(normalized_prompt, ("financeiro", "financeira"))
+        and _contains_any_word(normalized_prompt, ("qual", "quais", "escolha", "selecione"))
+    ):
+        return False
+    prior_user_messages = "\n".join(
+        item["content"] for item in history if item["role"] == "user"
+    )
+    return (
+        _question_requests_office_finance_action(prior_user_messages)
+        or _question_requests_office_finance_query(prior_user_messages)
+    )
+
+
+def _recent_selected_office_from_finance_history(history):
+    """Finds the user's answer to the most recent office-selection prompt."""
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
+        if item.get("role") != "assistant":
+            continue
+        raw_prompt = item.get("content", "")
+        prompt = _normalize_text(raw_prompt)
+        options = re.findall(r"(?m)^\s*\d+\.\s*(.+?)\s*$", raw_prompt)
+        if not (
+            _contains_any_word(prompt, ("financeiro", "financeira"))
+            and _contains_any_word(prompt, ("qual", "quais", "escolha", "selecione"))
+            and options
+        ):
+            continue
+        for response in history[index + 1:]:
+            if response.get("role") == "user":
+                answer = str(response.get("content") or "").strip()
+                if answer and len(answer) <= 100:
+                    if answer.isdigit() and 1 <= int(answer) <= len(options):
+                        answer = options[int(answer) - 1]
+                    return {"escritorio": answer, "opcoes": options}
+                break
+    return None
+
+
+def _is_office_finance_report_follow_up(question, history):
+    """Recognizes a follow-up about a financial report already shown in chat."""
+    if not _question_requests_office_finance_query(question):
+        return False
+    if not _recent_selected_office_from_finance_history(history):
+        return False
+    last_assistant_message = next(
+        (item["content"] for item in reversed(history) if item["role"] == "assistant"),
+        "",
+    )
+    normalized_last_answer = _normalize_text(last_assistant_message)
+    return "lancamentos do escritorio" in normalized_last_answer
 
 
 _WEEKDAYS = {
@@ -854,7 +968,72 @@ def _question_requests_office_lawyer_addition(question):
 # Detecta pedidos de alteração das informações cadastrais do escritório.
 def _question_requests_office_edit(question):
     normalized = _normalize_text(question)
-    return _contains_any_word(normalized, ("editar", "edite", "alterar", "altere", "atualizar", "atualize")) and "escritorio" in normalized
+    return _contains_any_word(
+        normalized,
+        (
+            "editar", "edite", "alterar", "altere", "atualizar", "atualize",
+            "mudar", "mude", "modificar", "modifique", "trocar", "troque",
+            "corrigir", "corrija", "renomear", "renomeie", "definir", "defina",
+        ),
+    ) and "escritorio" in normalized
+
+
+# Pede a escolha explícita quando o proprietário tem mais de um escritório.
+def _office_management_selection_answer(authorized_context):
+    names = authorized_context.get("dados", {}).get("escritorio_selecao_pendente")
+    if names:
+        options = "\n".join(f"{index}. {name}" for index, name in enumerate(names, start=1))
+        if authorized_context.get("dados", {}).get("financeiro_escritorio_selecao_pendente"):
+            return f"Qual escritorio deseja usar no financeiro?\n{options}"
+        return f"Qual escritório deseja alterar?\n{options}"
+
+    if authorized_context.get("restricoes"):
+        last_restriction = _normalize_text(authorized_context["restricoes"][-1])
+        if "proprietario" in last_restriction and "escritorio" in last_restriction:
+            return "Essa alteração está disponível apenas para o proprietário do escritório."
+    return None
+
+
+# Seleciona o escritório próprio citado; retorna None se a escolha for ambígua.
+def _select_owned_office(question, offices):
+    normalized_question = _normalize_text(question)
+    matches = []
+    for office in offices:
+        names = office.get("nomes", [office["nome"]])
+        name_variants = set()
+        for name in names:
+            normalized_full_name = _normalize_text(name)
+            name_variants.add(normalized_full_name)
+            name_variants.add(re.sub(r"^escritorio\s+", "", normalized_full_name))
+        for normalized_name in name_variants:
+            if not normalized_name:
+                continue
+            for clause in normalized_question.splitlines():
+                if clause.strip() == normalized_name:
+                    matches.append(office)
+                    break
+                for occurrence in re.finditer(re.escape(normalized_name), clause):
+                    office_reference = clause.rfind("escritorio", 0, occurrence.start())
+                    if (
+                        office_reference < 0
+                        and clause.startswith("escritorio ", occurrence.start())
+                    ):
+                        office_reference = occurrence.start()
+                    if office_reference < 0:
+                        continue
+                    target_value = clause.find(" para ", office_reference + 10)
+                    if target_value < 0 or occurrence.start() < target_value:
+                        matches.append(office)
+                        break
+                if office in matches:
+                    break
+            if office in matches:
+                break
+    if len(matches) == 1:
+        return matches[0]
+    if not matches and len(offices) == 1:
+        return offices[0]
+    return None
 
 
 # Detecta pedidos pelo resumo agregado do escritório.
@@ -874,7 +1053,44 @@ def _question_requests_appointment_report(question):
     )
 
 
-# Monta uma proposta segura de download do relatório de agendamentos.
+# Detects create, edit, and delete requests for office finance entries.
+def _question_requests_office_finance_action(question):
+    """Recognizes create, edit, and delete requests for manual office entries."""
+    normalized = _normalize_text(question)
+    mentions_entry = _contains_any_word(
+        normalized,
+        ("financeiro", "financeira", "lancamento", "lancamentos", "receita", "receitas", "despesa", "despesas"),
+    )
+    requests_change = _contains_any_word(
+        normalized,
+        (
+            "cadastrar", "cadastre", "cadastra", "criar", "crie", "cria", "lancar", "lance", "lanca",
+            "registrar", "registre", "registra", "editar", "edite", "edita", "alterar", "altere",
+            "altera", "atualizar", "atualize", "atualiza", "mudar", "mude", "excluir", "exclua",
+            "exclui", "apagar", "apague", "apaga", "remover", "remova", "remove", "deletar", "delete",
+        ),
+    )
+    return mentions_entry and requests_change
+
+
+def _question_requests_office_finance_query(question):
+    """Recognizes requests to inspect office revenue and expense entries."""
+    normalized = _normalize_text(question)
+    mentions_entry = _contains_any_word(
+        normalized,
+        ("financeiro", "financeira", "lancamento", "lancamentos", "receita", "receitas", "despesa", "despesas"),
+    )
+    requests_view = _contains_any_word(
+        normalized,
+        ("consultar", "consulte", "verificar", "verifique", "mostrar", "mostre", "listar", "liste", "exibir", "exiba", "ver", "visualizar"),
+    )
+    owns_phrase = (
+        _contains_any_word(normalized, ("meus", "minhas", "escritorio"))
+        and _contains_any_word(normalized, ("lancamento", "lancamentos", "receita", "despesa"))
+    )
+    return mentions_entry and (requests_view or owns_phrase)
+
+
 def _appointment_report_proposal(question, authorized_context):
     if not _question_requests_appointment_report(question):
         return None, None
@@ -934,6 +1150,188 @@ def _fetch_owned_office(id_lawyer):
 
 
 # Consulta indicadores consolidados do escritório, sem retornar dados individuais.
+# Lista todos os escritórios em que o usuário tem vínculo ativo de proprietário.
+def _fetch_owned_offices(id_lawyer):
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT ae.ID_ESCRITORIOS,
+                   COALESCE(NULLIF(e.NOME_FANTASIA, ''), NULLIF(e.RAZAO_SOCIAL, ''), '--'),
+                   e.NOME_FANTASIA,
+                   e.RAZAO_SOCIAL
+            FROM ADVOGADO_ESCRITORIO ae
+            INNER JOIN ESCRITORIOS e ON e.ID_ESCRITORIOS = ae.ID_ESCRITORIOS
+            WHERE ae.ID_USUARIOS = ?
+              AND ae.STATUS = 'PROPRIETARIO'
+              AND ae.ATIVO = 1
+            ORDER BY e.NOME_FANTASIA, e.RAZAO_SOCIAL
+            """,
+            (id_lawyer,),
+        )
+        return [
+            {
+                "id": row[0],
+                "nome": row[1],
+                "nomes": list(dict.fromkeys(name for name in row[2:4] if name)),
+            }
+            for row in cur.fetchall()
+        ]
+    finally:
+        cur.close()
+        con.close()
+
+
+def _fetch_office_manual_financial_entries(id_office):
+    """Returns active manual entries from one office for safe edit/delete matching."""
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            '''
+            SELECT FIRST 200 ID_LANCAMENTOS, TIPO, DESCRICAO, VALOR,
+                   "DATA", FORMA_PAGAMENTO, STATUS
+            FROM LANCAMENTOS_FINANCEIROS
+            WHERE ID_ESCRITORIO = ? AND ATIVO = 1
+            ORDER BY "DATA" DESC, ID_LANCAMENTOS DESC
+            ''',
+            (id_office,),
+        )
+        return [
+            {
+                "id": row[0],
+                "tipo": str(row[1] or "").lower(),
+                "descricao": row[2] or "",
+                "valor": float(row[3] or 0),
+                "data": _format_date(row[4]),
+                "data_iso": _as_date(row[4]).isoformat() if _as_date(row[4]) else None,
+                "forma_pagamento": row[5] or "",
+                "status": row[6] or "",
+            }
+            for row in cur.fetchall()
+        ]
+    finally:
+        cur.close()
+        con.close()
+
+
+def _fetch_office_financial_ledger(id_office, question):
+    """Returns the office ledger for the requested range, defaulting to this month."""
+    from financeiro import montar_lancamentos, periodo_para_datas
+
+    normalized = _normalize_text(question)
+    requested_type = "todos"
+    asks_revenue = _contains_any_word(normalized, ("receita", "receitas"))
+    asks_expense = _contains_any_word(normalized, ("despesa", "despesas"))
+    if asks_revenue and not asks_expense:
+        requested_type = "receita"
+    elif asks_expense and not asks_revenue:
+        requested_type = "despesa"
+
+    asks_for_all_entries = (
+        _contains_any_word(normalized, ("todos", "todas", "historico", "historico completo", "completo", "completa"))
+        or bool(re.search(r"\b\d+\s+(?:que\s+tem|existem|encontrados?)\b", normalized))
+        or bool(re.search(r"\b(?:ver|mostrar|exibir|listar)\s+(?:os\s+)?\d+\b", normalized))
+    )
+    if asks_for_all_entries:
+        start_date, end_date = None, None
+    else:
+        explicit_dates = _extract_dates_from_question(question)
+        if explicit_dates:
+            start_date = explicit_dates[0]
+            end_date = explicit_dates[-1]
+        elif _contains_any_word(normalized, ("90 dias", "noventa dias")):
+            start_date, end_date = periodo_para_datas("90dias")
+        elif _contains_any_word(normalized, ("30 dias", "trinta dias")):
+            start_date, end_date = periodo_para_datas("30dias")
+        elif _contains_any_word(normalized, ("mes passado", "mes anterior")):
+            start_date, end_date = periodo_para_datas("mesAnterior")
+        else:
+            start_date, end_date = periodo_para_datas("mes")
+
+    con = conexao()
+    cur = con.cursor()
+    try:
+        entries = montar_lancamentos(
+            cur,
+            id_office,
+            start_date,
+            end_date,
+            requested_type,
+        )
+    finally:
+        cur.close()
+        con.close()
+
+    return {
+        "tipo_consulta": requested_type,
+        "data_inicio": start_date.isoformat() if start_date else None,
+        "data_fim": end_date.isoformat() if end_date else None,
+        "quantidade": len(entries),
+        "total_receitas": sum(item["valor"] for item in entries if item["tipo"] == "receita"),
+        "total_despesas": sum(item["valor"] for item in entries if item["tipo"] == "despesa"),
+        "lancamentos": entries,
+    }
+
+
+def _office_finance_query_answer(question, authorized_context):
+    """Summarizes office financial entries loaded for an authorized owner."""
+    ledger = authorized_context.get("dados", {}).get("consulta_financeira_escritorio")
+    if not ledger or not _question_requests_office_finance_query(question):
+        return None
+
+    if ledger["data_inicio"] and ledger["data_fim"]:
+        period_label = (
+            f"de {_format_date(ledger['data_inicio'])} a {_format_date(ledger['data_fim'])}"
+        )
+    else:
+        period_label = "de todo o hist\u00f3rico"
+
+    type_label = {
+        "receita": "receitas",
+        "despesa": "despesas",
+        "todos": "receitas e despesas",
+    }.get(ledger["tipo_consulta"], "lan\u00e7amentos")
+    entries = ledger["lancamentos"]
+    if not entries:
+        return f"N\u00e3o encontrei {type_label} no financeiro do escrit\u00f3rio {period_label}."
+
+    office_name = authorized_context.get("dados", {}).get("escritorio_proprietario_nome")
+    office_label = f"{office_name} \u2014 " if office_name else ""
+    lines = [f"Lan\u00e7amentos do escrit\u00f3rio {office_label}{period_label}:", ""]
+    for entry_type, heading in (("receita", "RECEITAS"), ("despesa", "DESPESAS")):
+        if ledger["tipo_consulta"] not in ("todos", entry_type):
+            continue
+        section_entries = [entry for entry in entries if entry["tipo"] == entry_type]
+        if not section_entries:
+            continue
+        if len(lines) > 2:
+            lines.append("")
+        lines.append(f"{heading} ({len(section_entries)}):")
+        for index, entry in enumerate(section_entries, start=1):
+            if index > 1:
+                lines.append("")
+            date_label = _format_date(entry.get("data"))
+            origin_label = "manual" if entry.get("origem") == "manual" else "pagamento de processo"
+            lines.append(
+                f"{index}. {date_label} \u2014 {entry['descricao']} \u2014 "
+                f"R$ {entry['valor']:.2f}; status {entry['status']}; origem {origin_label}."
+            )
+
+    lines.append("")
+    if ledger["tipo_consulta"] == "todos":
+        lines.append(
+            f"Totais no per\u00edodo: receitas R$ {ledger['total_receitas']:.2f}; "
+            f"despesas R$ {ledger['total_despesas']:.2f}."
+        )
+    elif ledger["tipo_consulta"] == "receita":
+        lines.append(f"Total de receitas no per\u00edodo: R$ {ledger['total_receitas']:.2f}.")
+    else:
+        lines.append(f"Total de despesas no per\u00edodo: R$ {ledger['total_despesas']:.2f}.")
+    return "\n".join(lines)
+
+
 def _fetch_office_general_summary(id_office):
     """Provides aggregate office data only to its owner."""
     con = conexao()
@@ -1145,6 +1543,335 @@ def _agenda_summary_answer(question, authorized_context):
             f"duração {appointment['duracao']}; status {appointment['status']}."
         )
     return "\n".join(lines)
+
+
+# Evita propor um único compromisso quando o pedido inclui mais de um cliente.
+def _multiple_client_appointment_answer(question, authorized_context):
+    normalized = _normalize_text(question)
+    asks_for_multiple_clients = (
+        _contains_any_word(normalized, ("duas", "dois", "ambas", "ambos"))
+        and _contains_any_word(normalized, ("cliente", "clientes"))
+    )
+    if not (
+        asks_for_multiple_clients
+        and _question_mentions_schedule(question)
+        and _question_requests_schedule_mutation(question)
+    ):
+        return None
+
+    clients = authorized_context.get("dados", {}).get("clientes", [])
+    matched_clients = []
+    for client in clients:
+        name_tokens = [
+            token for token in _normalize_text(client.get("nome", "")).split()
+            if len(token) >= 3
+        ]
+        if any(token in normalized.split() for token in name_tokens):
+            matched_clients.append(client)
+
+    if len(matched_clients) < 2:
+        if matched_clients:
+            client = matched_clients[0]
+            document = client.get("documento")
+            detail = f" — CPF/CNPJ: {document}" if document else ""
+            return (
+                f"Encontrei uma cliente correspondente: {client['nome']}{detail}. "
+                "Não consegui identificar a segunda. Informe o nome completo ou CPF/CNPJ dela. "
+                "Cada compromisso aceita uma cliente e precisa de um horário próprio."
+            )
+        return (
+            "Não consegui identificar as duas clientes pelo nome informado. "
+            "Informe os nomes completos ou os CPFs/CNPJs. Cada compromisso aceita uma cliente "
+            "e precisa de um horário próprio."
+        )
+
+    lines = ["Encontrei estas clientes com o nome informado:"]
+    for index, client in enumerate(matched_clients, start=1):
+        document = client.get("documento")
+        suffix = f" — CPF/CNPJ: {document}" if document else ""
+        lines.append(f"{index}. {client['nome']}{suffix}")
+    lines.append(
+        "Cada compromisso aceita uma cliente, e o mesmo advogado não pode atender duas pessoas "
+        "no mesmo horário. Qual delas deve ficar às 10:00? Depois, informe outro horário para a segunda."
+    )
+    return "\n".join(lines)
+
+
+# Prepara uma proposta com dois agendamentos quando o usuário identifica as
+# duas clientes e pede o próximo horário livre para a segunda.
+def _multiple_client_appointment_proposal(question, history, authorized_context):
+    """Builds a confirmed batch proposal for two clients in separate time slots."""
+    current = _normalize_text(question)
+    if not (
+        re.search(r"\b\d{3}[.\s-]?\d{3}[.\s-]?\d{3}[-.\s]?\d{2}\b", question)
+        and _contains_any_word(current, ("outra", "proximo", "seguinte"))
+        and _contains_any_word(current, ("horario", "hora"))
+    ):
+        return None
+
+    user_messages = [item["content"] for item in history if item["role"] == "user"]
+    full_request = "\n".join(user_messages + [question])
+    full_conversation = "\n".join(
+        [item["content"] for item in history] + [question]
+    )
+    normalized_request = _normalize_text(full_request)
+    if not (
+        _question_requests_schedule_mutation(full_request)
+        and _contains_any_word(normalized_request, ("duas", "ambas", "clientes"))
+    ):
+        return None
+
+    clients = authorized_context.get("dados", {}).get("clientes", [])
+    digits_in_current = re.sub(r"\D", "", question)
+    first_client = next(
+        (
+            client for client in clients
+            if re.sub(r"\D", "", client.get("documento", ""))
+            and re.sub(r"\D", "", client.get("documento", "")) in digits_in_current
+        ),
+        None,
+    )
+    if not first_client:
+        return None
+
+    name_tokens = [
+        token for token in _normalize_text(first_client.get("nome", "")).split()
+        if len(token) >= 3
+    ]
+    other_clients = [
+        client for client in clients
+        if client.get("id") != first_client.get("id")
+        and name_tokens
+        and any(token in normalized_request.split() for token in name_tokens)
+    ]
+    if len(other_clients) != 1:
+        return None
+    second_client = other_clients[0]
+
+    creation_message = next(
+        (
+            message for message in user_messages
+            if _question_requests_schedule_mutation(message)
+            and (
+                _contains_any_word(_normalize_text(message), ("amanha", "hoje", "dia", "duracao", "assunto"))
+                or re.search(r"\b\d{1,2}(?::\d{2})?\s*h\b", _normalize_text(message))
+            )
+        ),
+        "",
+    )
+    creation_normalized = _normalize_text(creation_message)
+    time_match = re.search(
+        r"\b(?:as\s*)?(\d{1,2})(?::(\d{2}))?\s*h\b",
+        creation_normalized,
+    )
+    duration_match = re.search(
+        r"\bduracao\s*(?:de\s*)?(\d{1,2})\s*(h|hora|horas|min|minuto|minutos)\b",
+        creation_normalized,
+    )
+    subject_match = re.search(r"\bassunto\s*:?\s*([^\n,;.]+)", creation_message, re.IGNORECASE)
+    date_value = _relative_date_from_question(full_conversation)
+    if not date_value:
+        dates = _extract_dates_from_question(full_conversation)
+        date_value = dates[0] if dates else None
+    if not (time_match and duration_match and subject_match and date_value):
+        return None
+
+    first_hour = int(time_match.group(1))
+    first_minute = int(time_match.group(2) or 0)
+    duration_number = int(duration_match.group(1))
+    duration_unit = duration_match.group(2)
+    duration_minutes = duration_number if duration_unit.startswith("min") else duration_number * 60
+    if duration_minutes <= 0:
+        return None
+    subject = subject_match.group(1).strip()
+    first_start = first_hour * 60 + first_minute
+    candidate_start = first_start + duration_minutes
+
+    existing = authorized_context.get("dados", {}).get("agendamentos", {})
+    if isinstance(existing, dict):
+        existing = existing.get("agendamentos", [])
+    busy_slots = {}
+    for appointment in existing or []:
+        if _normalize_text(appointment.get("status", "")) in {"cancelado", "recusado"}:
+            continue
+        try:
+            appointment_date = appointment.get("data_iso")
+            if not appointment_date:
+                continue
+            start_text = str(appointment.get("horario", ""))
+            hour, minute = map(int, start_text[:5].split(":"))
+            duration_text = str(appointment.get("duracao", ""))
+            if ":" in duration_text:
+                dur_hour, dur_minute = map(int, duration_text.split(":")[:2])
+                busy_duration = dur_hour * 60 + dur_minute
+            else:
+                busy_duration = int(duration_text)
+            busy_slots.setdefault(appointment_date, []).append(
+                (hour * 60 + minute, hour * 60 + minute + busy_duration)
+            )
+        except (TypeError, ValueError):
+            continue
+
+    lawyer_id = authorized_context.get("usuario_logado", {}).get("id")
+    if lawyer_id:
+        connection = conexao()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT DATA, HORARIO, DURACAO
+                FROM AGENDAMENTOS
+                WHERE (ID_USUARIOS_ADVOGADO_1 = ? OR ID_USUARIOS_ADVOGADO_2 = ?)
+                  AND DATA >= ? AND DATA <= ?
+                  AND UPPER(COALESCE(STATUS, '')) NOT IN ('CANCELADO', 'RECUSADO')
+                """,
+                (lawyer_id, lawyer_id, date_value, date_value + datetime.timedelta(days=30)),
+            )
+            for busy_date, busy_time, busy_duration_value in cursor.fetchall():
+                parsed_date = _as_date(busy_date)
+                parsed_time = _format_time(busy_time)
+                parsed_duration = _format_duration(busy_duration_value)
+                try:
+                    hour, minute = map(int, parsed_time[:5].split(":"))
+                    if ":" in parsed_duration:
+                        duration_hour, duration_minute = map(int, parsed_duration.split(":")[:2])
+                        busy_duration = duration_hour * 60 + duration_minute
+                    else:
+                        busy_duration = int(parsed_duration)
+                except (TypeError, ValueError):
+                    continue
+                if parsed_date:
+                    busy_slots.setdefault(parsed_date.isoformat(), []).append(
+                        (hour * 60 + minute, hour * 60 + minute + busy_duration)
+                    )
+        finally:
+            cursor.close()
+            connection.close()
+
+    second_start = None
+    second_date = date_value
+    for day_offset in range(31):
+        if day_offset:
+            second_date = date_value + datetime.timedelta(days=day_offset)
+            candidate_start = 8 * 60
+        while candidate_start + duration_minutes <= 18 * 60:
+            if candidate_start < 8 * 60:
+                candidate_start = 8 * 60
+            if 12 * 60 <= candidate_start < 13 * 60:
+                candidate_start = 13 * 60
+            if candidate_start + duration_minutes > 12 * 60 and candidate_start < 12 * 60:
+                candidate_start = 13 * 60
+                continue
+            conflict = any(
+                candidate_start < busy_end and candidate_start + duration_minutes > busy_start
+                for busy_start, busy_end in busy_slots.get(second_date.isoformat(), [])
+            )
+            if day_offset == 0 and candidate_start < first_start + duration_minutes:
+                conflict = True
+            if not conflict:
+                second_start = candidate_start
+                break
+            candidate_start += 15
+        if second_start is not None:
+            break
+
+    if second_start is None:
+        return None
+
+    first_time = f"{first_hour:02d}:{first_minute:02d}"
+    second_time = f"{second_start // 60:02d}:{second_start % 60:02d}"
+    schedule_requests = [
+        {
+            "id_cliente": first_client["id"],
+            "cliente": first_client["nome"],
+            "assunto": subject,
+            "data": date_value.isoformat(),
+            "horario": first_time,
+            "duracao": str(duration_minutes),
+        },
+        {
+            "id_cliente": second_client["id"],
+            "cliente": second_client["nome"],
+            "assunto": subject,
+            "data": second_date.isoformat(),
+            "horario": second_time,
+            "duracao": str(duration_minutes),
+        },
+    ]
+    description = (
+        "Criar dois agendamentos:\n"
+        f"1. {first_client['nome']} em {date_value.isoformat()} às {first_time}, duração {duration_minutes} min.\n"
+        f"2. {second_client['nome']} em {second_date.isoformat()} às {second_time}, duração {duration_minutes} min."
+    )
+    return {
+        "tipo": "criar_agendamentos_lote",
+        "descricao": description,
+        "endpoint": "/agendamentos/lote",
+        "metodo": "POST",
+        "dados": {"agendamentos": schedule_requests},
+    }
+
+
+# Consulta o cadastro antes de responder se um escritório existe.
+def _office_lookup_answer(question, history):
+    """Answers office existence/name queries from the database, not model context."""
+    recent_user_text = "\n".join(
+        item["content"] for item in history if item["role"] == "user"
+    )[-5000:]
+    current_normalized = _normalize_text(question)
+    recent_normalized = _normalize_text(recent_user_text)
+    asks_identity = bool(re.search(r"\b(?:quem e|o que e|quem foi|o que foi)\b", current_normalized))
+    lookup_words = ("existe", "existem", "tem", "possui", "consultar", "consulte", "buscar", "busque", "encontrar")
+    asks_lookup = _contains_any_word(current_normalized, lookup_words) or asks_identity
+    office_was_mentioned = _contains_any_word(
+        current_normalized + " " + recent_normalized,
+        ("escritorio", "escritorios"),
+    )
+    if not (asks_lookup and (office_was_mentioned or asks_identity)):
+        return None
+
+    query_text = _normalize_text(recent_user_text + "\n" + question)
+    query_tokens = set(re.findall(r"\b[\w]+\b", query_text))
+    con = conexao()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT COALESCE(NULLIF(NOME_FANTASIA, ''), NULLIF(RAZAO_SOCIAL, ''), '--'),
+                   COALESCE(NULLIF(RAZAO_SOCIAL, ''), NULLIF(NOME_FANTASIA, ''), '--')
+            FROM ESCRITORIOS
+            """
+        )
+        matches = []
+        generic_tokens = {"escritorio", "sociedade", "individual", "advocacia", "advogados"}
+        for fantasy, legal_name in cur.fetchall():
+            names = [str(fantasy or "").strip(), str(legal_name or "").strip()]
+            useful_tokens = {
+                token
+                for name in names
+                for token in _normalize_text(name).split()
+                if len(token) >= 4 and token not in generic_tokens
+            }
+            if useful_tokens and any(token in query_tokens for token in useful_tokens):
+                display_name = names[0] if names[0] != "--" else names[1]
+                matches.append(display_name)
+        matches = list(dict.fromkeys(matches))
+    finally:
+        cur.close()
+        con.close()
+
+    if not matches:
+        return "Não encontrei um escritório com esse nome no cadastro consultado."
+    if len(matches) > 1:
+        return "Encontrei mais de um escritório compatível: " + "; ".join(matches) + ". Qual deles você quer consultar?"
+    if asks_identity:
+        return (
+            f'"{matches[0]}" está cadastrado como escritório no Constituere. '
+            "Os dados consultados identificam uma organização; não indicam que seja uma pessoa nem permitem avaliar sua importância pessoal."
+        )
+    if _contains_any_word(current_normalized, ("consultar", "consulte", "buscar", "busque", "encontrar")):
+        return f'Encontrei o escritório "{matches[0]}" no cadastro. O que você gostaria de consultar sobre ele?'
+    return f'Sim, existe um escritório cadastrado como "{matches[0]}".'
 
 
 # Propõe a inclusão de um segundo advogado em um agendamento identificado.
@@ -2520,8 +3247,15 @@ def _build_authorized_context(question, token_data, contextual_question=None):
                 "O PDF de Log está disponível apenas para advogado proprietário do escritório."
             )
 
+    office_finance_requested = (
+        _question_requests_office_finance_action(question)
+        or _question_requests_office_finance_action(contextual_question)
+        or _question_requests_office_finance_query(question)
+        or _question_requests_office_finance_query(contextual_question)
+    )
     office_management_requested = (
-        _question_requests_office_lawyer_addition(question)
+        office_finance_requested
+        or _question_requests_office_lawyer_addition(question)
         or _question_requests_office_lawyer_addition(contextual_question)
         or _question_requests_lawyer_deactivation(question)
         or _question_requests_lawyer_deactivation(contextual_question)
@@ -2531,16 +3265,43 @@ def _build_authorized_context(question, token_data, contextual_question=None):
         or _question_requests_office_edit(contextual_question)
     )
     if office_management_requested:
-        office_id = _fetch_owned_office(user_id) if user_type == 0 else None
-        if office_id:
-            context["dados"]["escritorio_proprietario"] = office_id
-            if (
-                _question_requests_lawyer_deactivation(question)
-                or _question_requests_lawyer_deactivation(contextual_question)
-                or _question_requests_lawyer_activation(question)
-                or _question_requests_lawyer_activation(contextual_question)
-            ):
-                context["dados"]["advogados_escritorio"] = _fetch_office_lawyers(office_id)
+        if user_type == 0:
+            owned_offices = _fetch_owned_offices(user_id)
+            if owned_offices:
+                context["dados"]["escritorios_proprietario"] = owned_offices
+                selected_office = _select_owned_office(contextual_question, owned_offices)
+                if selected_office:
+                    office_id = selected_office["id"]
+                    context["dados"]["escritorio_proprietario"] = office_id
+                    context["dados"]["escritorio_proprietario_nome"] = selected_office["nome"]
+                    if (
+                        _question_requests_lawyer_deactivation(question)
+                        or _question_requests_lawyer_deactivation(contextual_question)
+                        or _question_requests_lawyer_activation(question)
+                        or _question_requests_lawyer_activation(contextual_question)
+                    ):
+                        context["dados"]["advogados_escritorio"] = _fetch_office_lawyers(office_id)
+                    if office_finance_requested:
+                        context["dados"]["lancamentos_financeiros"] = (
+                            _fetch_office_manual_financial_entries(office_id)
+                        )
+                        if (
+                            _question_requests_office_finance_query(question)
+                            or _question_requests_office_finance_query(contextual_question)
+                        ):
+                            context["dados"]["consulta_financeira_escritorio"] = (
+                                _fetch_office_financial_ledger(office_id, contextual_question)
+                            )
+                else:
+                    context["dados"]["escritorio_selecao_pendente"] = [
+                        office["nome"] for office in owned_offices
+                    ]
+                    if office_finance_requested:
+                        context["dados"]["financeiro_escritorio_selecao_pendente"] = True
+            else:
+                context["restricoes"].append(
+                    "Somente o advogado proprietário pode administrar o escritório."
+                )
         else:
             context["restricoes"].append(
                 "Somente o advogado proprietário pode administrar o escritório."
@@ -2870,6 +3631,8 @@ def _question_with_history(question, history):
         or _is_schedule_reason_reply(question, history)
         or _is_client_registration_detail_reply(question, history)
         or _is_pending_workflow_reply(question, history)
+        or _is_office_finance_selection_reply(question, history)
+        or _is_office_finance_report_follow_up(question, history)
         or (
             _question_requests_schedule_mutation(question)
             and _question_uses_schedule_ordinal_reference(question)
@@ -2877,6 +3640,33 @@ def _question_with_history(question, history):
         )
     )
     if is_follow_up:
+        if _question_requests_office_finance_query(question):
+            previous_selection = _recent_selected_office_from_finance_history(history)
+            if previous_selection:
+                current_normalized = _normalize_text(question)
+                explicitly_named_option = any(
+                    _normalize_text(option) in current_normalized
+                    for option in previous_selection["opcoes"]
+                )
+                if not explicitly_named_option:
+                    return f"{previous_selection['escritorio']}\n{question}"
+
+        for index in range(len(recent_messages) - 1, -1, -1):
+            if (
+                _question_requests_office_edit(recent_messages[index])
+                or _question_requests_office_lawyer_addition(recent_messages[index])
+                or _question_requests_lawyer_activation(recent_messages[index])
+                or _question_requests_lawyer_deactivation(recent_messages[index])
+            ):
+                return "\n".join(recent_messages[index:] + [question])
+
+        for index in range(len(recent_messages) - 1, -1, -1):
+            if (
+                _question_requests_office_finance_action(recent_messages[index])
+                or _question_requests_office_finance_query(recent_messages[index])
+            ):
+                return "\n".join(recent_messages[index:] + [question])
+
         for index in range(len(recent_messages) - 1, -1, -1):
             if _question_requests_schedule_mutation(recent_messages[index]):
                 contextual_question = "\n".join(
@@ -3037,6 +3827,104 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
 
     name = tool_call.function.name
 
+    if name in (
+        "criar_lancamento_financeiro",
+        "editar_lancamento_financeiro",
+        "excluir_lancamento_financeiro",
+    ):
+        office_id = authorized_context.get("dados", {}).get("escritorio_proprietario")
+        office_name = authorized_context.get("dados", {}).get("escritorio_proprietario_nome", "")
+        if (
+            authorized_context.get("usuario_logado", {}).get("tipo") != 0
+            or not office_id
+        ):
+            return None
+
+        entries = {
+            item["id"]: item
+            for item in authorized_context.get("dados", {}).get("lancamentos_financeiros", [])
+        }
+        if name == "criar_lancamento_financeiro":
+            entry_type = str(arguments.get("tipo", "")).strip().lower()
+            description = str(arguments.get("descricao", "")).strip()
+            try:
+                amount = float(arguments.get("valor"))
+            except (TypeError, ValueError):
+                return None
+            date_value = _as_date(
+                _date_for_schedule_proposal(arguments.get("data", ""), question)
+            )
+            if (
+                entry_type not in ("receita", "despesa")
+                or not description or len(description) > 254
+                or not (amount > 0 and amount < float("inf") and round(amount, 2) == amount)
+                or not date_value or date_value > datetime.date.today()
+            ):
+                return None
+            data = {
+                "tipo": entry_type,
+                "descricao": description,
+                "valor": amount,
+                "data": date_value.isoformat(),
+            }
+            return {
+                "tipo": "criar_lancamento_financeiro",
+                "descricao": f"Cadastrar {entry_type} de R$ {amount:.2f} ({description}) em {date_value.strftime('%d/%m/%Y')} no financeiro do escritório {office_name}.",
+                "endpoint": f"/escritorio/{office_id}/financeiro/lancamentos",
+                "metodo": "POST",
+                "dados": data,
+            }
+
+        entry = entries.get(arguments.get("id_lancamento"))
+        if not entry:
+            return None
+        endpoint = f"/escritorio/{office_id}/financeiro/lancamentos/{entry['id']}"
+        if name == "excluir_lancamento_financeiro":
+            return {
+                "tipo": "excluir_lancamento_financeiro",
+                "descricao": f"Excluir {entry['tipo']} de R$ {entry['valor']:.2f} ({entry['descricao']}) do financeiro do escritório {office_name}.",
+                "endpoint": endpoint,
+                "metodo": "DELETE",
+                "dados": {},
+            }
+
+        data = {}
+        if "tipo" in arguments:
+            entry_type = str(arguments.get("tipo") or "").strip().lower()
+            if entry_type not in ("receita", "despesa"):
+                return None
+            data["tipo"] = entry_type
+        if "descricao" in arguments:
+            description = str(arguments.get("descricao") or "").strip()
+            if not description or len(description) > 254:
+                return None
+            data["descricao"] = description
+        if "valor" in arguments:
+            try:
+                amount = float(arguments["valor"])
+            except (TypeError, ValueError):
+                return None
+            if not (amount > 0 and amount < float("inf") and round(amount, 2) == amount):
+                return None
+            data["valor"] = amount
+        if "data" in arguments:
+            date_value = _as_date(
+                _date_for_schedule_proposal(arguments.get("data", ""), question)
+            )
+            if not date_value or date_value > datetime.date.today():
+                return None
+            data["data"] = date_value.isoformat()
+        if not data:
+            return None
+        preview = ", ".join(f"{field.replace('_', ' ')}: {value}" for field, value in data.items())
+        return {
+            "tipo": "editar_lancamento_financeiro",
+            "descricao": f"Editar {entry['tipo']} ({entry['descricao']}) no financeiro do escritório {office_name}: {preview}.",
+            "endpoint": endpoint,
+            "metodo": "PUT",
+            "dados": data,
+        }
+
     if name == "gerar_pagamento_pix":
         installment_id = arguments.get("id_parcela")
         installment_type = str(arguments.get("tipo_parcela", "")).strip()
@@ -3110,13 +3998,14 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
 
     if name == "adicionar_advogado_escritorio":
         office_id = authorized_context.get("dados", {}).get("escritorio_proprietario")
+        office_name = authorized_context.get("dados", {}).get("escritorio_proprietario_nome", "")
         email = str(arguments.get("email", "")).strip()
         status = str(arguments.get("status", "")).strip().upper()
         if not office_id or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email) or status not in {"PROPRIETARIO", "PARCEIRO", "ASSOCIADO"}:
             return None
         return {
             "tipo": "adicionar_advogado_escritorio",
-            "descricao": f"Adicionar o advogado {email} ao escritório como {status.lower()}.",
+            "descricao": f"Adicionar o advogado {email} ao escritório {office_name} como {status.lower()}.",
             "endpoint": "/adicionar_advogado_escritorio",
             "metodo": "POST",
             "dados": {"email": email, "status": status, "id_escritorio": office_id},
@@ -3124,6 +4013,7 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
 
     if name == "inativar_advogado_escritorio":
         office_id = authorized_context.get("dados", {}).get("escritorio_proprietario")
+        office_name = authorized_context.get("dados", {}).get("escritorio_proprietario_nome", "")
         lawyers = {
             item["id"]: item
             for item in authorized_context.get("dados", {}).get("advogados_escritorio", [])
@@ -3135,7 +4025,7 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
             return None
         return {
             "tipo": "inativar_advogado_escritorio",
-            "descricao": f"Inativar o vínculo de {lawyer['nome']} com o escritório.",
+            "descricao": f"Inativar o vínculo de {lawyer['nome']} com o escritório {office_name}.",
             "endpoint": f"/advogado/{lawyer_id}/escritorio/{office_id}/inativar",
             "metodo": "PUT",
             "dados": {},
@@ -3143,6 +4033,7 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
 
     if name == "ativar_advogado_escritorio":
         office_id = authorized_context.get("dados", {}).get("escritorio_proprietario")
+        office_name = authorized_context.get("dados", {}).get("escritorio_proprietario_nome", "")
         lawyers = {item["id"]: item for item in authorized_context.get("dados", {}).get("advogados_escritorio", [])}
         lawyer_id = arguments.get("id_advogado")
         lawyer = lawyers.get(lawyer_id)
@@ -3150,7 +4041,7 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
             return None
         return {
             "tipo": "ativar_advogado_escritorio",
-            "descricao": f"Ativar o vínculo de {lawyer['nome']} com o escritório.",
+            "descricao": f"Ativar o vínculo de {lawyer['nome']} com o escritório {office_name}.",
             "endpoint": f"/advogado/{lawyer_id}/escritorio/{office_id}/ativar",
             "metodo": "PUT",
             "dados": {},
@@ -3158,6 +4049,7 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
 
     if name == "editar_informacao_escritorio":
         office_id = authorized_context.get("dados", {}).get("escritorio_proprietario")
+        office_name = authorized_context.get("dados", {}).get("escritorio_proprietario_nome", "")
         allowed_fields = {
             "razao_social", "nome_fantasia", "registro_oab", "uf_oab", "telefone",
             "email", "cep", "logradouro", "numero", "complemento", "bairro", "cidade", "estado",
@@ -3168,7 +4060,7 @@ def _proposal_from_tool_call(tool_call, authorized_context, question):
             return None
         return {
             "tipo": "editar_informacao_escritorio",
-            "descricao": f"Alterar {field.replace('_', ' ')} do escritório para {value}.",
+            "descricao": f"Alterar {field.replace('_', ' ')} do escritório {office_name} para {value}.",
             "endpoint": f"/escritorio/{office_id}/informacoes",
             "metodo": "PUT",
             "dados": {"campo": field, "valor": value},
@@ -3521,6 +4413,8 @@ Quando o CONTEXTO AUTORIZADO tiver resumo_pagamentos_clientes, voce pode listar 
 Quando o CONTEXTO AUTORIZADO tiver resumo_pagamentos_proprios, o usuario e cliente e voce pode informar somente os proprios valores em aberto, atrasados, pagos e o proximo vencimento. Nunca mostre dados financeiros de outro cliente. Informe que a Constituere aceita pagamentos por Pix, crédito, débito e boleto, mas que pela conversa você só pode ajudar a gerar o pagamento por Pix.
 Quando parcelas_pagaveis estiver disponível, o cliente pode pedir para pagar uma parcela por Pix. Use gerar_pagamento_pix apenas para uma parcela presente nesse contexto e explique que a confirmação gera o código Pix para pagamento no aplicativo bancário. Para crédito, débito ou boleto, informe que essas formas são aceitas pela Constituere, mas não ofereça nem execute nenhuma ação de pagamento por elas nesta conversa.
 Quando houver resumo_geral_escritorio, apresente ao proprietário somente os totais agregados do escritório, sem expor dados pessoais ou financeiros individuais.
+Quando consulta_financeira_escritorio estiver disponivel, consulte os lancamentos do escritorio e responda com os dados e totais desse contexto. Sem periodo informado, considere o mes atual; respeite o filtro de receitas, despesas ou ambos.
+O advogado proprietario pode cadastrar, editar e excluir lancamentos manuais de receita e despesa no financeiro do escritorio proprio, somente quando o escritorio estiver identificado em escritorio_proprietario e os lancamentos editaveis estiverem em lancamentos_financeiros. Para cadastrar, exija tipo, descricao, valor e data; pergunte apenas os campos que faltarem. Para editar ou excluir, identifique um unico lancamento manual por descricao, tipo, data ou valor; se houver mais de um candidato, apresente as opcoes sem IDs e pergunte qual deles. Use criar_lancamento_financeiro, editar_lancamento_financeiro ou excluir_lancamento_financeiro. Nunca edite ou exclua receitas geradas automaticamente por pagamentos de processos. Toda alteracao deve ser apresentada como proposta para confirmacao, sem afirmar que ja foi executada.
 Responda em portugues brasileiro, com linguagem clara e objetiva.
 Use texto simples e linhas numeradas em listas. Você pode usar **texto** para dar ênfase; os asteriscos duplos serão exibidos em negrito. Não use parênteses vazios. Ao listar clientes, escreva o nome seguido de “— CPF/CNPJ: ” e o documento formatado, se disponível.
 Antes de responder, avalie silenciosamente o sentido completo do pedido, sem depender de listas fixas de palavras. Considere dentro do escopo qualquer pergunta, explicação ou orientação jurídica, mesmo que use termos técnicos, expressões em latim ou nomes de medidas judiciais, além das operações autorizadas do Constituere. Considere fora do escopo pedidos casuais, entretenimento, conteúdo pessoal, programação ou instruções técnicas. Não exponha esse raciocínio interno: responda diretamente à pergunta jurídica ou recuse brevemente o pedido fora do escopo.
@@ -3666,14 +4560,47 @@ def perguntar_veritas():
         model_started = time.perf_counter()
         # Respostas e propostas locais têm precedência: reduzem latência e
         # preservam regras que não podem depender da interpretação do modelo.
-        answer = _debtors_answer(question, authorized_context)
+        office_management_intent = any(
+            detector(text)
+            for text in (question, context_question)
+            for detector in (
+                _question_requests_office_edit,
+                _question_requests_office_finance_action,
+                _question_requests_office_finance_query,
+                _question_requests_office_lawyer_addition,
+                _question_requests_lawyer_activation,
+                _question_requests_lawyer_deactivation,
+            )
+        )
+        answer = (
+            _office_management_selection_answer(authorized_context)
+            if office_management_intent
+            else _office_lookup_answer(question, history)
+        )
+        if answer is None:
+            answer = _office_finance_query_answer(context_question, authorized_context)
+        proposal = None
+        if answer is None:
+            proposal = _multiple_client_appointment_proposal(
+                question,
+                history,
+                authorized_context,
+            )
+            if proposal:
+                answer = proposal["descricao"] + " Confirme a ação para enviar os dois agendamentos."
+        if answer is None:
+            answer = _multiple_client_appointment_answer(
+                context_question,
+                authorized_context,
+            )
+        if answer is None:
+            answer = _debtors_answer(question, authorized_context)
         if answer is None:
             answer = _agenda_summary_answer(question, authorized_context)
         if answer is None:
             answer = _ordinal_schedule_action_message(question, authorized_context)
         if answer is None:
             answer = _missing_schedule_reason_message(question, authorized_context)
-        proposal = None
         if answer is None:
             proposal = _pending_schedule_action_proposal(
                 question,
@@ -3692,7 +4619,12 @@ def perguntar_veritas():
                 authorized_context,
             )
         if proposal:
-            answer = proposal["descricao"] + " Confirme a ação para enviar."
+            confirmation_text = (
+                " Confirme a ação para enviar os dois agendamentos."
+                if proposal.get("tipo") == "criar_agendamentos_lote"
+                else " Confirme a ação para enviar."
+            )
+            answer = proposal["descricao"] + confirmation_text
         elif answer is None:
             answer, proposal = _log_pdf_proposal(question, authorized_context)
             if answer is None:
