@@ -873,6 +873,18 @@ def listar_agendamentos():
     filtro_status = (request.args.get('status') or '').strip()
     limite_recebido = request.args.get('limite')
 
+    data_inicio = converter_data(data_inicio_recebida) if data_inicio_recebida else None
+    data_fim = converter_data(data_fim_recebida) if data_fim_recebida else None
+
+    if data_inicio_recebida and not data_inicio:
+        return jsonify({'error': 'Data inicial inválida.'}), 400
+
+    if data_fim_recebida and not data_fim:
+        return jsonify({'error': 'Data final inválida.'}), 400
+
+    if data_inicio and data_fim and data_fim < data_inicio:
+        return jsonify({'error': 'A data inicial não pode ser maior que a data final.'}), 400
+
     con = conexao()
     cur = con.cursor()
 
@@ -906,17 +918,13 @@ def listar_agendamentos():
 
         parametros = [id_advogado, id_advogado]
 
-        if data_inicio_recebida:
-            data_inicio = converter_data(data_inicio_recebida)
-            if data_inicio:
-                sql += " AND a.DATA >= ?"
-                parametros.append(data_inicio)
+        if data_inicio:
+            sql += " AND a.DATA >= ?"
+            parametros.append(data_inicio)
 
-        if data_fim_recebida:
-            data_fim = converter_data(data_fim_recebida)
-            if data_fim:
-                sql += " AND a.DATA <= ?"
-                parametros.append(data_fim)
+        if data_fim:
+            sql += " AND a.DATA <= ?"
+            parametros.append(data_fim)
 
         if filtro_status and filtro_status.lower() != 'todos':
             sql += " AND LOWER(a.STATUS) = ?"

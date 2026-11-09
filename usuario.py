@@ -3792,8 +3792,10 @@ def ativar_cliente(id_cliente):
 
 
 @app.route('/editar_escritorio', methods=['PUT'])
-def editar_escritorio():
+@app.route('/escritorio/<int:id_escritorio>/editar', methods=['PUT'])
+def editar_escritorio(id_escritorio=None):
     token_data = decodificar_token()
+
     if token_data == False:
         return jsonify({'error': 'Token necessário'}), 401
 
@@ -3802,6 +3804,17 @@ def editar_escritorio():
 
     if tipo_usuario != 0:
         return jsonify({'error': 'Apenas advogados podem editar escritório'}), 403
+
+    if id_escritorio is None:
+        id_escritorio = request.form.get('id_escritorio')
+
+        if not id_escritorio:
+            return jsonify({'error': 'ID do escritório é obrigatório'}), 400
+
+        try:
+            id_escritorio = int(id_escritorio)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'ID do escritório inválido'}), 400
 
     razao_social = request.form.get('razao_social')
     nome_fantasia = request.form.get('nome_fantasia')
@@ -3820,65 +3833,116 @@ def editar_escritorio():
 
     if not razao_social or not razao_social.strip():
         return jsonify({"error": "Razão social é obrigatória"}), 400
+
     if not nome_fantasia or not nome_fantasia.strip():
         return jsonify({"error": "Nome fantasia é obrigatório"}), 400
+
     if not registro_oab or not registro_oab.strip():
         return jsonify({"error": "Registro OAB é obrigatório"}), 400
+
     if not uf_oab or not uf_oab.strip():
         return jsonify({"error": "UF da OAB é obrigatória"}), 400
+
     if not telefone or not telefone.strip():
         return jsonify({"error": "Telefone é obrigatório"}), 400
+
     if not email or not email.strip():
         return jsonify({"error": "E-mail é obrigatório"}), 400
+
     if not cnpj or not cnpj.strip():
         return jsonify({"error": "CNPJ é obrigatório"}), 400
+
     if not cep or not cep.strip():
         return jsonify({"error": "CEP é obrigatório"}), 400
+
     if not logradouro or not logradouro.strip():
         return jsonify({"error": "Logradouro é obrigatório"}), 400
+
     if not bairro or not bairro.strip():
         return jsonify({"error": "Bairro é obrigatório"}), 400
+
     if not cidade or not cidade.strip():
         return jsonify({"error": "Cidade é obrigatória"}), 400
+
     if not estado or not estado.strip():
         return jsonify({"error": "Estado é obrigatório"}), 400
 
     cnpj_numeros = ''.join(filter(str.isdigit, cnpj))
+
     if len(cnpj_numeros) != 14:
         return jsonify({"error": "CNPJ inválido"}), 400
 
     telefone_numeros = ''.join(filter(str.isdigit, telefone))
+
     if len(telefone_numeros) < 10 or len(telefone_numeros) > 11:
         return jsonify({"error": "Telefone inválido"}), 400
 
     cep_numeros = ''.join(filter(str.isdigit, cep))
+
     if len(cep_numeros) != 8:
         return jsonify({"error": "CEP inválido"}), 400
 
-    con = conexao()
-    cur = con.cursor()
+    con = None
+    cur = None
 
     try:
+        con = conexao()
+        cur = con.cursor()
+
+        cur.execute("""
+            SELECT STATUS
+            FROM ADVOGADO_ESCRITORIO
+            WHERE ID_USUARIOS = ?
+              AND ID_ESCRITORIOS = ?
+              AND ATIVO = 1
+        """, (
+            id_usuario,
+            id_escritorio
+        ))
+
+        vinculo = cur.fetchone()
+
+        if not vinculo:
+            return jsonify({
+                'error': 'Você não possui acesso ativo a este escritório'
+            }), 403
+
+        status_vinculo = vinculo[0]
+
+        if not status_vinculo or status_vinculo.upper() != 'PROPRIETARIO':
+            return jsonify({
+                'error': 'Apenas o proprietário pode editar o escritório'
+            }), 403
+
         cur.execute("""
             SELECT ID_ESCRITORIOS
-            FROM ADVOGADO_ESCRITORIO
-            WHERE ID_USUARIOS = ? AND STATUS = 'PROPRIETARIO' AND ATIVO = 1
-        """, (id_usuario,))
-        escritorio = cur.fetchone()
-        if not escritorio:
-            return jsonify({'error': 'Nenhum escritório encontrado para edição'}), 404
+            FROM ESCRITORIOS
+            WHERE CNPJ = ?
+              AND ID_ESCRITORIOS != ?
+        """, (
+            cnpj_numeros,
+            id_escritorio
+        ))
 
-        id_escritorio = escritorio[0]
-
-        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE CNPJ = ? AND ID_ESCRITORIOS != ?",
-                    (cnpj_numeros, id_escritorio))
         if cur.fetchone():
-            return jsonify({"error": "CNPJ já cadastrado em outro escritório"}), 400
+            return jsonify({
+                "error": "CNPJ já cadastrado em outro escritório"
+            }), 400
 
-        cur.execute("SELECT ID_ESCRITORIOS FROM ESCRITORIOS WHERE EMAIL = ? AND ID_ESCRITORIOS != ?",
-                    (email, id_escritorio))
+        cur.execute("""
+            SELECT ID_ESCRITORIOS
+            FROM ESCRITORIOS
+            WHERE EMAIL = ?
+              AND ID_ESCRITORIOS != ?
+        """, (
+            email.strip(),
+            id_escritorio
+        ))
+
         if cur.fetchone():
-            return jsonify({"error": "E-mail já cadastrado em outro escritório"}), 400
+            return jsonify({
+                "error": "E-mail já cadastrado em outro escritório"
+            }), 400
 
         cur.execute("""
             UPDATE ESCRITORIOS
@@ -3918,24 +3982,46 @@ def editar_escritorio():
         con.commit()
 
         foto_perfil = request.files.get('foto_perfil')
+
         if foto_perfil:
             try:
                 nome_imagem = f'escritorio_{id_escritorio}.jpeg'
-                caminho = os.path.join(app.config['UPLOAD_FOLDER'], 'Escritorios')
+
+                caminho = os.path.join(
+                    app.config['UPLOAD_FOLDER'],
+                    'Escritorios'
+                )
+
                 os.makedirs(caminho, exist_ok=True)
-                foto_perfil.save(os.path.join(caminho, nome_imagem))
+
+                foto_perfil.save(
+                    os.path.join(caminho, nome_imagem)
+                )
+
             except Exception as e:
                 print(f"Erro ao salvar imagem: {e}")
 
-        return jsonify({'message': 'Escritório atualizado com sucesso!'}), 200
+        return jsonify({
+            'message': 'Escritório atualizado com sucesso!',
+            'id_escritorio': id_escritorio
+        }), 200
 
     except Exception as e:
-        con.rollback()
+        if con:
+            con.rollback()
+
         print(f"Erro ao editar escritório: {e}")
-        return jsonify({'error': f'Erro interno: {e}'}), 500
+
+        return jsonify({
+            'error': f'Erro interno: {e}'
+        }), 500
+
     finally:
-        cur.close()
-        con.close()
+        if cur:
+            cur.close()
+
+        if con:
+            con.close()
 
 
 @app.route('/meu_escritorio', methods=['GET'])
